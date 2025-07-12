@@ -1,3 +1,14 @@
+# -*- coding: utf-8 -*-
+"""
+This file implements the forward and backward pass of a chunked delta rule attention mechanism,
+optimized with Triton kernels for GPU acceleration. It includes functions for forward propagation,
+backward gradient computation, and integration with PyTorch's autograd system.
+
+该文件实现了分块 Delta Rule 注意力机制的前向与反向传播，
+使用 Triton 内核进行 GPU 加速优化。包括前向传播、梯度反向传播函数，
+并集成了 PyTorch 的自动求导系统。
+
+"""
 import warnings
 from typing import Optional
 
@@ -43,6 +54,27 @@ def chunk_dplr_fwd(
     output_final_state: bool = True,
     chunk_size: int = 16,
 ):
+    """
+    Forward pass of chunked delta rule attention.
+
+    分块 Delta Rule 注意力机制的前向传播。
+
+    Args:
+        q (torch.Tensor): Queries tensor [B, T, H, K]
+        k (torch.Tensor): Keys tensor [B, T, H, K]
+        v (torch.Tensor): Values tensor [B, T, H, V]
+        a (torch.Tensor): Activations tensor [B, T, H, K]
+        b (torch.Tensor): Betas tensor [B, T, H, K]
+        gk (torch.Tensor): Log decay tensor [B, T, H, K]
+        scale (float): Scale factor for attention scores
+        initial_state (Optional[torch.Tensor]): Initial state for recurrent processing
+        output_final_state (bool): Whether to return final state
+        chunk_size (int): Chunk size for processing
+
+    Returns:
+        o (torch.Tensor): Output tensor [B, T, H, V]
+        final_state (Optional[torch.Tensor]): Final state if requested
+    """
     T = q.shape[1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
     gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT)
@@ -100,6 +132,33 @@ def chunk_dplr_bwd(
     dht,
     BT: int = 16,
 ):
+    """
+    Backward pass of chunked delta rule attention.
+
+    分块 Delta Rule 注意力机制的反向传播。
+
+    Args:
+        q (torch.Tensor): Queries tensor [B, T, H, K]
+        k (torch.Tensor): Keys tensor [B, T, H, K]
+        v (torch.Tensor): Values tensor [B, T, H, V]
+        a (torch.Tensor): Activations tensor [B, T, H, K]
+        b (torch.Tensor): Betas tensor [B, T, H, K]
+        gk (torch.Tensor): Log decay tensor [B, T, H, K]
+        initial_state (torch.Tensor): Initial state for recurrent processing
+        scale (float): Scale factor for attention scores
+        do (torch.Tensor): Gradient of outputs
+        dht (torch.Tensor): Gradient of final hidden state
+        BT (int): Chunk size for processing
+
+    Returns:
+        dq (torch.Tensor): Gradient of queries
+        dk (torch.Tensor): Gradient of keys
+        dv (torch.Tensor): Gradient of values
+        da (torch.Tensor): Gradient of activations
+        db (torch.Tensor): Gradient of betas
+        dgk (torch.Tensor): Gradient of log decays
+        dh0 (torch.Tensor): Gradient of initial state
+    """
     # ******* start recomputing everything, otherwise i believe the gpu memory will be exhausted *******
     gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT)
     A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_dplr_fwd_intra(
@@ -279,6 +338,10 @@ def chunk_dplr_delta_rule(
     cu_seqlens: Optional[torch.LongTensor] = None,
 ):
     r"""
+    Main interface function for chunked delta rule attention.
+
+    分块 Delta Rule 注意力机制的主要接口函数。
+
     Args:
         q (torch.Tensor):
             queries of shape `[B, T, H, K]`
@@ -361,35 +424,9 @@ def chunk_rwkv7(
     output_final_state: bool = True,
 ):
     """
-    Args:
-        r (torch.Tensor):
-            r of shape `[B, H, T, K]` .
-        k (torch.Tensor):
-            k of shape `[B, H, T, K]` .
-        v (torch.Tensor):
-            v of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
-        a (torch.Tensor):
-            a of shape `[B, H, T, K]` .
-        b (torch.Tensor):
-            b of shape `[B, H, T, K]` .
-        w (torch.Tensor):
-            decay of shape `[B, H, T, K]` , kernel
-            will apply log_w = -torch.exp(w)
-        log_w (torch.Tensor):
-            log decay of shape `[B, H, T, K]` .
-        scale (float):
-            scale of the attention.
-        initial_state (Optional[torch.Tensor]):
-            Initial state of shape `[N, H, K, V]` for `N` input sequences.
-            For equal-length input sequences, `N` equals the batch size `B`.
-            Default: `None`.
-        output_final_state (Optional[bool]):
-            Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
-        cu_seqlens (torch.LongTensor):
-            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
-            consistent with the FlashAttention API.
-        head_first (bool):
-            whether to use head first. Recommended to be False to avoid extra transposes.
+    Interface function for RWKV-7 attention.
+
+    RWKV-7 注意力机制的接口函数。
     """
 
     if w is not None:

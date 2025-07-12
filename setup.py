@@ -9,8 +9,8 @@ setup(
     license="Apache 2.0",  # 指定许可证类型
     long_description=open("README.md").read(),  # 从 README.md 文件中读取长描述
     long_description_content_type="text/markdown",  # 指定长描述的格式
-    url="https://github.com/your-org/rwkv_ops",  # 项目主页
-    keywords="rwkv attention cuda triton pytorch jax",  # 关键词
+    url="https://github.com/pass-lin/rwkv_ops",  # 项目主页
+    keywords="rwkv implement for multi backend",  # 关键词
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",
