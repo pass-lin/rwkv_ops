@@ -9,7 +9,8 @@
 > 注意：本库依赖 `keras`。
 
 ---
-
+## 安装方法
+pip install rwkv_ops
 ## 环境变量
 
 | 变量名 | 含义 | 取值 | 默认值 | 优先级 |
@@ -88,9 +89,10 @@ if padding_mask is not None:
 
 ### rwkv7op的实现状态
 
-| 框架       | cuda | triton | native |N卡 |A卡 |
-|------------|------|--------|--------|--------|--------|
-| PyTorch    | ✅    | ✅      | ✅      | ✅      | ✅    |
-| JAX        | ❌    | ✅      | ✅      | ✅    | ❌    |
-| TensorFlow | ❌    | ❌      | ✅      | ✅    | ❌    |
-| NumPy      | ❌    | ❌      | ✅      | ✅    | ❌    |
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ✅   | ✅     | ✅     |
+| JAX         | ❌   | ✅     | ✅     | 
+| TensorFlow  | ❌   | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     | 

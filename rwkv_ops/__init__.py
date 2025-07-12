@@ -12,11 +12,12 @@ elif BACKEND is not None:
 else:
     import torch
     import keras
+
     BACKEND = "torch"
     os.environ["KERAS_BACKEND"] = BACKEND
     keras.config.set_backend("torch")
 assert KERNEL_TYPE in ["triton", "cuda", "native"]
-assert BACKEND in ["torch", "jax","numpy","tensorflow"]
+assert BACKEND in ["torch", "jax", "numpy", "tensorflow"]
 from .rwkv7_kernel import get_generalized_delta_rule
 
 generalized_delta_rule, RWKV7_USE_KERNEL = get_generalized_delta_rule(

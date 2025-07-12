@@ -60,7 +60,7 @@ def prepare_wy_repr_fwd(
         if BT == 64
         else prepare_wy_repr_fwd_kernel_chunk32
     )
-    
+
     A_ab_inv = torch.empty_like(A_ab)
     fwd_fn[(NT, B * H)](
         A_ab=A_ab,

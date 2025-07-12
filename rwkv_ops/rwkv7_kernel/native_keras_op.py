@@ -1,6 +1,7 @@
 import keras
 from keras import ops
 
+
 def transpose_head(x, head_first):
     """
     对输入张量进行转置操作。
@@ -17,6 +18,7 @@ def transpose_head(x, head_first):
         return ops.transpose(x, (0, 2, 1, 3))
     else:
         return x
+
 
 def generalized_delta_rule(
     r,

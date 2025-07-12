@@ -39,7 +39,7 @@ from .get_torch_devices_info import (
 def cast(x, dtype):
     """
     Cast tensor x to specified dtype if not already in that format.
-    
+
     如果张量 x 不是目标数据类型，则将其转换为目标类型。
     """
     if x is None or x.dtype == dtype:
@@ -99,7 +99,7 @@ def chunk_dplr_fwd(
 
     # Compute WY representation
     w, u, _ = prepare_wy_repr_fwd(ag=ag, A_ab=A_ab, A_ak=A_ak, v=v, chunk_size=BT)
-    
+
     del A_ab, A_ak
 
     h, v_new, final_state = chunk_dplr_fwd_h(
@@ -505,6 +505,7 @@ def generalized_delta_rule(
         )
     else:
         from .native_keras_op import generalized_delta_rule
+
         out, state = generalized_delta_rule(
             r=r,
             k=k,

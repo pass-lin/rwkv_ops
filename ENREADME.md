@@ -90,9 +90,9 @@ if padding_mask is not None:
 
 ### Implementation Status of rwkv7op
 
-| Framework   | cuda | triton | native | NVIDIA | AMD |
-|-------------|------|--------|--------|--------|-----|
-| PyTorch     | ✅   | ✅     | ✅     | ✅     | ✅  |
-| JAX         | ❌   | ✅     | ✅     | ✅     | ❌  |
-| TensorFlow  | ❌   | ❌     | ✅     | ✅     | ❌  |
-| NumPy       | ❌   | ❌     | ✅     | ✅     | ❌  |
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ✅   | ✅     | ✅     |
+| JAX         | ❌   | ✅     | ✅     | 
+| TensorFlow  | ❌   | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     | 

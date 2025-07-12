@@ -22,7 +22,7 @@ def run_test(backend: str, kernel_type: str):
     b = ops.array(np.random.randn(B, T, H, C), dtype="bfloat16")
 
     try:
-        output, state = rwkv7_op(r, w, k, v, a, b,head_first=False)
+        output, state = rwkv7_op(r, w, k, v, a, b, head_first=False)
         print("Output shape:", output.shape)
         if kernel_type == "cuda":
             assert output.shape == (B, T, H * C), (
@@ -47,7 +47,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--backend",
         type=str,
-        choices=["torch", "jax", "numpy", "tensorflow","openvino"],
+        choices=["torch", "jax", "numpy", "tensorflow", "openvino"],
         required=True,
     )
     parser.add_argument(
