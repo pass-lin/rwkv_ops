@@ -5,6 +5,8 @@ import functools
 import triton
 import jax
 import jax.numpy as jnp
+from enum import Enum
+import contextlib
 
 
 @lru_cache(maxsize=None)
@@ -81,9 +83,6 @@ def is_triton_shared_mem_enough(
 
 
 device_capacity = is_triton_shared_mem_enough()
-
-from enum import Enum
-import contextlib
 
 
 def _cpu_device_warning():

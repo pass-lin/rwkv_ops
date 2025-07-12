@@ -104,7 +104,7 @@ def chunk_dplr_bwd_o(
         BK=BK,
         BV=BV,
     )
-    return dq, dk, dw, db, dgk_last
+    return (dq, dk, dw, db, dgk_last)
 
 
 def chunk_dplr_bwd_dAu(

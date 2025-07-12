@@ -1,3 +1,4 @@
+__version__ = "0.1.1"
 import os
 
 KERNEL_TYPE = os.environ.get("KERNEL_TYPE", "triton")

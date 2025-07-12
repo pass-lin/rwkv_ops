@@ -223,7 +223,6 @@ def chunk_dplr_bwd(
 
     dv = chunk_dplr_bwd_dv(A_qk=A_qk, kg=kg, do=do, dh=dh, chunk_size=BT)
     del A_qk
-
     dqg, dkg, dw, dbg, dgk_last = chunk_dplr_bwd_o(
         k=kg,
         b=bg,
@@ -239,7 +238,6 @@ def chunk_dplr_bwd(
         scale=scale,
     )
     del v_new
-
     dA_ab, dA_ak, dv, dag = chunk_dplr_bwd_wy(
         A_ab_inv=A_ab_inv,
         A_ak=A_ak,

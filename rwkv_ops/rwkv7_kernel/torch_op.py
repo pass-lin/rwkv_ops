@@ -1,25 +1,14 @@
-# -*- coding: utf-8 -*-
-"""
-This file implements the forward and backward pass of a chunked delta rule attention mechanism,
-optimized with Triton kernels for GPU acceleration. It includes functions for forward propagation,
-backward gradient computation, and integration with PyTorch's autograd system.
-
-该文件实现了分块 Delta Rule 注意力机制的前向与反向传播，
-使用 Triton 内核进行 GPU 加速优化。包括前向传播、梯度反向传播函数，
-并集成了 PyTorch 的自动求导系统。
-"""
-
 import warnings
 from typing import Optional
 
 import torch
 import triton
 
-# 导入内核实现模块 / Import kernel implementation modules
 from .torch_kernel.chunk_A_bwd import chunk_dplr_bwd_dqk_intra
 from .torch_kernel.chunk_A_fwd import chunk_dplr_fwd_intra
 from .torch_kernel.chunk_h_bwd import chunk_dplr_bwd_dhu
 from .torch_kernel.chunk_h_fwd import chunk_dplr_fwd_h
+
 from .torch_kernel.chunk_o_bwd import (
     chunk_dplr_bwd_dAu,
     chunk_dplr_bwd_dv,
@@ -37,11 +26,6 @@ from .get_torch_devices_info import (
 
 
 def cast(x, dtype):
-    """
-    Cast tensor x to specified dtype if not already in that format.
-
-    如果张量 x 不是目标数据类型，则将其转换为目标类型。
-    """
     if x is None or x.dtype == dtype:
         return x
     return x.to(dtype)
@@ -59,27 +43,6 @@ def chunk_dplr_fwd(
     output_final_state: bool = True,
     chunk_size: int = 16,
 ):
-    """
-    Forward pass of chunked delta rule attention.
-
-    分块 Delta Rule 注意力机制的前向传播。
-
-    Args:
-        q (torch.Tensor): Queries tensor [B, T, H, K]
-        k (torch.Tensor): Keys tensor [B, T, H, K]
-        v (torch.Tensor): Values tensor [B, T, H, V]
-        a (torch.Tensor): Activations tensor [B, T, H, K]
-        b (torch.Tensor): Betas tensor [B, T, H, K]
-        gk (torch.Tensor): Log decay tensor [B, T, H, K]
-        scale (float): Scale factor for attention scores
-        initial_state (Optional[torch.Tensor]): Initial state for recurrent processing
-        output_final_state (bool): Whether to return final state
-        chunk_size (int): Chunk size for processing
-
-    Returns:
-        o (torch.Tensor): Output tensor [B, T, H, V]
-        final_state (Optional[torch.Tensor]): Final state if requested
-    """
     T = q.shape[1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
     gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT)
@@ -97,11 +60,11 @@ def chunk_dplr_fwd(
 
     del ge
 
-    # Compute WY representation
+    # A_ab, A_ak, gi, ge torch.float32
+    # A_qk, A_qb, qg, kg, ag, bg, dtype=q.dtype, eg: bf16
     w, u, _ = prepare_wy_repr_fwd(ag=ag, A_ab=A_ab, A_ak=A_ak, v=v, chunk_size=BT)
 
     del A_ab, A_ak
-
     h, v_new, final_state = chunk_dplr_fwd_h(
         kg=kg,
         bg=bg,
@@ -137,33 +100,7 @@ def chunk_dplr_bwd(
     dht,
     BT: int = 16,
 ):
-    """
-    Backward pass of chunked delta rule attention.
-
-    分块 Delta Rule 注意力机制的反向传播。
-
-    Args:
-        q (torch.Tensor): Queries tensor [B, T, H, K]
-        k (torch.Tensor): Keys tensor [B, T, H, K]
-        v (torch.Tensor): Values tensor [B, T, H, V]
-        a (torch.Tensor): Activations tensor [B, T, H, K]
-        b (torch.Tensor): Betas tensor [B, T, H, K]
-        gk (torch.Tensor): Log decay tensor [B, T, H, K]
-        initial_state (torch.Tensor): Initial state for recurrent processing
-        scale (float): Scale factor for attention scores
-        do (torch.Tensor): Gradient of outputs
-        dht (torch.Tensor): Gradient of final hidden state
-        BT (int): Chunk size for processing
-
-    Returns:
-        dq (torch.Tensor): Gradient of queries
-        dk (torch.Tensor): Gradient of keys
-        dv (torch.Tensor): Gradient of values
-        da (torch.Tensor): Gradient of activations
-        db (torch.Tensor): Gradient of betas
-        dgk (torch.Tensor): Gradient of log decays
-        dh0 (torch.Tensor): Gradient of initial state
-    """
+    # ******* start recomputing everything, otherwise i believe the gpu memory will be exhausted *******
     gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT)
     A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_dplr_fwd_intra(
         q=q,
@@ -183,6 +120,9 @@ def chunk_dplr_bwd(
         kg=kg, bg=bg, v=v, w=w, u=u, gk=gi, initial_state=initial_state, chunk_size=BT
     )
     del u
+    # ******* end of recomputation *******
+    # A_ak, A_ab_inv, gi, ge torch.float32
+    # A_qk, A_qb, qg, kg, ag, bg, v_new dtype=q.dtype, eg: bf16
 
     dv_new_intra, dA_qk, dA_qb = chunk_dplr_bwd_dAu(
         v=v, v_new=v_new, do=do, A_qb=A_qb, scale=scale, chunk_size=BT
@@ -211,7 +151,7 @@ def chunk_dplr_bwd(
         do=do,
         h=h,
         dh=dh,
-        dv=dv,
+        dv=dv_new,
         w=w,
         gk=gi,
         chunk_size=BT,
@@ -282,11 +222,6 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         output_final_state: bool = True,
         cu_seqlens: Optional[torch.LongTensor] = None,
     ):
-        """
-        Forward function with autograd support.
-
-        支持自动求导的前向函数。
-        """
         chunk_size = 16
         o, final_state = chunk_dplr_fwd(
             q=q,
@@ -310,11 +245,6 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(ctx, do: torch.Tensor, dht: torch.Tensor):
-        """
-        Backward function with autograd support.
-
-        支持自动求导的反向函数。
-        """
         q, k, v, a, b, gk, initial_state = ctx.saved_tensors
         BT = ctx.chunk_size
         cu_seqlens = ctx.cu_seqlens
@@ -349,10 +279,6 @@ def chunk_dplr_delta_rule(
     cu_seqlens: Optional[torch.LongTensor] = None,
 ):
     r"""
-    Main interface function for chunked delta rule attention.
-
-    分块 Delta Rule 注意力机制的主要接口函数。
-
     Args:
         q (torch.Tensor):
             queries of shape `[B, T, H, K]`
@@ -435,10 +361,37 @@ def chunk_rwkv7(
     output_final_state: bool = True,
 ):
     """
-    Interface function for RWKV-7 attention.
-
-    RWKV-7 注意力机制的接口函数。
+    Args:
+        r (torch.Tensor):
+            r of shape `[B, H, T, K]` .
+        k (torch.Tensor):
+            k of shape `[B, H, T, K]` .
+        v (torch.Tensor):
+            v of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+        a (torch.Tensor):
+            a of shape `[B, H, T, K]` .
+        b (torch.Tensor):
+            b of shape `[B, H, T, K]` .
+        w (torch.Tensor):
+            decay of shape `[B, H, T, K]` , kernel
+            will apply log_w = -torch.exp(w)
+        log_w (torch.Tensor):
+            log decay of shape `[B, H, T, K]` .
+        scale (float):
+            scale of the attention.
+        initial_state (Optional[torch.Tensor]):
+            Initial state of shape `[N, H, K, V]` for `N` input sequences.
+            For equal-length input sequences, `N` equals the batch size `B`.
+            Default: `None`.
+        output_final_state (Optional[bool]):
+            Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
+        head_first (bool):
+            whether to use head first. Recommended to be False to avoid extra transposes.
     """
+
     if w is not None:
         log_w = -torch.exp(w)
     else:
@@ -458,11 +411,6 @@ def chunk_rwkv7(
 
 
 def transpose_head(x, head_first):
-    """
-    Transpose between head-first and time-first formats.
-
-    在 head-first 和 time-first 格式之间转置。
-    """
     if head_first:
         x = torch.permute(x, dims=(0, 2, 1, 3))
     out = cast(x, torch.bfloat16).contiguous()
@@ -480,11 +428,6 @@ def generalized_delta_rule(
     output_final_state: bool = True,
     head_first: bool = False,
 ):
-    """
-    Generalized delta rule attention interface.
-
-    泛化 Delta Rule 注意力机制接口。
-    """
     dtype = r.dtype
     r = transpose_head(r, head_first)
     k = transpose_head(k, head_first)
@@ -492,30 +435,16 @@ def generalized_delta_rule(
     a = transpose_head(a, head_first)
     b = transpose_head(b, head_first)
     w = transpose_head(w, head_first)
-    if w.device.type == "cuda":
-        out, state = chunk_rwkv7(
-            r=r,
-            k=k,
-            v=v,
-            a=a,
-            b=b,
-            w=w,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-        )
-    else:
-        from .native_keras_op import generalized_delta_rule
-
-        out, state = generalized_delta_rule(
-            r=r,
-            k=k,
-            v=v,
-            a=a,
-            b=b,
-            w=w,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-        )
+    out, state = chunk_rwkv7(
+        r=r,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        w=w,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+    )
     out = transpose_head(out, head_first)
     if output_final_state:
         return out, cast(state, dtype)

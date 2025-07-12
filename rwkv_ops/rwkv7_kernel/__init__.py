@@ -1,5 +1,6 @@
 import keras
 from distutils.util import strtobool
+import os
 from keras import ops
 
 
@@ -19,11 +20,11 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
             from .torch_op import generalized_delta_rule
 
             USE_KERNEL = True
+
         elif KERNEL_TYPE.lower() == "cuda":
             CHUNK_LEN = 16
             USE_KERNEL = True
             from torch.utils.cpp_extension import load
-            import os
 
             flags = [
                 "-res-usage",
@@ -137,11 +138,17 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
         from jax.lib import xla_bridge
         import jax
         import os
+        import logging
 
+        logging.basicConfig(level=logging.ERROR)
+        os.environ["TRITON_LOG_LEVEL"] = "ERROR"  # 只显示错误级别的日志
+        os.environ["TRITON_DISABLE_AUTOTUNE"] = "1"  # 禁用自动调优日志
+        os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # 禁用自动调优日志
         if (
             xla_bridge.get_backend().platform == "gpu"
             and KERNEL_TYPE.lower() == "triton"
         ):
+            os.environ["JAX_LOG_COMPUTATION"] = "0"
             from .jax_op import generalized_delta_rule
 
             USE_KERNEL = True

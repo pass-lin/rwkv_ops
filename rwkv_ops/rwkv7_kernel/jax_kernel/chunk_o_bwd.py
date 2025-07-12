@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025,Qingwen Lin
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Tuple
 
@@ -7,7 +7,7 @@ import jax_triton as jt
 import jax
 import triton
 
-from ..get_torch_devices_info import check_shared_mem
+from ..get_jax_devices_info import check_shared_mem
 from ..triton_kernel.chunk_o_bwd import *
 
 
@@ -104,7 +104,7 @@ def chunk_dplr_bwd_o(
         out_shape=out_shapes,
         grid=grid,
     )
-    return dq, dk, dw, db, dgk_last
+    return (dq, dk, dw, db, dgk_last)
 
 
 def chunk_dplr_bwd_dAu(
