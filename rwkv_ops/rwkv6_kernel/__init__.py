@@ -11,6 +11,7 @@ def get_rwkv6_kernel(KERNEL_TYPE="native"):
     if KERNEL_TYPE == "cuda":
         if keras.config.backend() == "jax":
             import jax
+
             if version.parse(jax.__version__) < version.parse("0.6.0"):
                 from .jax_rwkv_kernel import RWKVKernelOperator as CudaOperator
 

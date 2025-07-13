@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="rwkv_ops",
-    version="0.1.1",
+    version="0.2",
     packages=find_packages(),
     install_requires=["keras"],  # 添加依赖项
     license="Apache 2.0",  # 指定许可证类型
