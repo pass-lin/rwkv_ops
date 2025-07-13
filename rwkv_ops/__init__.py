@@ -20,8 +20,10 @@ else:
 assert KERNEL_TYPE in ["triton", "cuda", "native"]
 assert BACKEND in ["torch", "jax", "numpy", "tensorflow"]
 from .rwkv7_kernel import get_generalized_delta_rule
+from .rwkv6_kernel import get_rwkv6_kernel
 
 generalized_delta_rule, RWKV7_USE_KERNEL = get_generalized_delta_rule(
     KERNEL_TYPE=KERNEL_TYPE
 )
 rwkv7_op = generalized_delta_rule
+RWKV6_OP = get_rwkv6_kernel(KERNEL_TYPE=KERNEL_TYPE)

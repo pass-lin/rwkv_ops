@@ -25,6 +25,7 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
             CHUNK_LEN = 16
             USE_KERNEL = True
             from torch.utils.cpp_extension import load
+            import os
 
             flags = [
                 "-res-usage",
@@ -40,16 +41,11 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
 
             # 获取当前文件的目录路径
             current_dir_path = os.path.dirname(current_file_path)
-
-            # 获取上一级目录的路径
-            parent_dir_path = os.path.abspath(
-                os.path.join(current_dir_path, os.path.pardir)
-            )
             load(
                 name="wind_backstepping",
                 sources=[
-                    os.path.join(parent_dir_path, "cuda_kernel/wkv7_cuda.cu"),
-                    os.path.join(parent_dir_path, "cuda_kernel/wkv7_op.cpp"),
+                    os.path.join(current_dir_path, "cuda_kernel/wkv7_cuda.cu"),
+                    os.path.join(current_dir_path, "cuda_kernel/wkv7_op.cpp"),
                 ],
                 is_python_module=False,
                 verbose=True,

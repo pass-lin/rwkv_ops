@@ -4,7 +4,7 @@ import numpy as np
 
 
 def run_test(backend: str, kernel_type: str):
-    print(f"\nTesting with KERAS_BACKEND={backend}, KERNEL_TYPE={kernel_type}")
+    print(f"\nTesting with RWKV7 KERAS_BACKEND={backend}, KERNEL_TYPE={kernel_type}")
 
     # 设置环境变量
     os.environ["KERAS_BACKEND"] = backend
