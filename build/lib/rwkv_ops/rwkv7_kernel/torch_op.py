@@ -473,30 +473,16 @@ def generalized_delta_rule(
     a = transpose_head(a, head_first)
     b = transpose_head(b, head_first)
     w = transpose_head(w, head_first)
-    if w.device.type == "cuda":
-        out, state = chunk_rwkv7(
-            r=r,
-            k=k,
-            v=v,
-            a=a,
-            b=b,
-            w=w,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-        )
-    else:
-        from ops.native_keras_op import generalized_delta_rule
-
-        out, state = generalized_delta_rule(
-            r=r,
-            k=k,
-            v=v,
-            a=a,
-            b=b,
-            w=w,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-        )
+    out, state = chunk_rwkv7(
+        r=r,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        w=w,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+    )
     out = transpose_head(out, head_first)
     if output_final_state:
         return out, cast(state, dtype)
