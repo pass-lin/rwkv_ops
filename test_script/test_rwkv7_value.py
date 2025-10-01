@@ -2,7 +2,7 @@ import os
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["KERAS_BACKEND"] = "jax"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 os.environ["TRITON_PRINT_AUTOTUNING"] = "-1"
 os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 os.environ["JAX_LOG_COMPILE"] = "False"
@@ -207,7 +207,8 @@ print(
 )
 
 
-mask = ops.concatenate([ops.ones([B, T]), ops.zeros([B, T])], axis=1)
+
+mask = ops.concatenate([ops.zeros([B, T]), ops.ones([B, T])], axis=1)
 mask = ops.cast(mask, jax_chunkout.dtype)[:, :, None, None]
 
 
@@ -216,7 +217,7 @@ def padding_input(x):
 
 
 w = padding_input(ops.convert_to_tensor(gk, jax_inputs[2].dtype))
-w += (1 - mask) * -1e9
+w = ops.where(mask, w, -1e9)
 jax_pad_chunkout, jax_pad_state = generalized_delta_rule(
     r=padding_input(jax_inputs[0]) * mask,
     k=padding_input(jax_inputs[1]) * mask,
@@ -226,9 +227,31 @@ jax_pad_chunkout, jax_pad_state = generalized_delta_rule(
     w=w,
 )
 
-print("padding 后state的输出完全一致:%s" % str(ops.sum(jax_pad_state - jax_state) == 0))
+print("left padding 后state的输出完全一致:%s" % str(ops.sum(jax_pad_state - jax_state) == 0))
 
+initial_state = (jax_state/3+0.2)@(jax_state*2+0.1)
+jax_chunkout, jax_state = generalized_delta_rule(
+    r=jax_inputs[0],
+    k=jax_inputs[1],
+    v=jax_inputs[2],
+    a=ops.convert_to_tensor(a, jax_inputs[2].dtype),
+    b=ops.convert_to_tensor(b, jax_inputs[2].dtype),
+    w=ops.convert_to_tensor(gk, jax_inputs[2].dtype),
+    initial_state=initial_state,
+)
 
+jax_pad_chunkout, jax_pad_state = generalized_delta_rule(
+    r=padding_input(jax_inputs[0]) * mask,
+    k=padding_input(jax_inputs[1]) * mask,
+    v=padding_input(jax_inputs[2]) * mask,
+    a=padding_input(ops.convert_to_tensor(a, jax_inputs[2].dtype)) * mask,
+    b=padding_input(ops.convert_to_tensor(b, jax_inputs[2].dtype)) * mask,
+    w=w,
+    initial_state=initial_state,
+)
+
+print("inital state不得为0时left padding 后state的输出完全一致:%s" % str(ops.sum(jax_pad_state - jax_state) == 0))
+raise(1)
 # 定义 loss 函数
 def loss_fn(output):
     return output.sum()
