@@ -215,8 +215,17 @@ mask = ops.cast(mask, jax_chunkout.dtype)[:, :, None, None]
 def padding_input(x):
     return ops.concatenate([x, x], axis=1)
 
+jax_chunkout, jax_state = generalized_delta_rule(
+    r=jax_inputs[0],
+    k=jax_inputs[1],
+    v=jax_inputs[2],
+    a=ops.convert_to_tensor(a, jax_inputs[2].dtype),
+    b=ops.convert_to_tensor(b, jax_inputs[2].dtype),
+    w=jax_inputs[3],
+    initial_state=None,
+)
 
-w = padding_input(ops.convert_to_tensor(gk, jax_inputs[2].dtype))
+w = padding_input(ops.convert_to_tensor(jax_inputs[3], jax_inputs[2].dtype))
 w = ops.where(mask, w, -1e9)
 jax_pad_chunkout, jax_pad_state = generalized_delta_rule(
     r=padding_input(jax_inputs[0]) * mask,
@@ -236,7 +245,7 @@ jax_chunkout, jax_state = generalized_delta_rule(
     v=jax_inputs[2],
     a=ops.convert_to_tensor(a, jax_inputs[2].dtype),
     b=ops.convert_to_tensor(b, jax_inputs[2].dtype),
-    w=ops.convert_to_tensor(gk, jax_inputs[2].dtype),
+    w=ops.convert_to_tensor(jax_inputs[3], jax_inputs[2].dtype),
     initial_state=initial_state,
 )
 

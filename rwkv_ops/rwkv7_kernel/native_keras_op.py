@@ -62,8 +62,9 @@ def generalized_delta_rule(
         if ops.shape(state)[0] == 1:
             state = ops.broadcast_to(state, (B, H, N, N))
     else:
-        state = ops.zeros((B, H, N, N), dtype="float32")
-    out = ops.zeros((B, T, H, N), dtype=r.dtype)
+        state = ops.zeros((B, H, N, N))
+    state = ops.cast(state, DTYPE)
+    out = ops.zeros((B, T, H, N), dtype=DTYPE)
 
     def step(t, inputs):
         """
