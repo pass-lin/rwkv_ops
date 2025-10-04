@@ -17,10 +17,10 @@ __global__ void forward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, 
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
     float state[C] =  {0};
     __shared__ float q[C], k[C], w[C], a[C], b[C];
-    int dht_base =( (bb*H + hh)*C + i)*C;
+    int h0_base =( (bb*H + hh)*C + i)*C;
 #pragma unroll
         for (int j = 0; j < C; j++) {
-            state[j] = h0_[dht_base + j];
+            state[j] = h0_[h0_base + j];
         }
     for (int t = 0; t < T; t++) {
         int ind = bb*T*H*C + t*H*C + hh * C + i;
