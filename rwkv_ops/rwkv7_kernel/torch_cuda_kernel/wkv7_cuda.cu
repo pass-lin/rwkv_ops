@@ -12,15 +12,16 @@ __device__ inline bf to_bf(const float & u) {
 }
 typedef bf * __restrict__ F_;
 
-__global__ void forward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_, bf* y_, float* s_, float* sa_) {
+__global__ void forward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_, bf* y_, float* s_, float* sa_, float* h0_) {
     constexpr int C = _C_;
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
-    float state[C] =  {
-        0
-    }
-    ;
+    float state[C] =  {0};
     __shared__ float q[C], k[C], w[C], a[C], b[C];
-
+    int dht_base =( (bb*H + hh)*C + i)*C;
+#pragma unroll
+        for (int j = 0; j < C; j++) {
+            state[j] = h0_[dht_base + j];
+        }
     for (int t = 0; t < T; t++) {
         int ind = bb*T*H*C + t*H*C + hh * C + i;
         __syncthreads();
@@ -143,8 +144,8 @@ bf* dw_, bf* dq_, bf* dk_, bf* dv_, bf* da_, bf* db_) {
     }
 }
 
-void cuda_forward(int B, int T, int H, bf*w, bf*q, bf*k, bf*v, bf*z, bf*a, bf*y, float*s, float*sa) {
-    forward_kernel<<<dim3(H,B), dim3(_C_)>>>(T,H,w,q,k,v,z,a,y,s,sa);
+void cuda_forward(int B, int T, int H, bf*w, bf*q, bf*k, bf*v, bf*z, bf*a, bf*y, float*s, float*sa, float* h0) {
+    forward_kernel<<<dim3(H,B), dim3(_C_)>>>(T,H,w,q,k,v,z,a,y,s,sa,h0);
 }
 
 void cuda_backward(int B, int T, int H,

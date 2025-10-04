@@ -26,7 +26,7 @@ r = torch_inputs[0]  # receptance
 k = torch_inputs[1]
 v = torch_inputs[2]
 w = -ops.softplus(w)-0.5
-
+h0 = torch.from_numpy(np.random.randn(B, H, K, K)).float().cuda()
 # ------------------------------------------------------------------
 # 2. CUDA 版本前向 + 反向
 # ------------------------------------------------------------------
@@ -38,7 +38,7 @@ for t in [r, k, v, a, b, w]:
 
 cuda_out, cuda_state = rwkv7_op(
     r=r, k=k, v=v, a=a, b=b, w=w,
-    initial_state=None, output_final_state=True
+    initial_state=h0, output_final_state=True
 )
 
 
@@ -57,14 +57,10 @@ b_n = b.detach().clone().requires_grad_(True)
 w_n = w.detach().clone().requires_grad_(True)
 
 native_out, native_state = generalized_delta_rule(
-    r=r_n, k=k_n, v=v_n, a=a_n, b=b_n, w=w_n
+    r=r_n, k=k_n, v=v_n, a=a_n, b=b_n, w=w_n,initial_state=h0
 )
 
-loss_native = (native_out.mean(1).float()@native_state.mean(1)).mean()**2
-loss_native.backward()
 
-loss_cuda = (cuda_out.mean(1).float()@cuda_state.mean(1)).mean()**2
-loss_cuda.backward()
 
 # ------------------------------------------------------------------
 # 4. 前向结果比较
@@ -80,7 +76,12 @@ np.testing.assert_allclose(
     atol=1e-5, rtol=1e-5
 )
 print("✅ 前向输出一致")
+raise(1)
+loss_native = (native_out.mean(1).float()@native_state.mean(1)).mean()**2
+loss_native.backward()
 
+loss_cuda = (cuda_out.mean(1).float()@cuda_state.mean(1)).mean()**2
+loss_cuda.backward()
 # ------------------------------------------------------------------
 # 5. 梯度比较
 # -----------------------------------w -------------------------------
