@@ -53,7 +53,7 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
 
             class WindBackstepping(torch.autograd.Function):
                 @staticmethod
-                def forward(ctx, w, q, k, v, z, b,h0):
+                def forward(ctx, w, q, k, v, z, b, h0):
                     B, T, H, N = w.shape
                     DTYPE = q.dtype
                     q = ops.cast(q, "bfloat16")
@@ -73,8 +73,8 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                         B, H, T // CHUNK_LEN, N, N, dtype=torch.float32, device=w.device
                     )
                     sa = torch.empty(B, T, H, N, dtype=torch.float32, device=w.device)
-                    torch.ops.wind_backstepping.forward(w, q, k, v, z, b, y, s, sa,h0)
-                    ctx.save_for_backward(w, q, k, v, z, b, s, sa,h0)
+                    torch.ops.wind_backstepping.forward(w, q, k, v, z, b, y, s, sa, h0)
+                    ctx.save_for_backward(w, q, k, v, z, b, s, sa)
 
                     return ops.cast(y, DTYPE), ops.transpose(s[:, :, -1], [0, 1, 3, 2])
 
@@ -84,18 +84,18 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                     dy = ops.cast(dy, torch.bfloat16)
                     dy = dy.contiguous()
 
-                    w, q, k, v, z, b, s, sa,h0 = ctx.saved_tensors
+                    w, q, k, v, z, b, s, sa = ctx.saved_tensors
                     dht = ops.cast(dht, "float32")
                     dht = dht.contiguous()
                     assert all(i.dtype == torch.bfloat16 for i in [dy])
                     assert all(i.is_contiguous() for i in [dy, dht])
-
+                    dh0 = torch.empty_like(dht)
                     dw, dq, dk, dv, dz, db = [
                         torch.empty_like(x) for x in [w, q, k, v, z, b]
                     ]
 
                     torch.ops.wind_backstepping.backward(
-                        w, q, k, v, z, b, dy, s, sa,dht,  dw, dq, dk, dv, dz, db
+                        w, q, k, v, z, b, dy, s, sa, dht, dh0, dw, dq, dk, dv, dz, db
                     )
                     return (
                         ops.cast(dw, DTYPE),
@@ -104,9 +104,10 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                         ops.cast(dv, DTYPE),
                         ops.cast(dz, DTYPE),
                         ops.cast(db, DTYPE),
+                        dh0,
                     )
 
-            def RUN_CUDA_RWKV7g(q, w, k, v, a, b,h0):
+            def RUN_CUDA_RWKV7g(q, w, k, v, a, b, h0):
                 B, T, H, C = q.shape
                 q = q.contiguous()
                 w = w.contiguous()
@@ -114,7 +115,7 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                 v = v.contiguous()
                 a = a.contiguous()
                 b = b.contiguous()
-                out, state = WindBackstepping.apply(w, q, k, v, a, b,h0)
+                out, state = WindBackstepping.apply(w, q, k, v, a, b, h0)
                 return out, state
 
             def generalized_delta_rule(
@@ -135,12 +136,12 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                 a = transpose_head(a, head_first)
                 b = transpose_head(b, head_first)
                 w = transpose_head(w, head_first)
-                B,T,H,N = w.shape
+                B, T, H, N = w.shape
                 if initial_state is None:
-                    initial_state = ops.zeros((B,H,N,N), "float32")
+                    initial_state = ops.zeros((B, H, N, N), "float32")
                 else:
                     initial_state = ops.cast(initial_state, "float32")
-                return RUN_CUDA_RWKV7g(r, w, k, v, a, b,initial_state)
+                return RUN_CUDA_RWKV7g(r, w, k, v, a, b, initial_state)
         else:
             from .native_keras_op import generalized_delta_rule
 

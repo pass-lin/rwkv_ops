@@ -21,18 +21,23 @@ class RWKVKernelOperator:
         u = ops.reshape(u, [1, H, self.head_size, 1])
 
         if init_state is not None:
-            assert len(init_state.shape) in [3, 4], (
-                "init_state的形状必须为(state_kinds,num_heads,head_size,head_size)"
-            )
+            assert len(init_state.shape) in [
+                3,
+                4,
+            ], "init_state的形状必须为(state_kinds,num_heads,head_size,head_size)"
             if len(init_state.shape) == 3:
-                assert init_state.shape == (H, self.head_size, self.head_size), (
-                    "state_kinds的形状必须为(BatchSize,num_heads,head_size,head_size)"
-                )
+                assert init_state.shape == (
+                    H,
+                    self.head_size,
+                    self.head_size,
+                ), "state_kinds的形状必须为(BatchSize,num_heads,head_size,head_size)"
                 init_state = init_state[None, :]
             else:
-                assert init_state.shape[1:] == (H, self.head_size, self.head_size), (
-                    "state_kinds的形状必须为(BatchSize,num_heads,head_size,head_size)"
-                )
+                assert init_state.shape[1:] == (
+                    H,
+                    self.head_size,
+                    self.head_size,
+                ), "state_kinds的形状必须为(BatchSize,num_heads,head_size,head_size)"
                 state_kinds = init_state.shape[0]
             if state_map is None:
                 state_kinds = init_state.shape[0]
@@ -51,9 +56,9 @@ class RWKVKernelOperator:
                 if isinstance(state_map, list):
                     state_map = ops.convert_to_tensor(state_map, dtype="int32")
                 state_map = ops.cast(state_map, "int32")
-                assert (state_map >= 0).all() and (state_map < state_kinds).all(), (
-                    f"请确保state_map的值域为[0, {state_kinds})"
-                )
+                assert (state_map >= 0).all() and (
+                    state_map < state_kinds
+                ).all(), f"请确保state_map的值域为[0, {state_kinds})"
             s = ops.take(init_state, state_map, axis=0)
 
         else:

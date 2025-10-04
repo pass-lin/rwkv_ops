@@ -57,7 +57,7 @@ __global__ void forward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, 
     }
 }
 __global__ void backward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_, F_ dy_,
-float * __restrict__ s_, float * __restrict__ sa_,float * __restrict__ dht_,
+float * __restrict__ s_, float * __restrict__ sa_,float * __restrict__ dht_,float * __restrict__ dh0_,
 bf* dw_, bf* dq_, bf* dk_, bf* dv_, bf* da_, bf* db_) {
     constexpr int C = _C_;
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
@@ -140,6 +140,9 @@ bf* dw_, bf* dq_, bf* dk_, bf* dv_, bf* da_, bf* db_) {
         for (int j = 0; j < C; j++) {
             dstate[j] = dstate[j]*w[j] + dSb * a[j];
             dstateT[j] = dstateT[j]*wi + ai * dSb_shared[j];
+            if (t==0){
+                dh0_[dht_base + j] = dstate[j];
+            }
         }
     }
 }
@@ -150,9 +153,9 @@ void cuda_forward(int B, int T, int H, bf*w, bf*q, bf*k, bf*v, bf*z, bf*a, bf*y,
 
 void cuda_backward(int B, int T, int H,
      bf*w, bf*q, bf*k, bf*v, bf*z, bf*a, bf*dy,
-    float*s, float*sa,float*dht,
+    float*s, float*sa,float*dht,float*dh0,
     bf*dw, bf*dq, bf*dk, bf*dv, bf*dz, bf*da
     ) {
     assert(T%_CHUNK_LEN_ == 0);
-    backward_kernel<<<dim3(H,B), dim3(_C_)>>>(T,H,w,q,k,v,z,a,dy,s,sa,dht,dw,dq,dk,dv,dz,da);
+    backward_kernel<<<dim3(H,B), dim3(_C_)>>>(T,H,w,q,k,v,z,a,dy,s,sa,dht,dh0,dw,dq,dk,dv,dz,da);
 }

@@ -25,13 +25,18 @@ def run_test(backend: str, kernel_type: str):
         output, state = rwkv7_op(r, w, k, v, a, b, head_first=False)
         print("Output shape:", output.shape)
         if kernel_type == "cuda":
-            assert output.shape == (B, T, H * C), (
-                f"Expected output shape {(B, T, H * C)}, got {output.shape}"
-            )
+            assert output.shape == (
+                B,
+                T,
+                H * C,
+            ), f"Expected output shape {(B, T, H * C)}, got {output.shape}"
         else:
-            assert output.shape == (B, T, H, C), (
-                f"Expected output shape {(B, T, H, C)}, got {output.shape}"
-            )
+            assert output.shape == (
+                B,
+                T,
+                H,
+                C,
+            ), f"Expected output shape {(B, T, H, C)}, got {output.shape}"
         print(
             "✅ Test passed at %s Backend and %s impplementation"
             % (backend, kernel_type)

@@ -42,9 +42,9 @@ def chunk_dplr_fwd_h(
     BC = min(BT, BC)
     NK = triton.cdiv(K, BK)
     NV = triton.cdiv(V, BV)
-    assert NK == 1, (
-        "NK > 1 is not supported because it involves time-consuming synchronization"
-    )
+    assert (
+        NK == 1
+    ), "NK > 1 is not supported because it involves time-consuming synchronization"
 
     h = kg.new_empty(B, NT, H, K, V)
     final_state = (
