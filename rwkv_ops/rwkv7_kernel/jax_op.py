@@ -14,8 +14,10 @@ from .jax_kernel.chunk_o_fwd import chunk_dplr_fwd_o
 from .jax_kernel.wy_fast_bwd import chunk_dplr_bwd_wy
 from .jax_kernel.wy_fast_fwd import prepare_wy_repr_fwd
 from .jax_kernel.cumsum import chunk_rwkv6_fwd_cumsum
-from jax.ad_checkpoint import checkpoint_policies 
+from jax.ad_checkpoint import checkpoint_policies
+
 CHUNKSIZE = 16
+
 
 def chunk_dplr_fwd(
     q: jax.Array,
@@ -377,5 +379,3 @@ def generalized_delta_rule(
     if output_final_state:
         return jnp.asarray(o, DTYPE), final_state
     return jnp.asarray(o, DTYPE)
-
-

@@ -207,13 +207,13 @@ print(
 )
 
 
-
 mask = ops.concatenate([ops.zeros([B, T]), ops.ones([B, T])], axis=1)
 mask = ops.cast(mask, jax_chunkout.dtype)[:, :, None, None]
 
 
 def padding_input(x):
     return ops.concatenate([x, x], axis=1)
+
 
 jax_chunkout, jax_state = generalized_delta_rule(
     r=jax_inputs[0],
@@ -236,9 +236,12 @@ jax_pad_chunkout, jax_pad_state = generalized_delta_rule(
     w=w,
 )
 
-print("left padding 后state的输出完全一致:%s" % str(ops.sum(jax_pad_state - jax_state) == 0))
+print(
+    "left padding 后state的输出完全一致:%s"
+    % str(ops.sum(jax_pad_state - jax_state) == 0)
+)
 
-initial_state = (jax_state/3+0.2)@(jax_state*2+0.1)
+initial_state = (jax_state / 3 + 0.2) @ (jax_state * 2 + 0.1)
 jax_chunkout, jax_state = generalized_delta_rule(
     r=jax_inputs[0],
     k=jax_inputs[1],
@@ -259,8 +262,13 @@ jax_pad_chunkout, jax_pad_state = generalized_delta_rule(
     initial_state=initial_state,
 )
 
-print("inital state不得为0时left padding 后state的输出完全一致:%s" % str(ops.sum(jax_pad_state - jax_state) == 0))
-raise(1)
+print(
+    "inital state不得为0时left padding 后state的输出完全一致:%s"
+    % str(ops.sum(jax_pad_state - jax_state) == 0)
+)
+raise (1)
+
+
 # 定义 loss 函数
 def loss_fn(output):
     return output.sum()

@@ -91,12 +91,10 @@ generalized_delta_rule, RWKV7_USE_KERNEL = get_generalized_delta_rule(
 
 ```python
 if padding_mask is not None:
-    if RWKV7_USE_KERNEL:
-        w += (1 - padding_mask) * -1e9
-    else:
-        w = w * padding_mask + 1 - padding_mask
+    w += (1 - padding_mask) * -1e9
 ```
-
+对于上面的代码，基于循环的算子可以针对left pading和right pading都能成功处理。
+而如果用的是chunkwise算子，建议统一left padding
 ---
 
 ### rwkv7op 实现状态

@@ -12,18 +12,17 @@ def transpose_head(x, head_first):
 
 
 def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
-    USE_KERNEL = False
+    USE_TRITON_KERNEL = False
     if keras.config.backend() == "torch":
         import torch
 
         if KERNEL_TYPE.lower() == "triton":
             from .torch_op import generalized_delta_rule
 
-            USE_KERNEL = True
+            USE_TRITON_KERNEL = True
 
         elif KERNEL_TYPE.lower() == "cuda":
             CHUNK_LEN = 16
-            USE_KERNEL = True
             from torch.utils.cpp_extension import load
             import os
 
@@ -55,7 +54,7 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
             class WindBackstepping(torch.autograd.Function):
                 @staticmethod
                 def forward(ctx, w, q, k, v, z, b):
-                    B, T, H, C = w.shape
+                    B, T, H, N = w.shape
                     DTYPE = q.dtype
                     q = ops.cast(q, "bfloat16")
                     k = ops.cast(k, "bfloat16")
@@ -63,30 +62,39 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                     z = ops.cast(z, "bfloat16")
                     b = ops.cast(b, "bfloat16")
                     w = ops.cast(w, "bfloat16")
-                    assert T % CHUNK_LEN == 0
+                    if T % CHUNK_LEN != 0:
+                        raise ValueError(
+                            "RWKV输入的序列长度必须可以被16整除"
+                            "Please make sure the sequence length is divisible by 16"
+                        )
                     assert all(i.is_contiguous() for i in [w, q, k, v, z, b])
                     y = torch.empty_like(v)
                     s = torch.empty(
-                        B, H, T // CHUNK_LEN, C, C, dtype=torch.float32, device=w.device
+                        B, H, T // CHUNK_LEN, N, N, dtype=torch.float32, device=w.device
                     )
-                    sa = torch.empty(B, T, H, C, dtype=torch.float32, device=w.device)
+                    sa = torch.empty(B, T, H, N, dtype=torch.float32, device=w.device)
                     torch.ops.wind_backstepping.forward(w, q, k, v, z, b, y, s, sa)
                     ctx.save_for_backward(w, q, k, v, z, b, s, sa)
-                    return ops.cast(y, DTYPE)
+
+                    return ops.cast(y, DTYPE), ops.transpose(s[:, :, -1], [0, 1, 3, 2])
 
                 @staticmethod
-                def backward(ctx, dy):
+                def backward(ctx, dy, dht):
                     DTYPE = dy.dtype
                     dy = ops.cast(dy, torch.bfloat16)
                     dy = dy.contiguous()
-                    assert all(i.dtype == torch.bfloat16 for i in [dy])
-                    assert all(i.is_contiguous() for i in [dy])
+                    dht = ops.transpose(dht, [0, 1, 3, 2])
                     w, q, k, v, z, b, s, sa = ctx.saved_tensors
+                    dht = ops.cast(dht, "float32")
+                    dht = dht.contiguous()
+                    assert all(i.dtype == torch.bfloat16 for i in [dy])
+                    assert all(i.is_contiguous() for i in [dy, dht])
+
                     dw, dq, dk, dv, dz, db = [
                         torch.empty_like(x) for x in [w, q, k, v, z, b]
                     ]
                     torch.ops.wind_backstepping.backward(
-                        w, q, k, v, z, b, dy, s, sa, dw, dq, dk, dv, dz, db
+                        w, q, k, v, z, b, dy, s, sa, dht, dw, dq, dk, dv, dz, db
                     )
                     return (
                         ops.cast(dw, DTYPE),
@@ -105,7 +113,8 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                 v = v.contiguous()
                 a = a.contiguous()
                 b = b.contiguous()
-                return WindBackstepping.apply(w, q, k, v, a, b).view(B, T, H * C)
+                out, state = WindBackstepping.apply(w, q, k, v, a, b)
+                return out, state
 
             def generalized_delta_rule(
                 r: torch.Tensor,
@@ -125,26 +134,24 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                 a = transpose_head(a, head_first)
                 b = transpose_head(b, head_first)
                 w = transpose_head(w, head_first)
-                return RUN_CUDA_RWKV7g(r, w, k, v, a, b), None
+                return RUN_CUDA_RWKV7g(r, w, k, v, a, b)
         else:
             from .native_keras_op import generalized_delta_rule
 
-            USE_KERNEL = False
+            USE_TRITON_KERNEL = False
     elif keras.config.backend() == "jax":
         from jax.lib import xla_bridge
         import os
 
-        if (
-            xla_bridge.get_backend().platform == "gpu"
-            and KERNEL_TYPE.lower() == "triton"
-        ):
-            os.environ["JAX_LOG_COMPUTATION"] = "0"
-            from .jax_op import generalized_delta_rule
+        if xla_bridge.get_backend().platform == "gpu":
+            if KERNEL_TYPE.lower() == "triton":
+                os.environ["JAX_LOG_COMPUTATION"] = "0"
+                from .jax_op import generalized_delta_rule
 
-            USE_KERNEL = True
+                USE_TRITON_KERNEL = True
         else:
             from .native_keras_op import generalized_delta_rule
 
     else:
         from .native_keras_op import generalized_delta_rule
-    return generalized_delta_rule, USE_KERNEL
+    return generalized_delta_rule, USE_TRITON_KERNEL

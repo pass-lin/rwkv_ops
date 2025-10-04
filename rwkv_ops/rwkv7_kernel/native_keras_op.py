@@ -63,8 +63,8 @@ def generalized_delta_rule(
             state = ops.broadcast_to(state, (B, H, N, N))
     else:
         state = ops.zeros((B, H, N, N))
-    state = ops.cast(state, DTYPE)
-    out = ops.zeros((B, T, H, N), dtype=DTYPE)
+    state = ops.cast(state, "float32")
+    out = ops.zeros((B, T, H, N), DTYPE)
 
     def step(t, inputs):
         """
@@ -84,9 +84,8 @@ def generalized_delta_rule(
         aa = ops.reshape(a[:, t, :], (B, H, N, 1))
         bb = ops.reshape(b[:, t, :], (B, H, 1, N))
         state = state * w[:, t, :, None, :] + state @ aa @ bb + vv @ kk
-        out = ops.slice_update(
-            out, [0, t, 0, 0], ops.reshape((state @ rr), (B, 1, H, N))
-        )
+        o = ops.cast((state @ rr), out.dtype)
+        out = ops.slice_update(out, [0, t, 0, 0], ops.reshape(o, (B, 1, H, N)))
         return [state, out]
 
     state, out = ops.fori_loop(0, T, step, [state, out])
