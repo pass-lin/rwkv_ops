@@ -43,8 +43,8 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
             load(
                 name="wind_backstepping",
                 sources=[
-                    os.path.join(current_dir_path, "cuda_kernel/wkv7_cuda.cu"),
-                    os.path.join(current_dir_path, "cuda_kernel/wkv7_op.cpp"),
+                    os.path.join(current_dir_path, "torch_cuda_kernel/wkv7_cuda.cu"),
+                    os.path.join(current_dir_path, "torch_cuda_kernel/wkv7_op.cpp"),
                 ],
                 is_python_module=False,
                 verbose=True,

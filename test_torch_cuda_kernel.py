@@ -55,19 +55,23 @@ np.testing.assert_allclose(
     rtol=1e-5,
 )
 
-raise(1)
+raise (1)
 # ===== 1. 构造标量损失，让 pytorch 自动求 grad =====
-loss_cuda = (cuda_out * torch.randn_like(cuda_out)).sum() + \
-            (cuda_state * torch.randn_like(cuda_state)).sum()
+loss_cuda = (cuda_out * torch.randn_like(cuda_out)).sum() + (
+    cuda_state * torch.randn_like(cuda_state)
+).sum()
 
 # 对 6 个输入 tensor 求梯度
-torch_inputs_cuda = [torch_inputs[0], torch_inputs[1], torch_inputs[2],
-                     a, b, torch_inputs[4]]
+torch_inputs_cuda = [
+    torch_inputs[0],
+    torch_inputs[1],
+    torch_inputs[2],
+    a,
+    b,
+    torch_inputs[4],
+]
 grad_cuda = torch.autograd.grad(
-    loss_cuda,
-    torch_inputs_cuda,
-    retain_graph=False,
-    allow_unused=True
+    loss_cuda, torch_inputs_cuda, retain_graph=False, allow_unused=True
 )
 
 # ===== 2. 原生实现打开求踪 =====
@@ -82,14 +86,12 @@ native_out, native_state = generalized_delta_rule(
     b=torch_inputs_cuda[4],
     w=torch_inputs_cuda[5],
 )
-loss_native = (native_out * torch.randn_like(native_out)).sum() + \
-              (native_state * torch.randn_like(native_state)).sum()
+loss_native = (native_out * torch.randn_like(native_out)).sum() + (
+    native_state * torch.randn_like(native_state)
+).sum()
 
 grad_native = torch.autograd.grad(
-    loss_native,
-    torch_inputs_cuda,
-    retain_graph=False,
-    allow_unused=True
+    loss_native, torch_inputs_cuda, retain_graph=False, allow_unused=True
 )
 
 # ===== 3. 梯度数值比对 =====
@@ -98,7 +100,7 @@ for i, (gc, gn) in enumerate(zip(grad_cuda, grad_native)):
     gc = gc.float().detach().cpu().numpy()
     gn = gn.float().detach().cpu().numpy()
     err = np.abs(gc - gn).max()
-    rel = (err / (np.abs(gn).max() + 1e-7))
+    rel = err / (np.abs(gn).max() + 1e-7)
     print(f"  input[{i}]  max_abs_err={err:.6f}  rel_err={rel:.6f}")
     np.testing.assert_allclose(gc, gn, atol=6e-3, rtol=6e-3)
 
@@ -110,10 +112,7 @@ loss_dht = (cuda_state * cuda_state_grad).sum()
 
 # 重新求梯度（此时 dy=0，只有 dht 作用）
 grad_dht = torch.autograd.grad(
-    loss_dht,
-    torch_inputs_cuda,
-    retain_graph=False,
-    allow_unused=True
+    loss_dht, torch_inputs_cuda, retain_graph=False, allow_unused=True
 )
 # 期望：所有梯度非 None 且数值合理
 for i, g in enumerate(grad_dht):
