@@ -30,10 +30,9 @@ pip install rwkv_ops
 |---|---|---|---|---|
 | `KERAS_BACKEND` | Keras 后端 | `jax` / `torch` / `tensorflow` / `numpy` | — | 低 |
 | `KERNEL_BACKEND` | 算子后端 | `jax` / `torch` / `tensorflow` / `numpy` | `torch` | **高** |
-| `KERNEL_TYPE` | 实现类型 | `triton` / `cuda` / `native` | — | — |
+| `KERNEL_TYPE` | 实现类型 | `triton` / `cuda` / `native` | `cuda` | — |
 
 > 若 `KERNEL_BACKEND` 有值，直接采用；若为空，则用 `KERAS_BACKEND`；两者皆空则默认 `torch`。  
-> `native` 为原生算子，无 chunkwise，速度慢且显存高。
 
 ---
 
@@ -81,21 +80,21 @@ def generalized_delta_rule(
 ```python
 from rwkv_ops import get_generalized_delta_rule
 
-generalized_delta_rule, RWKV7_USE_KERNEL = get_generalized_delta_rule(
+generalized_delta_rule, USE_TRITON_KERNEL = get_generalized_delta_rule(
     your_head_size, KERNEL_TYPE="cuda"
 )
 ```
 
-- `RWKV7_USE_KERNEL` 为常量，标记是否使用 chunkwise 算子。  
+- `USE_TRITON_KERNEL` 为常量，标记是否使用 chunkwise 算子。  
 - 两者 padding 处理逻辑不同：
 
 ```python
 if padding_mask is not None:
     w += (1 - padding_mask) * -1e9
 ```
-对于上面的代码，基于循环的算子可以针对left pading和right pading都能成功处理。
-而如果用的是chunkwise算子，建议统一left padding
----
+- 对于上面的代码，基于循环的算子可以针对left pading和right pading都能成功处理。
+- 而如果用的是chunkwise算子，建议统一left padding，如果是cuda或者原生，则都left right都能正确处理
+
 
 ### rwkv7op 实现状态
 
@@ -107,6 +106,9 @@ if padding_mask is not None:
 | NumPy       | ❌   | ❌     | ✅     |
 
 ---
+> `native` 为原生算子，无 chunkwise，速度慢且显存高。
+> `triton` 使用的是chunkwise算法实现，速度快，并行度高，缺点是精度很差，介意勿用
+> `cuda` 为基于 CUDA 的原生算子，速度很快，并且kernel内部使用fp32实现，所以精度也很高。缺点就是长序列的时候比较吃亏跑不满。
 
 ## rwkv6op 使用方法
 
