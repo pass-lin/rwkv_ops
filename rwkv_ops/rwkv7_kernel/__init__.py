@@ -83,7 +83,7 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                     DTYPE = dy.dtype
                     dy = ops.cast(dy, torch.bfloat16)
                     dy = dy.contiguous()
-                    dht = ops.transpose(dht, [0, 1, 3, 2])
+                    #dht = ops.transpose(dht, [0, 1, 3, 2])
                     w, q, k, v, z, b, s, sa = ctx.saved_tensors
                     dht = ops.cast(dht, "float32")
                     dht = dht.contiguous()
@@ -94,7 +94,7 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                         torch.empty_like(x) for x in [w, q, k, v, z, b]
                     ]
                     torch.ops.wind_backstepping.backward(
-                        w, q, k, v, z, b, dy, s, sa, dht, dw, dq, dk, dv, dz, db
+                        w, q, k, v, z, b, dy, s, sa,  dw, dq, dk, dv, dz, db
                     )
                     return (
                         ops.cast(dw, DTYPE),
