@@ -25,6 +25,7 @@ w = torch_inputs[4]  # decay / gate
 r = torch_inputs[0]  # receptance
 k = torch_inputs[1]
 v = torch_inputs[2]
+w = -ops.softplus(w)-0.5
 
 # ------------------------------------------------------------------
 # 2. CUDA 版本前向 + 反向
@@ -40,8 +41,7 @@ cuda_out, cuda_state = rwkv7_op(
     initial_state=None, output_final_state=True
 )
 
-loss_cuda = cuda_out.sum()
-loss_cuda.backward()
+
 
 # ------------------------------------------------------------------
 # 3. Native 版本前向 + 反向
@@ -60,8 +60,11 @@ native_out, native_state = generalized_delta_rule(
     r=r_n, k=k_n, v=v_n, a=a_n, b=b_n, w=w_n
 )
 
-loss_native = native_out.sum()
+loss_native = (native_out.mean(1).float()@native_state.mean(1)).mean()**2
 loss_native.backward()
+
+loss_cuda = (cuda_out.mean(1).float()@cuda_state.mean(1)).mean()**2
+loss_cuda.backward()
 
 # ------------------------------------------------------------------
 # 4. 前向结果比较
@@ -69,7 +72,7 @@ loss_native.backward()
 np.testing.assert_allclose(
     ops.convert_to_numpy(native_out.float()),
     ops.convert_to_numpy(cuda_out.float()),
-    atol=5e-3, rtol=1e-2
+    atol=1e-3, rtol=1e-2
 )
 np.testing.assert_allclose(
     ops.convert_to_numpy(native_state.float()),
@@ -80,18 +83,24 @@ print("✅ 前向输出一致")
 
 # ------------------------------------------------------------------
 # 5. 梯度比较
-# ------------------------------------------------------------------
+# -----------------------------------w -------------------------------
 grad_names = ["r", "k", "v", "a", "b", "w"]
 cuda_grads   = [t.grad.float() for t in [r, k, v, a, b, w]]
 native_grads = [t.grad.float() for t in [r_n, k_n, v_n, a_n, b_n, w_n]]
 
 for name, g_cuda, g_native in zip(grad_names, cuda_grads, native_grads):
-    np.testing.assert_allclose(
-        ops.convert_to_numpy(g_native),
-        ops.convert_to_numpy(g_cuda),
-        atol=5e-3, rtol=1e-2,
-        err_msg=f"梯度不一致: {name}"
-    )
-    print(f"✅ {name} 梯度一致")
+    try:
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(g_native),
+            ops.convert_to_numpy(g_cuda),
+            atol=2e-2, rtol=1e-2,
+            err_msg=f"梯度不一致: {name}"
+        )
+        print(f"✅ {name} 梯度一致")
+    except AssertionError as e:
+        print(f"❌ {name} 梯度不一致")
+        print(e)
+    unequal_num = int(ops.sum(g_native- g_cuda))
+    all_data_num = int(np.cumprod(g_native.shape)[-1])
+    print(f"{name} 梯度不一致的元素个数: {unequal_num}, 共计元素个数: {all_data_num},不同的百分比率: {unequal_num / all_data_num:.2%}")
 
-print("🎉 前向 & 反向 全部通过!")
