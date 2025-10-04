@@ -8,7 +8,7 @@
 ### 当前支持
 | 算子类型 | 框架支持 |
 |----------|----------|
-| GPU 算子 | PyTorch、JAX（TensorFlow 待 Google 支持 Triton 后上线） |
+| GPU 算子 | PyTorch、JAX|
 | 原生算子 | PyTorch、JAX、TensorFlow、NumPy |
 
 > 未来若 Keras 生态扩展，可能支持 MLX、OpenVINO。  
