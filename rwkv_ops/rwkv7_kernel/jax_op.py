@@ -309,7 +309,7 @@ def transpose_head(x, head_first):
         return x
 
 
-# @partial(jax.jit, static_argnames=['initial_state',"output_final_state","head_first","use_chunk"])
+@partial(jax.checkpoint, policy=lambda **kwargs: False)
 def generalized_delta_rule(
     r: jax.Array,
     w: jax.Array,
