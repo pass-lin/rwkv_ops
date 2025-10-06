@@ -156,7 +156,7 @@ jax_chunkout, jax_state = generalized_delta_rule(
 
 
 try:
-    from rwkvfla.ops.rwkv7 import chunk_rwkv7
+    pass
 except:
     from rwkvfla.ops.rwkv7 import chunk_rwkv7 as chunk_rwkv7_fla
 

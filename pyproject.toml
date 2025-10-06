@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools", "wheel", "cmake>=3.18", "ninja"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rwkv_ops"
+version = "0.3.0"
+description = "RWKV operator implementations for multiple backends"
+readme = "README.md"
+license = { file = "LICENSE" }
+urls = { homepage = "https://github.com/pass-lin/rwkv_ops" }
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]

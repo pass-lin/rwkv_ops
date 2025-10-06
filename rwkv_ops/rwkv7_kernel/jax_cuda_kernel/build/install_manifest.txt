@@ -1,0 +1,1 @@
+/home/amax/rwkv_ops/rwkv_ops/rwkv7_kernel/jax_cuda_kernel/./wkv7.so

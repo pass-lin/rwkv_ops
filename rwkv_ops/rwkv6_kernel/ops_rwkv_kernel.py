@@ -1,5 +1,4 @@
 from keras import ops
-import keras
 
 
 class RWKVKernelOperator:
@@ -56,9 +55,9 @@ class RWKVKernelOperator:
                 if isinstance(state_map, list):
                     state_map = ops.convert_to_tensor(state_map, dtype="int32")
                 state_map = ops.cast(state_map, "int32")
-                assert (state_map >= 0).all() and (
-                    state_map < state_kinds
-                ).all(), f"请确保state_map的值域为[0, {state_kinds})"
+                assert (state_map >= 0).all() and (state_map < state_kinds).all(), (
+                    f"请确保state_map的值域为[0, {state_kinds})"
+                )
             s = ops.take(init_state, state_map, axis=0)
 
         else:

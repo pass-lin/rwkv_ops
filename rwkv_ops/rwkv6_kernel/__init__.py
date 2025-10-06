@@ -17,12 +17,6 @@ def get_rwkv6_kernel(KERNEL_TYPE="native"):
 
                 ops_kernel = False
             else:
-                print(
-                    "The CUDA kernel of RWKV6 cannot be used in JAX > = 0.6 version. If you need to use the CUDA KERNEL of RWKV6 version, please downgrade the version. It is recommended to downgrade to 0.4.34"
-                )
-                print(
-                    "RWKV6的CUDA kernel在JAX> = 0.6版本无法使用，如果需要使用RWKV6版本的CUDA KERNEL，请降级版本，建议降级到0.4.34"
-                )
                 CudaOperator = None
         elif keras.config.backend() == "torch":
             from .torch_rwkv_kernel import RWKVKernelOperator as CudaOperator

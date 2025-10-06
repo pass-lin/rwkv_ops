@@ -156,6 +156,10 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                 from .jax_op import generalized_delta_rule
 
                 USE_TRITON_KERNEL = True
+            elif KERNEL_TYPE.lower() == "cuda":
+                from .jax_cuda_kernel.wkv7_jax import generalized_delta_rule
+            else:
+                from .native_keras_op import generalized_delta_rule
         else:
             from .native_keras_op import generalized_delta_rule
 
