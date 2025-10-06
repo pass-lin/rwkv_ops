@@ -1,17 +1,17 @@
 # RWKV OPS Project
 
-> RWKV will keep evolving, so the core operators will be updated accordingly.  
-> This repository only maintains the **operators**, not the layers or models.  
-> We aim to provide GPU operators for as many frameworks as possible.  
+> Since RWKV will continue to iterate, the core operators will be updated accordingly.  
+> This repository is dedicated to maintaining the **operators** themselves, not the layers or models; it aims to provide GPU operators for various frameworks.
 
 ### Current Support
-| Operator Type | Frameworks |
-|---------------|------------|
-| GPU Operators | PyTorch, JAX (TensorFlow will be added once Google supports Triton) |
-| Native (CPU) Operators | PyTorch, JAX, TensorFlow, NumPy |
 
-> Future support for MLX or OpenVINO may be added if the Keras ecosystem expands.  
-> Note: this package depends on `keras`.
+| Operator Type | Framework Support |
+|---------------|-------------------|
+| GPU Operators | PyTorch, JAX      |
+| Native Operators | PyTorch, JAX, TensorFlow, NumPy |
+
+> In the future, if the Keras ecosystem expands, support for MLX and OpenVINO may be added.  
+> Note: This library depends on `keras`.
 
 ---
 
@@ -25,21 +25,20 @@ pip install rwkv_ops
 
 ## Environment Variables
 
-| Variable | Description | Allowed Values | Default | Priority |
-|---|---|---|---|---|
-| `KERAS_BACKEND` | Keras backend | `jax`, `torch`, `tensorflow`, `numpy` | — | Low |
-| `KERNEL_BACKEND` | Operator backend | `jax`, `torch`, `tensorflow`, `numpy` | `torch` | **High** |
-| `KERNEL_TYPE` | Implementation type | `triton`, `cuda`, `native` | — | — |
+| Variable Name | Meaning | Values | Default Value | Priority |
+|---------------|---------|--------|---------------|----------|
+| `KERAS_BACKEND` | Keras backend | `jax` / `torch` / `tensorflow` / `numpy` | — | Low |
+| `KERNEL_BACKEND` | Operator backend | `jax` / `torch` / `tensorflow` / `numpy` | `torch` | **High** |
+| `KERNEL_TYPE` | Implementation type | `triton` / `cuda` / `native` | `cuda` | — |
 
-> If `KERNEL_BACKEND` is set, it will be used directly; otherwise, fall back to `KERAS_BACKEND`; if both are empty, `torch` is used.  
-> `native` means pure CPU operators without chunking—slow and memory-hungry.
+> If `KERNEL_BACKEND` is set, it will be used directly; if not, `KERAS_BACKEND` will be used; if neither is set, the default is `torch`.
 
 ---
 
-## rwkv7op Usage
+## Usage of `rwkv7op`
 
 ```python
-from rwkv_ops import generalized_delta_rule  # or: from rwkv_ops import rwkv7_op, same thing
+from rwkv_ops import generalized_delta_rule  # or from rwkv_ops import rwkv7_op, which is equivalent
 
 def generalized_delta_rule(
     r,
@@ -53,7 +52,7 @@ def generalized_delta_rule(
     head_first: bool = False,
 ):
     """
-    Chunked Delta-Rule attention interface.
+    Chunked Delta Rule Attention Interface.
 
     Args:
         q:  [B, T, H, K]
@@ -62,9 +61,9 @@ def generalized_delta_rule(
         a:  [B, T, H, K]
         b:  [B, T, H, K]
         gk: [B, T, H, K]  # decay term in log space!
-        initial_state: Initial state [N, H, K, V], N = number of sequences
+        initial_state: Initial state [N, H, K, V], where N is the number of sequences
         output_final_state: Whether to return the final state
-        head_first: Whether input is head-first; not compatible with variable-length sequences
+        head_first: Whether in head-first format, variable-length is not supported
 
     Returns:
         o:           Output [B, T, H, V] or [B, H, T, V]
@@ -72,114 +71,114 @@ def generalized_delta_rule(
     """
 ```
 
-### torch-cuda Special Case
+### Special Usage for `torch-cuda`
 
-- In torch-cuda, `head_size` is a kernel parameter and defaults to 64.  
-- If your `head_size ≠ 64`, use:
+- Under `torch-cuda`, `head_size` is also a kernel parameter, defaulting to 64.  
+- If `head_size ≠ 64`, please use:
 
 ```python
 from rwkv_ops import get_generalized_delta_rule
 
-generalized_delta_rule, RWKV7_USE_KERNEL = get_generalized_delta_rule(
+generalized_delta_rule, USE_TRITON_KERNEL = get_generalized_delta_rule(
     your_head_size, KERNEL_TYPE="cuda"
 )
 ```
 
-- `RWKV7_USE_KERNEL` is a constant flag indicating whether the chunked kernel is used.  
-- Padding logic differs:
+- `USE_TRITON_KERNEL` is a constant indicating whether the chunkwise operator is used.  
+- The padding handling logic is different for the two:
 
 ```python
 if padding_mask is not None:
-    if RWKV7_USE_KERNEL:
-        w += (1 - padding_mask) * -1e9
-    else:
-        w = w * padding_mask + 1 - padding_mask
+    w += (1 - padding_mask) * -1e9
 ```
 
----
+- For the above code, operators based on loops can handle both left padding and right padding successfully.
+- However, if using the chunkwise operator, it is recommended to use left padding uniformly. If using CUDA or native, both left and right padding can be handled correctly.
 
-### rwkv7op Implementation Status
+### Implementation Status of `rwkv7op`
 
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
 | PyTorch     | ✅   | ✅     | ✅     |
-| JAX         | ❌   | ✅     | ✅     |
+| JAX         | ✅   | ✅     | ✅     |
 | TensorFlow  | ❌   | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 
 ---
 
-## rwkv6op Usage
+> `native` refers to native operators, which do not use chunkwise algorithms, are slow, and have high memory usage.
+> `triton` uses chunkwise algorithms, which are fast and highly parallel, but have poor precision—use at your own risk.
+> `cuda` refers to native operators based on CUDA, which are very fast and implemented in fp32 internally, ensuring high precision. However, they may struggle with long sequences.
 
-### PyTorch Notes
+## Usage of `rwkv6op`
 
-- Dependencies: `keras`, `ninja`, full CUDA toolkit.
-- If using VS Code + virtual env, **manually activate** the environment in the terminal before running; otherwise `ninja` may fail.
-- Even if the CUDA version inside the venv differs from the system one, the operator still works, but keeping them identical is strongly recommended.
-- Due to PyTorch limitations, **only one** `RWKV6_OP` instance per process is allowed.  
-  The operator is stateless and thread-safe, so you can call it from multiple places.
+### PyTorch Usage Notes
 
-### JAX Notes
+- Dependencies: `keras`, `ninja`, and a complete CUDA toolkit.
+- If using VS Code with a virtual environment for debugging, make sure to manually activate the virtual environment in the terminal before running the code; otherwise, ninja may not work.
+- Although PyTorch can run normally even if the CUDA version in the virtual environment is inconsistent with the global CUDA version, it is strongly recommended to keep them consistent.
+- PyTorch Limitations: Only one `RWKV6_OP` object can be instantiated within the same program; the operator is thread-safe (stateless) and can be called from multiple places.
 
-- Dependencies: `keras`, `gcc`, `pybind11`, full CUDA toolkit.
-- Even if JAX is installed in a venv with CUDA, a system-wide CUDA installation is required and versions must match for faster parallel compilation.
-- JAX compilation relies on the symlink `/usr/local/cuda`. Create it if missing:
+### JAX Usage Notes
+
+- Dependencies: `keras`, `gcc`, `pybind11`, and a complete CUDA toolkit.
+- Even if CUDA is installed for JAX via a virtual environment, a complete CUDA installation at the system level is required, and the versions must be consistent to ensure fast parallel compilation in JAX.
+- JAX compilation depends on the soft link `/usr/local/cuda`; if it does not exist, create it manually:
   ```shell
   sudo ln -sf /usr/local/cuda-12.4 /usr/local/cuda
   ```
-- Ensure `nvcc -V` prints correctly and `which nvcc` points to the expected version.
-- Due to JAX limitations, **only one** `RWKV6_OP` instance per process is allowed.  
-  The operator is stateless and thread-safe.
-- JAX ≥ 0.6.0 no longer uses CUDA kernels; native kernels are used instead.  
-  Recommended JAX version: 0.4.34.
+- Ensure that `nvcc -V` outputs correctly and that `which nvcc` points to the correct version.
+- JAX Limitations: Only one `RWKV6_OP` object can be instantiated within the same program; the operator is thread-safe (stateless) and can be called from multiple places.
+- JAX ≥ 0.6.0 no longer uses CUDA operators and defaults to native operators; version 0.4.34 is recommended.
 
-### TensorFlow Notes
+### TensorFlow Usage Notes
 
-- Only a native-API-based RWKV6 operator is provided; it is for inference only and slower.
+- Only native API-based `RWKV6` operators are provided, which are only suitable for inference and have low efficiency.
 
 ---
 
-### API Reference
+### Usage
 
+Note that unlike `rwkv7`, which is written as a function, `RWKV6` is a class that needs to be instantiated.
 ```python
 from rwkv_ops import RWKV6_OP
 
 operator = RWKV6_OP(
-    head_size=64,               # head dimension, use 64 if unsure
-    max_sequence_length=4096,   # max length during training; inference can be longer
-    ops_loop=False              # optional: fall back to high-level impl when seq_len=1
+    head_size=64,               # Head size; use 64 if uncertain
+    max_sequence_length=4096,   # Maximum training sequence length; inference is not limited
+    ops_loop=False              # Optional: Whether to use the upper-level API instead of CUDA when sequence length = 1
 )
 ```
 
-#### Call Signature
+#### Invocation
 
 ```python
 y, y_state = operator(
     r, k, v, w, u,
-    with_state=False,  # enable custom initial state / return final state
-    init_state=None,   # initial state [n_state, num_heads, head_size, head_size]
-    state_map=None     # int32 1-D array mapping batch entries to init_state indices
+    with_state=False,   # Whether to use a custom initial state / output final state
+    init_state=None,    # Initial state [n_state, num_heads, head_size, head_size]
+    state_map=None      # int32 one-dimensional array, length=batch_size, defining the init_state mapping
 )
 ```
 
-| Arg | Shape | Notes |
-|---|---|---|
+| Parameter | Shape | Description |
+|-----------|-------|-------------|
 | r, k, v, w | (batch_size, seq_len, hidden_size) | — |
 | u | (num_heads, head_size) or (hidden_size,) | — |
-| init_state | (n_state, num_heads, head_size, head_size) | n_state=1 → shared; n_state=batch_size → per-sample |
-| state_map | (batch_size,) | indices into init_state |
+| init_state | (n_state, num_heads, head_size, head_size) | When n_state=1, all samples share it; when n_state=batch_size, they correspond one-to-one |
+| state_map | (batch_size,) | Specifies the init_state index for each sample |
 
-| Return | Shape | Notes |
-|---|---|---|
-| y | (batch_size, seq_len, hidden_size) | output |
-| y_state | (batch_size, num_heads, head_size, head_size) or None | final state |
+| Return Value | Shape | Description |
+|--------------|-------|-------------|
+| y | (batch_size, seq_len, hidden_size) | Output |
+| y_state | (batch_size, num_heads, head_size, head_size) or None | Final state |
 
 ---
 
-### Distributed Tips (JAX example)
+### Distributed Tips
 
-- The operator itself is not distributed; PyTorch’s multi-thread distributed wrappers work out of the box.  
-- For JAX, wrap the operator with `shard_map`:
+- The operator itself does not support distributed computing; PyTorch can directly use multi-threaded distributed computing.
+- For JAX, use `shard_map` for packaging (example):
 
 ```python
 import os
@@ -191,14 +190,14 @@ from jax.sharding import Mesh, PartitionSpec as P
 from functools import partial
 from rwkv_ops import RWKV6_OP
 
-batch_size, seq_len = 24, 512
+batch_size, seq_length = 24, 512
 head_size, num_heads = 64, 32
 hidden_size = head_size * num_heads
 
 mesh = Mesh(jax.devices('gpu'), axis_names=('device_axis',))
 device_ns = NamedSharding(mesh, P('device_axis'))
 
-operator = RWKV6_OP(head_size=head_size, max_sequence_length=seq_len)
+operator = RWKV6_OP(head_size=head_size, max_sequence_length=seq_length)
 
 @partial(shard_map,
          mesh=mesh,

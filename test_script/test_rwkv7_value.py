@@ -266,7 +266,6 @@ print(
     "inital state不得为0时left padding 后state的输出完全一致:%s"
     % str(ops.sum(jax_pad_state - jax_state) == 0)
 )
-raise (1)
 
 
 # 定义 loss 函数

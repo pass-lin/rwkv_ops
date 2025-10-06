@@ -95,7 +95,7 @@ for name, g_cuda, g_native in zip(grad_names, cuda_grads, native_grads):
         np.testing.assert_allclose(
             ops.convert_to_numpy(g_native),
             ops.convert_to_numpy(g_cuda),
-            atol=2e-2,
+            atol=1e-3,
             rtol=1e-2,
             err_msg=f"梯度不一致: {name}",
         )
@@ -103,9 +103,3 @@ for name, g_cuda, g_native in zip(grad_names, cuda_grads, native_grads):
     except AssertionError as e:
         print(f"❌ {name} 梯度不一致")
         print(e)
-        break
-    unequal_num = int(ops.sum(g_native - g_cuda))
-    all_data_num = int(np.cumprod(g_native.shape)[-1])
-    print(
-        f"{name} 梯度不一致的元素个数: {unequal_num}, 共计元素个数: {all_data_num},不同的百分比率: {unequal_num / all_data_num:.2%}"
-    )

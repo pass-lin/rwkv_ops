@@ -10,6 +10,7 @@ import ctypes
 import jax
 import jax.numpy as jnp
 from typing import Optional, Tuple, Union
+from functools import partial
 
 CHUNK_LEN = 16  # 这是一个常熟
 # ---------- 延迟编译（改到当前目录） ----------
@@ -60,7 +61,9 @@ _lib = ctypes.CDLL(_ensure_compiled())
 jax.ffi.register_ffi_target(
     "wkv7_fwd", jax.ffi.pycapsule(_lib.Wkv7Fwd), platform="CUDA"
 )
-# jax.ffi.register_ffi_target("wkv7_bwd", jax.ffi.pycapsule(_lib.Wkv7Bwd), platform="CUDA")
+jax.ffi.register_ffi_target(
+    "wkv7_bwd", jax.ffi.pycapsule(_lib.Wkv7Bwd), platform="CUDA"
+)
 
 
 # ---------- 工具 ----------
@@ -131,18 +134,37 @@ def _fwd(
     return [y, s[:, :, -1]], (w, q, k, v, a, b, s, sa)
 
 
+def _wkv7_bwd_kernel(w, q, k, v, a, b, dy, s, sa, dht):
+    dh0_type = jax.ShapeDtypeStruct(dht.shape, dht.dtype)
+    dw_type = jax.ShapeDtypeStruct(w.shape, w.dtype)
+    dq_type = jax.ShapeDtypeStruct(q.shape, q.dtype)
+    dk_type = jax.ShapeDtypeStruct(k.shape, k.dtype)
+    dv_type = jax.ShapeDtypeStruct(v.shape, v.dtype)
+    da_type = jax.ShapeDtypeStruct(a.shape, a.dtype)
+    db_type = jax.ShapeDtypeStruct(b.shape, b.dtype)
+
+    dh0, dw, dq, dk, dv, da, db = jax.ffi.ffi_call(
+        "wkv7_bwd",
+        (dh0_type, dw_type, dq_type, dk_type, dv_type, da_type, db_type),
+        vmap_method="broadcast_all",
+    )(w, q, k, v, a, b, dy, s, sa, dht)
+
+    return dw, dq, dk, dv, da, db, dh0
+
+
 # 反向定义
-def _bwd(res, grad):
+def _bwd(res, grads):
     w, q, k, v, a, b, s, sa = res
-    dy, dht = grad
-    # bwd还没实现，先返回6个None
-    return [None] * 6
+    dy, dht = grads
+    # 调用反向 kernel
+    return _wkv7_bwd_kernel(w, q, k, v, a, b, dy, s, sa, dht)
 
 
 wk7_kernel.defvjp(_fwd, _bwd)
 
 
 # ---------- 对外接口：与 Torch 版本 1:1 对齐 ----------
+@partial(jax.checkpoint, policy=lambda **kwargs: False)
 def generalized_delta_rule(
     r: jnp.ndarray,
     w: jnp.ndarray,

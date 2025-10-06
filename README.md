@@ -101,7 +101,7 @@ if padding_mask is not None:
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
 | PyTorch     | ✅   | ✅     | ✅     |
-| JAX         | ❌   | ✅     | ✅     |
+| JAX         | ✅   | ✅     | ✅     |
 | TensorFlow  | ❌   | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 
