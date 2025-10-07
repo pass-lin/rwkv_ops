@@ -186,6 +186,11 @@ print(
         / np.cumprod(torch_out_numpy.shape)[-1],
     )
 )
+try:
+    pass
+except:
+    from rwkvfla.ops.rwkv7 import chunk_rwkv7 as chunk_rwkv7_fla
+
 fla_chunkout, fla_state = chunk_rwkv7_fla(
     r=torch_inputs[0],
     k=torch_inputs[1],
@@ -343,3 +348,5 @@ for i in range(len(my_input)):
             torch.mean(torch.abs(my_input[i][1].grad - fla_input[i][1].grad)),
         )
     )
+
+print("🎉🎉🎉🎉test_script/test_rwkv7_value.py测试结束🎉🎉🎉🎉")

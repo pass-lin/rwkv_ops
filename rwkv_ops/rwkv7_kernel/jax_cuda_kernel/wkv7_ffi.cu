@@ -172,7 +172,7 @@ __global__ void wkv7_bwd_kernel(
         }
 
         // 3. 计算 S_{t-1}
-        float iwi = 1.0f / sw[ii];
+        float iwi = 1.0f / (sw[ii]+0.000001f);
         float s_prev_row[C];
         #pragma unroll
         for (int j = 0; j < C; ++j) {

@@ -58,3 +58,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     run_test(args.backend, args.kernel_type)
+    print("🎉🎉🎉🎉test_script/test_rwkv6_kernel.py测试结束🎉🎉🎉🎉")

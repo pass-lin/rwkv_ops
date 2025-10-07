@@ -10,9 +10,9 @@ import ctypes
 import jax
 import jax.numpy as jnp
 from typing import Optional, Tuple, Union
-from functools import partial
+from jax.ad_checkpoint import checkpoint_policies as cp
 
-CHUNK_LEN = 16  # 这是一个常熟
+CHUNK_LEN = 16  # 这是一个常数
 # ---------- 延迟编译（改到当前目录） ----------
 _CURRENT_DIR = pathlib.Path(
     __file__
@@ -131,7 +131,7 @@ def _fwd(
     h0: jnp.ndarray,
 ):
     y, s, sa = _wkv7_kernel(w, q, k, v, a, b, h0)
-    return [y, s[:, :, -1]], (w, q, k, v, a, b, s, sa)
+    return (y, s[:, :, -1]), (w, q, k, v, a, b, s, sa)
 
 
 def _wkv7_bwd_kernel(w, q, k, v, a, b, dy, s, sa, dht):
@@ -163,8 +163,6 @@ def _bwd(res, grads):
 wk7_kernel.defvjp(_fwd, _bwd)
 
 
-# ---------- 对外接口：与 Torch 版本 1:1 对齐 ----------
-@partial(jax.checkpoint, policy=lambda **kwargs: False)
 def generalized_delta_rule(
     r: jnp.ndarray,
     w: jnp.ndarray,
@@ -210,7 +208,10 @@ def generalized_delta_rule(
         h0 = jnp.asarray(initial_state, jnp.float32)
 
     # 调用 kernel
-    out, last_state = wk7_kernel(w, r, k, v, a, b, h0)
+
+    out, last_state = jax.checkpoint(
+        wk7_kernel, policy=cp.save_anything_except_these_names(())
+    )(w, r, k, v, a, b, h0)
     out = jnp.asarray(out, dtype)  # 保证输出 dtype 与输入一致
 
     if output_final_state:

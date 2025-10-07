@@ -12,7 +12,7 @@ from jax import grad
 # ------------------------------------------------------------------
 # 1. 构造输入
 # ------------------------------------------------------------------
-T = 128
+T = 512
 B = 2
 H = 6
 K = 64
@@ -32,14 +32,20 @@ def normalize(
     return z / denom
 
 
-a = -normalize(jax_inputs[3], dim=-1, p=2.0)
-b = normalize(jax_inputs[3], dim=-1, p=2.0)
+mask = ops.concatenate(
+    [ops.zeros((B, T // 2, 1, 1)), ops.ones((B, T // 2, 1, 1))], axis=1
+)
+mask = ops.cast(mask, "bfloat16")
 
-w = jax_inputs[4]  # decay / gate
-r = jax_inputs[0]  # receptance
-k = jax_inputs[1]
-v = jax_inputs[2]
+a = -normalize(jax_inputs[3], dim=-1, p=2.0) * mask
+b = normalize(jax_inputs[3], dim=-1, p=2.0) * mask
+
+w = jax_inputs[4] * mask  # decay / gate
+r = jax_inputs[0] * mask  # receptance
+k = jax_inputs[1] * mask
+v = jax_inputs[2] * mask
 w = -ops.softplus(w) - 0.5
+w = ops.where(mask, w, -1e9)
 h0 = jnp.asarray(np.random.randn(B, H, K, K), "float32")
 # ------------------------------------------------------------------
 # 2. CUDA 版本前向 + 反向
@@ -47,9 +53,7 @@ h0 = jnp.asarray(np.random.randn(B, H, K, K), "float32")
 from rwkv_ops import rwkv7_op
 
 
-cuda_out, cuda_state = rwkv7_op(
-    r=r, k=k, v=v, a=a, b=b, w=w, initial_state=h0, output_final_state=True
-)
+cuda_out, cuda_state = rwkv7_op(r=r, k=k, v=v, a=a, b=b, w=w, initial_state=h0)
 
 r_n = ops.copy(r)
 k_n = ops.copy(k)
@@ -67,13 +71,19 @@ native_out, native_state = generalized_delta_rule(
 
 
 def test_is_close(name, x1, x2, atol=2.5e-2, rtol=1e-3):
+    x1 = ops.convert_to_numpy(ops.cast(x1, "float32"))
+    x2 = ops.convert_to_numpy(ops.cast(x2, "float32"))
+    if np.sum(np.isnan(x1)) == 0 and np.sum(np.isnan(x2)) == 0:
+        print(f"✅✅{name} 不存在nan✅✅")
+    else:
+        print(f"❌❌{name} 你妈的有nan❌❌")
     if np.sum(np.abs(x1 - x2)) < 1e-4:
         print(f"✅✅{name} 输出结果完全一致✅✅")
         return
     try:
         np.testing.assert_allclose(
-            ops.convert_to_numpy(ops.cast(x1, "float32")),
-            ops.convert_to_numpy(ops.cast(x2, "float32")),
+            x1,
+            x2,
             atol=atol,
             rtol=rtol,
         )
@@ -149,3 +159,4 @@ for i, name in enumerate(grad_names):
     test_is_close(f"grad_{name}", native_grads[i], cuda_grads[i])
 
 print("\n--- 反向传播测试完毕 ---")
+print("🎉🎉🎉🎉test_script/test_jax_cuda_kernel.py测试结束🎉🎉🎉🎉")

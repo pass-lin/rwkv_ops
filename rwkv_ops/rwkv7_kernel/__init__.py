@@ -75,8 +75,10 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                     sa = torch.empty(B, T, H, N, dtype=torch.float32, device=w.device)
                     torch.ops.wind_backstepping.forward(w, q, k, v, z, b, y, s, sa, h0)
                     ctx.save_for_backward(w, q, k, v, z, b, s, sa)
+                    last_state = torch.empty_like(h0)
+                    last_state.copy_(ops.transpose(s[:, :, -1], [0, 1, 3, 2]))
 
-                    return ops.cast(y, DTYPE), ops.transpose(s[:, :, -1], [0, 1, 3, 2])
+                    return ops.cast(y, DTYPE), last_state
 
                 @staticmethod
                 def backward(ctx, dy, dht):
@@ -89,7 +91,7 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                     dht = dht.contiguous()
                     assert all(i.dtype == torch.bfloat16 for i in [dy])
                     assert all(i.is_contiguous() for i in [dy, dht])
-                    dh0 = torch.empty_like(dht)
+                    dh0 = torch.empty(dht.shape, dtype=dht.dtype, device=dht.device)
                     dw, dq, dk, dv, dz, db = [
                         torch.empty_like(x) for x in [w, q, k, v, z, b]
                     ]

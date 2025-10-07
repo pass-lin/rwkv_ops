@@ -1,0 +1,13 @@
+global-include *.py
+global-include *.cu *.cpp *.cc *.h *.hpp *.cuh *.hip
+global-include CMakeLists.txt *.cmake *.txt
+
+
+global-exclude __pycache__
+global-exclude *.pyc *.pyo *.pyd
+global-exclude *.so *.dll *.dylib
+global-exclude build/*
+global-exclude dist/*
+global-exclude *.egg-info/*
+
+global-exclude wkv7.so

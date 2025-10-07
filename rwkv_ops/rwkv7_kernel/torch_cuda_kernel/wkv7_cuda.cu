@@ -107,7 +107,7 @@ bf* dw_, bf* dq_, bf* dk_, bf* dv_, bf* da_, bf* db_) {
             dq += stateT[j]*dy[j];
         }
         dq_[ind] = to_bf(dq);
-        float iwi = 1.0f/wi;
+        float iwi = 1.0f/(wi+0.000001f);
 #pragma unroll
         for (int j = 0; j < C; j++) {
             stateT[j] = (stateT[j] - ki*v[j] - bi*sa[j]) * iwi;

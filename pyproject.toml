@@ -1,23 +1,32 @@
 [build-system]
-requires = ["setuptools", "wheel", "cmake>=3.18", "ninja"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
-name = "rwkv_ops"
+name = "rwkv-ops"
 version = "0.3.0"
-description = "RWKV operator implementations for multiple backends"
+authors = [
+    { name = "pass-lin", email = "qw_lin@qq.com" },
+]
+description = "RWKV operators for multiple backends (PyTorch, JAX, Keras)"
 readme = "README.md"
-license = { file = "LICENSE" }
-urls = { homepage = "https://github.com/pass-lin/rwkv_ops" }
+license = { text = "Apache-2.0" }  # 改为文本许可证，不使用文件
+requires-python = ">=3.8"
 classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Developers",
-    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "keras>=3.0"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/pass-lin/rwkv_ops"
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "rwkv_ops",
+    "rwkv_ops.rwkv6_kernel", 
+    "rwkv_ops.rwkv7_kernel"
 ]

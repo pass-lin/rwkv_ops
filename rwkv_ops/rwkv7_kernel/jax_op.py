@@ -14,7 +14,7 @@ from .jax_kernel.chunk_o_fwd import chunk_dplr_fwd_o
 from .jax_kernel.wy_fast_bwd import chunk_dplr_bwd_wy
 from .jax_kernel.wy_fast_fwd import prepare_wy_repr_fwd
 from .jax_kernel.cumsum import chunk_rwkv6_fwd_cumsum
-from functools import partial
+from jax.ad_checkpoint import checkpoint_policies as cp
 
 CHUNKSIZE = 16
 
@@ -309,7 +309,6 @@ def transpose_head(x, head_first):
         return x
 
 
-@partial(jax.checkpoint, policy=lambda **kwargs: False)
 def generalized_delta_rule(
     r: jax.Array,
     w: jax.Array,
@@ -367,7 +366,9 @@ def generalized_delta_rule(
     else:
         assert log_w is not None, "Either w or log_w must be provided!"
     log_w = transpose_head(log_w, head_first)
-    o, final_state = chunk_dplr(
+    o, final_state = jax.checkpoint(
+        chunk_dplr, policy=cp.save_anything_except_these_names(())
+    )(
         r=r,
         k=k,
         v=v,

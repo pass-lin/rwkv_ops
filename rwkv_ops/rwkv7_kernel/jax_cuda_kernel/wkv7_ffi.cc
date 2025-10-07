@@ -59,7 +59,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Ret<ffi::Buffer<ffi::BF16>>()  // y
         .Ret<ffi::Buffer<ffi::F32>>()   // s
         .Ret<ffi::Buffer<ffi::F32>>()   // sa
-    , {ffi::Traits::kCmdBufferCompatible});
+    //, {ffi::Traits::kCmdBufferCompatible}
+);
 
 ffi::Error Wkv7BwdImpl(cudaStream_t stream,
                        ffi::Buffer<ffi::BF16> w,
@@ -112,4 +113,5 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Ret<ffi::Buffer<ffi::BF16>>()   // dv
         .Ret<ffi::Buffer<ffi::BF16>>()   // da
         .Ret<ffi::Buffer<ffi::BF16>>()   // db
-    , {ffi::Traits::kCmdBufferCompatible});
+    //, {ffi::Traits::kCmdBufferCompatible}
+);
