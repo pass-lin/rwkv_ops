@@ -43,6 +43,14 @@ echo "==> 成功安装到 site-packages：$INSTALLED"
 ############################
 echo "==> 杀空 site-packages 里的 rwkv_ops"
 rm -rf "$INSTALLED"
+############################
+# 6+. 一并删掉 torch 编译产物 wind_backstepping
+############################
+TORCH_EXT_DIR=$(python3 -c 'from torch.utils.cpp_extension import _get_build_directory; print(_get_build_directory("wind_backstepping", False))')
+if [[ -d $TORCH_EXT_DIR ]]; then
+    echo "==> 删掉 torch 编译缓存：$TORCH_EXT_DIR"
+    rm -rf "$TORCH_EXT_DIR"
+fi
 
 ############################
 # 7. 再装一次（真正干净）
