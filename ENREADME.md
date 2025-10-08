@@ -101,7 +101,7 @@ if padding_mask is not None:
 |-------------|------|--------|--------|
 | PyTorch     | ✅   | ✅     | ✅     |
 | JAX         | ✅   | ✅     | ✅     |
-| TensorFlow  | ❌   | ❌     | ✅     |
+| TensorFlow  | ⚠️   | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 
 ---
@@ -109,6 +109,7 @@ if padding_mask is not None:
 > `native` refers to native operators, which do not use chunkwise algorithms, are slow, and have high memory usage.
 > `triton` uses chunkwise algorithms, which are fast and highly parallel, but have poor precision—use at your own risk.
 > `cuda` refers to native operators based on CUDA, which are very fast and implemented in fp32 internally, ensuring high precision. However, they may struggle with long sequences.
+> Tensorflow CUDA kernel onlt support Forward,not get graident.This implement relies on jax cuda kernel.So you should make sure you can work at jax cuda kernel.
 
 ## Usage of `rwkv6op`
 

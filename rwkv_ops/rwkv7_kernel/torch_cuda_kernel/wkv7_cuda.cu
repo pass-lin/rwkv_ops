@@ -12,7 +12,9 @@ __device__ inline bf to_bf(const float & u) {
 }
 typedef bf * __restrict__ F_;
 
-__global__ void forward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_, bf* y_, float* s_, float* sa_, float* h0_) {
+__global__ void forward_kernel(int T, int H,
+     F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
+      bf* y_, float* s_, float* sa_, float* h0_) {
     constexpr int C = _C_;
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
     float state[C] =  {0};
@@ -56,8 +58,10 @@ __global__ void forward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, 
         }
     }
 }
-__global__ void backward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_, F_ dy_,
-float * __restrict__ s_, float * __restrict__ sa_,float * __restrict__ dht_,float * __restrict__ dh0_,
+__global__ void backward_kernel(int T, int H, 
+    F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_, F_ dy_,
+float * __restrict__ s_, float * __restrict__ sa_,
+float * __restrict__ dht_,float * __restrict__ dh0_,
 bf* dw_, bf* dq_, bf* dk_, bf* dv_, bf* da_, bf* db_) {
     constexpr int C = _C_;
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;

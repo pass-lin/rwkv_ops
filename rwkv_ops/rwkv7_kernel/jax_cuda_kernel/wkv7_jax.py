@@ -117,7 +117,8 @@ def wk7_kernel(
     h0: jnp.ndarray,
 ):
     y, s, sa = _wkv7_kernel(w, q, k, v, a, b, h0)
-    return y, s[:, :, -1]
+    finnal_state = s[:, :, -1]
+    return (y, jnp.transpose(finnal_state, [0, 1, 3, 2]))
 
 
 # 前向定义
@@ -131,7 +132,8 @@ def _fwd(
     h0: jnp.ndarray,
 ):
     y, s, sa = _wkv7_kernel(w, q, k, v, a, b, h0)
-    return (y, s[:, :, -1]), (w, q, k, v, a, b, s, sa)
+    finnal_state = s[:, :, -1]
+    return (y, jnp.transpose(finnal_state, [0, 1, 3, 2])), (w, q, k, v, a, b, s, sa)
 
 
 def _wkv7_bwd_kernel(w, q, k, v, a, b, dy, s, sa, dht):

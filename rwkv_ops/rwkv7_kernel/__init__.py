@@ -143,7 +143,10 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                     initial_state = ops.zeros((B, H, N, N), "float32")
                 else:
                     initial_state = ops.cast(initial_state, "float32")
-                return RUN_CUDA_RWKV7g(r, w, k, v, a, b, initial_state)
+                out, state = RUN_CUDA_RWKV7g(r, w, k, v, a, b, initial_state)
+                if output_final_state:
+                    return out, state
+                return out
         else:
             from .native_keras_op import generalized_delta_rule
 
@@ -159,12 +162,40 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
 
                 USE_TRITON_KERNEL = True
             elif KERNEL_TYPE.lower() == "cuda":
-                from .jax_cuda_kernel.wkv7_jax import generalized_delta_rule
+                if HEAD_SIZE != 64:
+                    print("❌" * 10)
+                    print("CUDA kernel only support head size 64")
+                    print("Use Native kernel instead")
+                    print("❌" * 10)
+                    from .native_keras_op import generalized_delta_rule
+                else:
+                    from .jax_cuda_kernel.wkv7_jax import generalized_delta_rule
             else:
                 from .native_keras_op import generalized_delta_rule
         else:
             from .native_keras_op import generalized_delta_rule
+    elif keras.config.backend() == "tensorflow":
+        import tensorflow as tf
 
+        if sum([t.device_type == "GPU" for t in tf.config.list_physical_devices()]):
+            if KERNEL_TYPE.lower() == "cuda" and HEAD_SIZE == 64:
+                try:
+                    from jax.lib import xla_bridge
+
+                    assert xla_bridge.get_backend().platform == "gpu"
+                except:
+                    raise (
+                        "The operation of the TensorFlow kernel depends on the JAX kernel."
+                        "Therefore, it is necessary to ensure that it can be used in JAX, so that TensorFlow can be used."
+                    )
+                print("🎉" * 10)
+                print("Tensorflow CUDA kernel onlt support Forward,not get graident")
+                print("🎉" * 10)
+                from .tf_eager_kernel import generalized_delta_rule
+            else:
+                from .native_keras_op import generalized_delta_rule
+        else:
+            from .native_keras_op import generalized_delta_rule
     else:
         from .native_keras_op import generalized_delta_rule
     return generalized_delta_rule, USE_TRITON_KERNEL
