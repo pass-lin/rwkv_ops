@@ -104,3 +104,4 @@ for name, g_cuda, g_native in zip(grad_names, cuda_grads, native_grads):
         print(f"❌ {name} 梯度不一致")
         print(e)
 print("🎉🎉🎉🎉test_script/test_torch_cuda_kernel.py测试结束🎉🎉🎉🎉")
+
