@@ -24,11 +24,11 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
     _SO_PATH = _CURRENT_DIR / f"build_{HEAD_SIZE}/wkv7.so"
 
     def _ensure_compiled() -> pathlib.Path:
-        """首次调用时编译 CUDA 扩展，产出放在当前源码目录（方案 3）"""
+        """首次调用时编译 CUDA 扩展，产出放在当前源码目录"""
         if _SO_PATH.exists():
             return _SO_PATH
 
-        print("[rwkv7_jax] First use – compiling CUDA kernel (方案 3) …")
+        print("[rwkv7_jax] First use – compiling CUDA kernel…")
         src_dir = _CURRENT_DIR
         build_dir = _BUILD_DIR
         build_dir.mkdir(exist_ok=True)
@@ -91,7 +91,7 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
     # ---------- 工具 ----------
     def _transpose_head(x: jnp.ndarray, head_first: bool) -> jnp.ndarray:
         """(B, T, H, K) <-> (B, H, T, K)"""
-        x = jnp.asarray(x, dtype=jnp.bfloat16)
+        x = jnp.asarray(x, dtype=jnp.float32)
         if head_first:
             return jnp.transpose(x, (0, 2, 1, 3))
         return x
@@ -174,6 +174,7 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
     def _bwd(res, grads):
         w, q, k, v, a, b, s, sa = res
         dy, dht = grads
+        dy = jnp.asarray(dy, jnp.float32)
         # 调用反向 kernel
         return _wkv7_bwd_kernel(w, q, k, v, a, b, dy, s, sa, dht)
 
@@ -203,6 +204,7 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
             last_state: (B, H, K, K) 当 output_final_state=True
         """
         # 统一转 (B, T, H, K)
+        dtype = r.dtype
         r = _transpose_head(r, head_first)
         w = _transpose_head(w, head_first)
         k = _transpose_head(k, head_first)
@@ -216,7 +218,6 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
                 f"Sequence length T={T} must be divisible by chunk_len={CHUNK_LEN}"
             )
 
-        dtype = r.dtype
         # 处理初始状态
         if initial_state is None:
             h0 = jnp.zeros((B, H, K, K), jnp.float32)

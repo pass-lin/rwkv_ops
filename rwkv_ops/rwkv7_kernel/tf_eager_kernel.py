@@ -10,6 +10,14 @@ import jax.numpy as jnp
 from .jax_cuda_kernel.wkv7_jax import get_jax_generalized_delta_rule
 
 
+def transpose_head(x, head_first: bool):
+    """(B, T, H, K) <-> (B, H, T, K)"""
+    x = tf.cast(x, dtype=tf.float32)
+    if head_first:
+        return tf.transpose(x, (0, 2, 1, 3))
+    return x
+
+
 def get_tf_generalized_delta_rule(HEAD_SIZE=64):
     _, _wkv7_kernel, _wkv7_bwd_kernel = get_jax_generalized_delta_rule(HEAD_SIZE)
 
@@ -87,22 +95,13 @@ def get_tf_generalized_delta_rule(HEAD_SIZE=64):
         可 @tf.function  compile，可 tf.GradientTape 训练
         """
         dtype = r.dtype
-        if dtype != tf.bfloat16:
-            r = tf.cast(r, tf.bfloat16)
-            w = tf.cast(w, tf.bfloat16)
-            k = tf.cast(k, tf.bfloat16)
-            v = tf.cast(v, tf.bfloat16)
-            a = tf.cast(a, tf.bfloat16)
-            b = tf.cast(b, tf.bfloat16)
 
-        # 统一转 (B, T, H, K)
-        if head_first:
-            r = tf.transpose(r, [0, 2, 1, 3])
-            w = tf.transpose(w, [0, 2, 1, 3])
-            k = tf.transpose(k, [0, 2, 1, 3])
-            v = tf.transpose(v, [0, 2, 1, 3])
-            a = tf.transpose(a, [0, 2, 1, 3])
-            b = tf.transpose(b, [0, 2, 1, 3])
+        r = transpose_head(r, head_first)
+        w = transpose_head(w, head_first)
+        k = transpose_head(k, head_first)
+        v = transpose_head(v, head_first)
+        a = transpose_head(a, head_first)
+        b = transpose_head(b, head_first)
 
         B, T, H, K = tf.unstack(tf.shape(r), num=4)
         if T % chunk_len != 0:

@@ -18,7 +18,7 @@ endif()
 message(STATUS "XLA include directory: ${XLA_INCLUDE_DIR}")
 
 # ---------- 3. 生成共享库 ----------
-add_library(wkv7 SHARED wkv7_ffi.cu wkv7_ffi.cc)
+add_library(wkv7 SHARED wkv7_ffi.cu)
 
 # 3-1. 头文件搜索路径
 target_include_directories(wkv7 PRIVATE ${XLA_INCLUDE_DIR})

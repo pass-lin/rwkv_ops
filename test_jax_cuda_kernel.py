@@ -70,7 +70,7 @@ native_out, native_state = generalized_delta_rule(
 )
 
 
-def test_is_close(name, x1, x2, atol=2.5e-2, rtol=1e-3):
+def test_is_close(name, x1, x2, atol=1e-3, rtol=1e-3):
     x1 = ops.convert_to_numpy(ops.cast(x1, "float32"))
     x2 = ops.convert_to_numpy(ops.cast(x2, "float32"))
     if np.sum(np.isnan(x1)) == 0 and np.sum(np.isnan(x2)) == 0:

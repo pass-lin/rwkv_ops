@@ -22,6 +22,12 @@
 pip install rwkv_ops
 ```
 
+当然pip包对于编译的算子pip uninstal没法删干净，所有可以试着从源码安装
+```bash
+git clone https://github.com/pass-lin/rwkv_ops.git
+cd rwkv_ops
+bash install.sh
+```
 ---
 
 ## 环境变量
