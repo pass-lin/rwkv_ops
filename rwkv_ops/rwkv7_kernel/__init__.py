@@ -162,14 +162,9 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
 
                 USE_TRITON_KERNEL = True
             elif KERNEL_TYPE.lower() == "cuda":
-                if HEAD_SIZE != 64:
-                    print("❌" * 10)
-                    print("CUDA kernel only support head size 64")
-                    print("Use Native kernel instead")
-                    print("❌" * 10)
-                    from .native_keras_op import generalized_delta_rule
-                else:
-                    from .jax_cuda_kernel.wkv7_jax import generalized_delta_rule
+                from .jax_cuda_kernel.wkv7_jax import get_jax_generalized_delta_rule
+
+                generalized_delta_rule = get_jax_generalized_delta_rule(HEAD_SIZE)[0]
             else:
                 from .native_keras_op import generalized_delta_rule
         else:
@@ -177,7 +172,7 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
     elif keras.config.backend() == "tensorflow":
         import tensorflow as tf
 
-        if sum([t.device_type == "GPU" for t in tf.config.list_physical_devices()]):
+        if len(tf.config.list_physical_devices("GPU")) > 0:
             if KERNEL_TYPE.lower() == "cuda" and HEAD_SIZE == 64:
                 try:
                     from jax.lib import xla_bridge
@@ -191,7 +186,9 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                 print("🎉" * 10)
                 print("Tensorflow CUDA kernel onlt support Forward,not get graident")
                 print("🎉" * 10)
-                from .tf_eager_kernel import generalized_delta_rule
+                from .tf_eager_kernel import get_tf_generalized_delta_rule
+
+                generalized_delta_rule = get_tf_generalized_delta_rule(HEAD_SIZE)
             else:
                 from .native_keras_op import generalized_delta_rule
         else:
