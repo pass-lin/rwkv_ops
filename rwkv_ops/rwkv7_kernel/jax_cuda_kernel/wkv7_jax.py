@@ -91,7 +91,7 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
     # ---------- 工具 ----------
     def _transpose_head(x: jnp.ndarray, head_first: bool) -> jnp.ndarray:
         """(B, T, H, K) <-> (B, H, T, K)"""
-        x = jnp.asarray(x, dtype=jnp.float32)
+        x = jnp.asarray(x, dtype=jnp.bfloat16)
         if head_first:
             return jnp.transpose(x, (0, 2, 1, 3))
         return x
@@ -174,7 +174,7 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
     def _bwd(res, grads):
         w, q, k, v, a, b, s, sa = res
         dy, dht = grads
-        dy = jnp.asarray(dy, jnp.float32)
+        dy = jnp.asarray(dy, jnp.bfloat16)
         # 调用反向 kernel
         return _wkv7_bwd_kernel(w, q, k, v, a, b, dy, s, sa, dht)
 
