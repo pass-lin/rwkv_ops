@@ -11,7 +11,6 @@ import jax
 import jax.numpy as jnp
 from typing import Optional, Tuple, Union
 from jax.ad_checkpoint import checkpoint_policies as cp
-
 CHUNK_LEN = 16  # 这是一个常数
 # ---------- 延迟编译（改到当前目录） ----------
 _CURRENT_DIR = pathlib.Path(
@@ -226,10 +225,9 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
 
         # 调用 kernel
 
-        out, last_state = wk7_kernel(w, r, k, v, a, b, h0)
-        # jax.checkpoint(
-        #     wk7_kernel, policy=cp.save_anything_except_these_names(())
-        # )(w, r, k, v, a, b, h0)
+        out, last_state = jax.checkpoint(
+            wk7_kernel, policy=cp.save_anything_except_these_names(())
+        )(w, r, k, v, a, b, h0)
         out = jnp.asarray(out, dtype)  # 保证输出 dtype 与输入一致
 
         if output_final_state:
