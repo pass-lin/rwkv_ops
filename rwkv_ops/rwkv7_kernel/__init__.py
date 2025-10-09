@@ -188,7 +188,7 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                 print("🎉" * 10)
                 from .tf_eager_kernel import get_tf_generalized_delta_rule
 
-                generalized_delta_rule = get_tf_generalized_delta_rule(HEAD_SIZE)
+                generalized_delta_rule = get_tf_generalized_delta_rule(HEAD_SIZE)[0]
             else:
                 from .native_keras_op import generalized_delta_rule
         else:

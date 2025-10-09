@@ -121,4 +121,4 @@ def get_tf_generalized_delta_rule(HEAD_SIZE=64):
 
         return (out, last_state) if output_final_state else out
 
-    return generalized_delta_rule
+    return generalized_delta_rule, _tf_wkv7_fwd, _tf_wkv7_bwd
