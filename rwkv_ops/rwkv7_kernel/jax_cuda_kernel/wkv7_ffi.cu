@@ -1,7 +1,5 @@
 #include <cuda_bf16.h>
 #include <assert.h>
-//#define _C_ 64
-//#define _CHUNK_LEN_ 16
 using bf = __nv_bfloat16;
 
 __device__ inline float to_float(const bf & u) {

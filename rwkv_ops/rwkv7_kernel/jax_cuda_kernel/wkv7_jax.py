@@ -46,6 +46,8 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
             "--use_fast_math",  # 统一 fast math
             "-O3",
             "-Xptxas=-O3",
+            "-res-usage",
+            "--extra-device-vectorization",
             "-D_C_=64",
             f"-D_C_={HEAD_SIZE}",
             f"-D_CHUNK_LEN_={CHUNK_LEN}",
