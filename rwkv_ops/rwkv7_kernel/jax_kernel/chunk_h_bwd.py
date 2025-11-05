@@ -25,9 +25,9 @@ def chunk_dplr_bwd_dhu(
     B, T, H, K, V = *qg.shape, do.shape[-1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
     BK = triton.next_power_of_2(K)
-    assert BK <= 256, (
-        "current kernel does not support head dimension being larger than 256."
-    )
+    assert (
+        BK <= 256
+    ), "current kernel does not support head dimension being larger than 256."
     # H100
     if check_shared_mem("hopper"):
         BV = 64
@@ -42,9 +42,9 @@ def chunk_dplr_bwd_dhu(
     N, NT = B, triton.cdiv(T, BT)
     BC = min(BT, BC)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
-    assert NK == 1, (
-        "NK > 1 is not supported because it involves time-consuming synchronization"
-    )
+    assert (
+        NK == 1
+    ), "NK > 1 is not supported because it involves time-consuming synchronization"
     dh_shape = (B, NT, H, K, V)
     out_shapes = [
         jax.ShapeDtypeStruct(dh_shape, dv.dtype),

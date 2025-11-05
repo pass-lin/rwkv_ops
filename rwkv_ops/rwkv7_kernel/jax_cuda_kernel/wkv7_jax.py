@@ -11,6 +11,7 @@ import jax
 import jax.numpy as jnp
 from typing import Optional, Tuple, Union
 from jax.ad_checkpoint import checkpoint_policies as cp
+
 CHUNK_LEN = 16  # 这是一个常数
 # ---------- 延迟编译（改到当前目录） ----------
 _CURRENT_DIR = pathlib.Path(

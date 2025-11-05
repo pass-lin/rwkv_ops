@@ -16,6 +16,11 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
     if keras.config.backend() == "torch":
         import torch
 
+        if not torch.cuda.is_available():
+            from .native_keras_op import generalized_delta_rule
+
+            return generalized_delta_rule, False
+
         if KERNEL_TYPE.lower() == "triton":
             from .torch_op import generalized_delta_rule
 
@@ -152,10 +157,10 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
 
             USE_TRITON_KERNEL = False
     elif keras.config.backend() == "jax":
-        from jax.lib import xla_bridge
+        import jax
         import os
 
-        if xla_bridge.get_backend().platform == "gpu":
+        if jax.devices()[0].platform == "gpu":
             if KERNEL_TYPE.lower() == "triton":
                 os.environ["JAX_LOG_COMPUTATION"] = "0"
                 from .jax_op import generalized_delta_rule
@@ -193,6 +198,8 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                 from .native_keras_op import generalized_delta_rule
         else:
             from .native_keras_op import generalized_delta_rule
+    elif keras.config.backend() == "mlx" and KERNEL_TYPE.lower() == "cuda":
+        from .mlx_op import generalized_delta_rule
     else:
         from .native_keras_op import generalized_delta_rule
     return generalized_delta_rule, USE_TRITON_KERNEL

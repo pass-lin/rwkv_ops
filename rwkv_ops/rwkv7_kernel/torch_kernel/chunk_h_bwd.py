@@ -24,9 +24,9 @@ def chunk_dplr_bwd_dhu(
     B, T, H, K, V = *qg.shape, do.shape[-1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
     BK = triton.next_power_of_2(K)
-    assert BK <= 256, (
-        "current kernel does not support head dimension being larger than 256."
-    )
+    assert (
+        BK <= 256
+    ), "current kernel does not support head dimension being larger than 256."
     # H100
     if check_shared_mem("hopper", qg.device.index):
         BV = 64
@@ -42,9 +42,9 @@ def chunk_dplr_bwd_dhu(
 
     BC = min(BT, BC)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
-    assert NK == 1, (
-        "NK > 1 is not supported because it involves time-consuming synchronization"
-    )
+    assert (
+        NK == 1
+    ), "NK > 1 is not supported because it involves time-consuming synchronization"
 
     dh = qg.new_empty(B, NT, H, K, V)
     dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None

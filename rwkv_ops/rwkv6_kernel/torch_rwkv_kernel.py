@@ -154,9 +154,9 @@ class RWKVKernelOperator:
             @staticmethod
             def apply(B, T, C, H, S, s_map, r, k, v, w, u, s):
                 with torch.no_grad():
-                    assert s_map.dtype == torch.int64, (
-                        "s_map 必须为None 或者是长度为B的，int64类型的数组。"
-                    )
+                    assert (
+                        s_map.dtype == torch.int64
+                    ), "s_map 必须为None 或者是长度为B的，int64类型的数组。"
                     assert (s is None and s_map is None) or (
                         s is not None and s_map is not None
                     ), "init_state与s_map必须同时为None 或者同时不为None"
@@ -240,17 +240,15 @@ class RWKVKernelOperator:
         is_custom_init = init_state is not None
 
         if init_state is not None:
-            assert len(init_state.shape) in [3, 4], (
-                "init_state 的形状必须为(state_kinds /*<= Batch_size*/,num_heads,head_size,head_size) 或者(num_heads,head_size,head_size)"
-            )
+            assert (
+                len(init_state.shape) in [3, 4]
+            ), "init_state 的形状必须为(state_kinds /*<= Batch_size*/,num_heads,head_size,head_size) 或者(num_heads,head_size,head_size)"
             if len(init_state.shape) == 3:
                 init_state = init_state[None, :]
             assert (
                 init_state.shape[1:] == (H, self.head_size, self.head_size)
                 and init_state.shape[0] <= B
-            ), (
-                "init_state 的形状必须为(state_kinds /*<= Batch_size*/,num_heads,head_size,head_size) 或者(num_heads,head_size,head_size)"
-            )
+            ), "init_state 的形状必须为(state_kinds /*<= Batch_size*/,num_heads,head_size,head_size) 或者(num_heads,head_size,head_size)"
 
             assert init_state.dtype == s_dtype, f"init_state的数值类型应为: {s_dtype}"
             assert init_state.device == r.device
@@ -269,17 +267,17 @@ class RWKVKernelOperator:
 
         if with_state:
             if init_state is None:
-                assert state_map is None, (
-                    "您必须在指定了init_state的情况下才能使用state_map"
-                )
+                assert (
+                    state_map is None
+                ), "您必须在指定了init_state的情况下才能使用state_map"
                 init_state = torch.zeros((0,), device=r.device, dtype=s_dtype)
                 state_map = torch.zeros((0,), device=r.device, dtype=torch.int64)
             else:
                 n_state = init_state.shape[0]
                 if state_map is None:
-                    assert n_state == 1 or n_state == B, (
-                        "我无法为您推断state_map的形状，请手动指定。"
-                    )
+                    assert (
+                        n_state == 1 or n_state == B
+                    ), "我无法为您推断state_map的形状，请手动指定。"
                     if n_state == 1:
                         state_map = torch.tensor(
                             [0] * B, dtype=torch.int64, device=r.device
@@ -292,9 +290,9 @@ class RWKVKernelOperator:
                         assert False, "未实现"
                 else:
                     assert state_map.shape == (B,), "state_map的形状必须为(batch_size,)"
-                    assert (state_map >= 0).all() and (state_map < n_state).all(), (
-                        f"state_map的取值范围为[0,{n_state})之间的整数，您的输入显然不满足。"
-                    )
+                    assert (
+                        (state_map >= 0).all() and (state_map < n_state).all()
+                    ), f"state_map的取值范围为[0,{n_state})之间的整数，您的输入显然不满足。"
             # print('state map:',state_map)
             o, ys = self.kernel_with_state.apply(
                 B, T, C, H, is_custom_init, state_map, r, k, v, w, u, init_state
