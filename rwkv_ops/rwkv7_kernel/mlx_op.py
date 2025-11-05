@@ -7,14 +7,7 @@ import mlx.core as mx
 import mlx.nn as nn
 
 
-@partial(mx.compile, shapeless=True)
-def addcmul(x, y, z):
-    return x + y * z
 
-
-@partial(mx.compile, shapeless=True)
-def l2_norm(x):
-    return x / mx.maximum(mx.linalg.norm(x, axis=-1, keepdims=True), 1e-7)
 
 
 def _make_wkv7_kernel():
