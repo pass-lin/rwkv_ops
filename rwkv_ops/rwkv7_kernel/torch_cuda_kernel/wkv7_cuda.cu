@@ -1,5 +1,6 @@
 #include <cuda_bf16.h>
 #include <assert.h>
+#include <cstdint> // 必须引入，用于 int64_t
 
 using bf = __nv_bfloat16;
 
@@ -19,13 +20,18 @@ __global__ void forward_kernel(int T, int H,
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
     float state[C] =  {0};
     __shared__ float q[C], k[C], w[C], a[C], b[C];
-    int h0_base =( (bb*H + hh)*C + i)*C;
+
+    // 【修改】h0_base 使用 int64_t 并强制转换
+    int64_t h0_base = ((int64_t)bb*H + hh)*C*C + i*C; 
+
 #pragma unroll
         for (int j = 0; j < C; j++) {
             state[j] = h0_[h0_base + j];
         }
     for (int t = 0; t < T; t++) {
-        int ind = bb*T*H*C + t*H*C + hh * C + i;
+        // 【修改】ind 使用 int64_t，防止 B*T*H*C 溢出
+        int64_t ind = (int64_t)bb*T*H*C + (int64_t)t*H*C + hh * C + i;
+        
         __syncthreads();
         q[i] = to_float(q_[ind]);
         w[i] = __expf(-__expf(to_float(w_[ind])));
@@ -50,7 +56,8 @@ __global__ void forward_kernel(int T, int H,
         y_[ind] = to_bf(y);
 
         if ((t+1)%_CHUNK_LEN_ == 0) {
-            int base = (bb*H+hh)*(T/_CHUNK_LEN_)*C*C + (t/_CHUNK_LEN_)*C*C + i;
+            // 【修改】base 是溢出的主要原因 (State Size)，必须用 int64_t
+            int64_t base = ((int64_t)bb*H+hh)*(T/_CHUNK_LEN_)*C*C + ((int64_t)t/_CHUNK_LEN_)*C*C + i;
 #pragma unroll
             for (int j = 0; j < C; j++) {
                 s_[base + j*C] = state[j];
@@ -58,6 +65,7 @@ __global__ void forward_kernel(int T, int H,
         }
     }
 }
+
 __global__ void backward_kernel(int T, int H, 
     F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_, F_ dy_,
 float * __restrict__ s_, float * __restrict__ sa_,
@@ -65,17 +73,11 @@ float * __restrict__ dht_,float * __restrict__ dh0_,
 bf* dw_, bf* dq_, bf* dk_, bf* dv_, bf* da_, bf* db_) {
     constexpr int C = _C_;
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
-    float stateT[C] =  {
-        0
-    }
-    , dstate[C] =  {
-        0
-    }
-    , dstateT[C] =  {
-        0
-    }
-    ;
-    int dht_base =( (bb*H + hh)*C + i)*C;
+    float stateT[C] =  {0}, dstate[C] =  {0}, dstateT[C] =  {0};
+    
+    // 【修改】dht_base 升级为 int64_t
+    int64_t dht_base = ((int64_t)bb*H + hh)*C*C + i*C;
+
 #pragma unroll
         for (int j = 0; j < C; j++) {
             dstate[j] = dht_[dht_base + j];
@@ -85,7 +87,9 @@ bf* dw_, bf* dq_, bf* dk_, bf* dv_, bf* da_, bf* db_) {
     float qi, wi, ki, ai, bi, dyi;
 
     for (int t = T-1; t >= 0; t--) {
-        int ind = bb*T*H*C + t*H*C + hh * C + i;
+        // 【修改】ind 升级为 int64_t
+        int64_t ind = (int64_t)bb*T*H*C + (int64_t)t*H*C + hh * C + i;
+        
         __syncthreads();
         q[i] = qi = to_float(q_[ind]);
         float wi_fac = -__expf(to_float(w_[ind]));
@@ -99,7 +103,8 @@ bf* dw_, bf* dq_, bf* dk_, bf* dv_, bf* da_, bf* db_) {
         __syncthreads();
 
         if ((t+1)%_CHUNK_LEN_ == 0) {
-            int base = (bb*H+hh)*(T/_CHUNK_LEN_)*C*C + (t/_CHUNK_LEN_)*C*C + i*C;
+            // 【修改】base 升级为 int64_t
+            int64_t base = ((int64_t)bb*H+hh)*(T/_CHUNK_LEN_)*C*C + ((int64_t)t/_CHUNK_LEN_)*C*C + i*C;
 #pragma unroll
             for (int j = 0; j < C; j++) {
                 stateT[j] = s_[base + j];

@@ -1,18 +1,16 @@
-/*
- *  wkv7_ffi_bf16.cu
- *  BF16 版本，外部接口 BF16，内部 kernel 保持原样
- */
+\
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <xla/ffi/api/ffi.h>
 #include <vector>
+#include <cstdint> // 引入 int64_t
 
 namespace ffi = xla::ffi;
 
 /* -------------------- 类型别名 -------------------- */
 using bf = __nv_bfloat16;
 
-/* -------------------- 设备端辅助（kernel 里用） -------------------- */
+/* -------------------- 设备端辅助 -------------------- */
 __device__ inline float to_float(const bf &u) {
     return __bfloat162float(u);
 }
@@ -22,7 +20,7 @@ __device__ inline bf to_bf(const float &u) {
 
 typedef bf *__restrict__ F_;
 
-/* -------------------- 你的 kernel（禁止修改） -------------------- */
+/* -------------------- Kernel -------------------- */
 __global__ void forward_kernel(int T, int H,
                                F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
                                bf *y_, float *s_, float *sa_, float *h0_) {
@@ -30,12 +28,17 @@ __global__ void forward_kernel(int T, int H,
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
     float state[C] = {0};
     __shared__ float q[C], k[C], w[C], a[C], b[C];
-    int h0_base = ((bb * H + hh) * C + i) * C;
+    
+    // h0 比较小，int 足够，但为了保险统一转 int64_t
+    int64_t h0_base = ((int64_t)bb * H + hh) * C * C + i * C; 
+    
 #pragma unroll
     for (int j = 0; j < C; ++j) state[j] = h0_[h0_base + j];
 
     for (int t = 0; t < T; ++t) {
-        int ind = bb * T * H * C + t * H * C + hh * C + i;
+        // 【关键修正】强制转换为 int64_t 进行计算，防止中间结果 int32 溢出
+        int64_t ind = (int64_t)bb * T * H * C + (int64_t)t * H * C + hh * C + i;
+        
         __syncthreads();
         q[i] = to_float(q_[ind]);
         w[i] = __expf(-__expf(to_float(w_[ind])));
@@ -60,8 +63,9 @@ __global__ void forward_kernel(int T, int H,
         y_[ind] = to_bf(y);
 
         if ((t + 1) % _CHUNK_LEN_ == 0) {
-            int base = (bb * H + hh) * (T / _CHUNK_LEN_) * C * C +
-                       (t / _CHUNK_LEN_) * C * C + i;
+            // 【关键修正】状态索引非常大，必须用 int64_t 且强转第一个操作数
+            int64_t base = ((int64_t)bb * H + hh) * (T / _CHUNK_LEN_) * C * C +
+                           ((int64_t)t / _CHUNK_LEN_) * C * C + i;
 #pragma unroll
             for (int j = 0; j < C; ++j) s_[base + j * C] = state[j];
         }
@@ -75,7 +79,9 @@ __global__ void backward_kernel(int T, int H,
     constexpr int C = _C_;
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
     float stateT[C] = {0}, dstate[C] = {0}, dstateT[C] = {0};
-    int dht_base = ((bb * H + hh) * C + i) * C;
+    
+    int64_t dht_base = ((int64_t)bb * H + hh) * C * C + i * C;
+
 #pragma unroll
     for (int j = 0; j < C; ++j) {
         dstate[j]  = dht_[dht_base + j];
@@ -85,7 +91,9 @@ __global__ void backward_kernel(int T, int H,
     float qi, wi, ki, ai, bi, dyi;
 
     for (int t = T - 1; t >= 0; --t) {
-        int ind = bb * T * H * C + t * H * C + hh * C + i;
+        // 【关键修正】int64_t + 强转
+        int64_t ind = (int64_t)bb * T * H * C + (int64_t)t * H * C + hh * C + i;
+        
         __syncthreads();
         q[i] = qi = to_float(q_[ind]);
         float wi_fac = -__expf(to_float(w_[ind]));
@@ -99,8 +107,9 @@ __global__ void backward_kernel(int T, int H,
         __syncthreads();
 
         if ((t + 1) % _CHUNK_LEN_ == 0) {
-            int base = (bb * H + hh) * (T / _CHUNK_LEN_) * C * C +
-                       (t / _CHUNK_LEN_) * C * C + i * C;
+            // 【关键修正】此处原代码为 int base，会导致反向传播崩溃，已修正为 int64_t
+            int64_t base = ((int64_t)bb * H + hh) * (T / _CHUNK_LEN_) * C * C +
+                           ((int64_t)t / _CHUNK_LEN_) * C * C + i * C;
 #pragma unroll
             for (int j = 0; j < C; ++j) stateT[j] = s_[base + j];
         }
@@ -145,7 +154,6 @@ __global__ void backward_kernel(int T, int H,
     }
 }
 
-/* -------------------- 宿主函数 -------------------- */
 static ffi::Error WKV7FwdHost(
     cudaStream_t stream,
     ffi::Buffer<ffi::BF16> w,
@@ -154,7 +162,7 @@ static ffi::Error WKV7FwdHost(
     ffi::Buffer<ffi::BF16> v,
     ffi::Buffer<ffi::BF16> z,
     ffi::Buffer<ffi::BF16> a,
-    ffi::Buffer<ffi::F32>  h0,   // 保持 float
+    ffi::Buffer<ffi::F32>  h0,
     ffi::ResultBuffer<ffi::BF16> y,
     ffi::ResultBuffer<ffi::F32>  s,
     ffi::ResultBuffer<ffi::F32>  sa)
@@ -238,7 +246,6 @@ static ffi::Error WKV7BwdHost(
     return ffi::Error::Success();
 }
 
-/* -------------------- 注册符号 -------------------- */
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
     Wkv7Fwd, WKV7FwdHost,
     ffi::Ffi::Bind()

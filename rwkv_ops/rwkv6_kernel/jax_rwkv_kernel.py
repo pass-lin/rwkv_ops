@@ -103,9 +103,9 @@ class RWKVKernelOperator:
                 bz, seq_len, hd_sz = r_type.shape
 
                 assert hd_sz % head_size == 0
-                assert (
-                    reduce(lambda x, y: x * y, u_type.shape, 1) == hd_sz
-                ), "the elements of u (time first) is not equal to hidden_size"
+                assert reduce(lambda x, y: x * y, u_type.shape, 1) == hd_sz, (
+                    "the elements of u (time first) is not equal to hidden_size"
+                )
                 input_type = r_type.element_type
 
                 if input_type in [ir.F32Type.get(), ir.BF16Type.get()]:
@@ -159,9 +159,9 @@ class RWKVKernelOperator:
                 bz, seq_len, channels = r.shape
                 assert channels % head_size == 0
                 assert seq_len <= max_sequence_length
-                assert (
-                    reduce(lambda x, y: x * y, u.shape, 1) == channels
-                ), "the elements of u (time first) is not equal to hidden_size"
+                assert reduce(lambda x, y: x * y, u.shape, 1) == channels, (
+                    "the elements of u (time first) is not equal to hidden_size"
+                )
 
                 r_dtype = dtypes.canonicalize_dtype(r.dtype)
                 k_dtype = dtypes.canonicalize_dtype(k.dtype)
@@ -237,9 +237,9 @@ class RWKVKernelOperator:
                 bz, seq_len, hd_sz = r_type.shape
 
                 assert hd_sz % head_size == 0
-                assert (
-                    reduce(lambda x, y: x * y, u_type.shape, 1) == hd_sz
-                ), "the elements of u (time first) is not equal to hidden_size"
+                assert reduce(lambda x, y: x * y, u_type.shape, 1) == hd_sz, (
+                    "the elements of u (time first) is not equal to hidden_size"
+                )
                 input_type = r_type.element_type
 
                 if input_type in [ir.F32Type.get(), ir.BF16Type.get()]:
@@ -304,9 +304,9 @@ class RWKVKernelOperator:
                 bz, seq_len, channels = r.shape
                 assert channels % head_size == 0
                 assert seq_len <= max_sequence_length
-                assert (
-                    reduce(lambda x, y: x * y, u.shape, 1) == channels
-                ), "the elements of u (time first) is not equal to hidden_size"
+                assert reduce(lambda x, y: x * y, u.shape, 1) == channels, (
+                    "the elements of u (time first) is not equal to hidden_size"
+                )
 
                 r_dtype = dtypes.canonicalize_dtype(r.dtype)
                 k_dtype = dtypes.canonicalize_dtype(k.dtype)
@@ -374,9 +374,9 @@ class RWKVKernelOperator:
                         n_state = jnp.shape(init_state)[0]
                         B = jnp.shape(r)[0]
                         # print('ns:',n_state,'B:',B,r.shape,k.shape,v.shape)
-                        assert (
-                            n_state == 1 or n_state == B
-                        ), "我无法为您推断state_map的形状，请手动指定。"
+                        assert n_state == 1 or n_state == B, (
+                            "我无法为您推断state_map的形状，请手动指定。"
+                        )
                         if n_state == 1:
                             state_map = jnp.array([0] * B, dtype=jnp.int32)
                         elif n_state == B:
@@ -392,12 +392,12 @@ class RWKVKernelOperator:
                             jnp.int32,
                         ], "state_map的数值类型必须为int32"
                         state_map = jnp.astype(state_map, jnp.int32)
-                        assert jnp.all(state_map >= 0) and jnp.add(
-                            state_map < bz
-                        ), f"state_map内为state的映射下标，因此范围为: [0,{bz})"
-                assert (init_state is None) == (
-                    state_map is None
-                ), "init_state与state_map必须同时传入"
+                        assert jnp.all(state_map >= 0) and jnp.add(state_map < bz), (
+                            f"state_map内为state的映射下标，因此范围为: [0,{bz})"
+                        )
+                assert (init_state is None) == (state_map is None), (
+                    "init_state与state_map必须同时传入"
+                )
 
                 if init_state is None:
                     y, s = _rwkv_fwd_state_p.bind(r, k, v, w, u)
@@ -440,9 +440,9 @@ class RWKVKernelOperator:
 
                 assert hd_sz % head_size == 0
                 num_heads = hd_sz // head_size
-                assert (
-                    reduce(lambda x, y: x * y, u_type.shape, 1) == hd_sz
-                ), "the elements of u (time first) is not equal to hidden_size"
+                assert reduce(lambda x, y: x * y, u_type.shape, 1) == hd_sz, (
+                    "the elements of u (time first) is not equal to hidden_size"
+                )
                 input_type = r_type.element_type
 
                 if input_type in [ir.F32Type.get(), ir.BF16Type.get()]:
@@ -452,25 +452,25 @@ class RWKVKernelOperator:
                 state_shape = (bz, num_heads, head_size, head_size)
 
                 if with_init_state:
-                    assert (
-                        s_map is not None
-                    ), "您必须同时传入init_state与state_map 或者都赋值为None."
+                    assert s_map is not None, (
+                        "您必须同时传入init_state与state_map 或者都赋值为None."
+                    )
 
                     s_type = ir.RankedTensorType(s.type)
                     sm_type = ir.RankedTensorType(s_map.type)
                     # print(sm_type, ir.IntegerType.get_signless(64))
-                    assert sm_type.element_type == ir.IntegerType.get_signless(
-                        32
-                    ), "state_map的数据类型必须为int32"
+                    assert sm_type.element_type == ir.IntegerType.get_signless(32), (
+                        "state_map的数据类型必须为int32"
+                    )
                     # print(sm_type.shape,bz)
-                    assert tuple(sm_type.shape) == (
-                        bz,
-                    ), "state_map的shape 形状必须为(batch_size,)"
+                    assert tuple(sm_type.shape) == (bz,), (
+                        "state_map的shape 形状必须为(batch_size,)"
+                    )
 
                     assert s_type.element_type == output_type
-                    assert (
-                        tuple(s_type.shape) == state_shape
-                    ), "the shape of init state must be (batch_size,num_heads,head_size,head_size)"
+                    assert tuple(s_type.shape) == state_shape, (
+                        "the shape of init state must be (batch_size,num_heads,head_size,head_size)"
+                    )
                     # assert s_type.shape[0] == bz and reduce(lambda x,y: x * y, s_type.shape[1:],1) == head_size * hd_sz,"the shape of init state must be (batch_size,num_heads,head_size,head_size)"
 
                 opaque = rwkv_kernel.create_rwkv_descriptor(
@@ -535,9 +535,9 @@ class RWKVKernelOperator:
                 bz, seq_len, channels = r.shape
                 assert channels % head_size == 0
                 assert seq_len <= max_sequence_length
-                assert (
-                    reduce(lambda x, y: x * y, u.shape, 1) == channels
-                ), "the elements of u (time first) is not equal to hidden_size"
+                assert reduce(lambda x, y: x * y, u.shape, 1) == channels, (
+                    "the elements of u (time first) is not equal to hidden_size"
+                )
                 num_heads = channels // head_size
                 r_dtype = dtypes.canonicalize_dtype(r.dtype)
                 k_dtype = dtypes.canonicalize_dtype(k.dtype)
@@ -558,9 +558,9 @@ class RWKVKernelOperator:
                 if s is not None:
                     s_dtype = dtypes.canonicalize_dtype(s.dtype)
                     assert s_dtype == output_dtype
-                    assert (
-                        s.shape == state_shape
-                    ), "the shape of init_state must be (batch_size, seq_len, num_heads, head_size, head_size)"
+                    assert s.shape == state_shape, (
+                        "the shape of init_state must be (batch_size, seq_len, num_heads, head_size, head_size)"
+                    )
 
                 return [
                     ShapedArray(
@@ -586,22 +586,22 @@ class RWKVKernelOperator:
     def _load_or_build_kernel(head_size, max_sequence_length):
         assert head_size % 4 == 0, f"head size必须是4的倍数，而{head_size}显然不是."
         assert isinstance(head_size, int), "你是在搞笑吗？ head_size肯定得是int类型的啊"
-        assert isinstance(
-            max_sequence_length, int
-        ), "你是在搞笑吗？ max_sequence_length肯定得是int类型的啊"
-        assert (
-            head_size > 0 and max_sequence_length > 0
-        ), "难绷，head_size与max_sequence_length肯定得是大于0的正整数啊。"
-        assert (
-            os.path.exists(cuda_lib_dir) and len(os.listdir(cuda_lib_dir)) > 0
-        ), f"请检查{cuda_lib_dir}文件夹是否存在，这个文件本质是是您的cuda library的超链接。"
+        assert isinstance(max_sequence_length, int), (
+            "你是在搞笑吗？ max_sequence_length肯定得是int类型的啊"
+        )
+        assert head_size > 0 and max_sequence_length > 0, (
+            "难绷，head_size与max_sequence_length肯定得是大于0的正整数啊。"
+        )
+        assert os.path.exists(cuda_lib_dir) and len(os.listdir(cuda_lib_dir)) > 0, (
+            f"请检查{cuda_lib_dir}文件夹是否存在，这个文件本质是是您的cuda library的超链接。"
+        )
         kernel_dir = os.path.abspath(
             os.path.join(os.path.dirname(__file__), kernel_dir_name)
         )
         builds_dir = os.path.join(kernel_dir, "builds")
-        assert os.path.exists(
-            kernel_dir
-        ), f"找不到{kernel_dir_name}文件夹，请问您的文件是完整的吗？"
+        assert os.path.exists(kernel_dir), (
+            f"找不到{kernel_dir_name}文件夹，请问您的文件是完整的吗？"
+        )
         if not os.path.exists(builds_dir):
             os.mkdir(builds_dir)
         target_dir_name = f"_N_{head_size}_T_{max_sequence_length}"

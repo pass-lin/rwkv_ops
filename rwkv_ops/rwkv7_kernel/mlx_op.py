@@ -7,9 +7,6 @@ import mlx.core as mx
 import mlx.nn as nn
 
 
-
-
-
 def _make_wkv7_kernel():
     if not mx.metal.is_available():
         return None

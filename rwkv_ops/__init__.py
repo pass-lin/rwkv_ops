@@ -1,4 +1,4 @@
-__version__ = "0.3.3"
+__version__ = "0.3.4"
 import os
 
 KERNEL_TYPE = os.environ.get("KERNEL_TYPE", "cuda").lower()
