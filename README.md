@@ -117,7 +117,8 @@ if padding_mask is not None:
 2. `triton` 使用的是chunkwise算法实现，速度快，并行度高，缺点是精度很差，介意勿用
 3. `cuda` 为基于 CUDA 的原生算子，速度很快，并且kernel内部使用fp32实现，所以精度也很高。缺点就是长序列的时候比较吃亏跑不满。
 4. tensorflow的CUDA实现只支持前向计算，是没有梯度的。并且这个是使用jax的cuda实现实现的，你需要保证你能够成功运行jax的cuda kernel。
-5. 因为MLX还没合并到keras，所以原生算子暂不支持。但是我们提供了一个前向的算子。
+5. tensorflow kernel只支持eager
+6. 因为MLX还没合并到keras，所以原生算子暂不支持。但是我们提供了一个前向的算子。
 ## rwkv7_op_rnn 使用方法
 
 ### 背景
@@ -162,6 +163,7 @@ def rwkv7_op_rnn(
 1. tf的cuda实现依赖于jax的cuda实现，所以需要安装jax
 2. native实现我们直接复用了rwkv7_op的native实现
 3. **这个算子没有梯度**
+4.  tensorflow kernel只支持eager
 
 ## rwkv6op 使用方法
 

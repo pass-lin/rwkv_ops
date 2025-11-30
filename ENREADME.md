@@ -117,7 +117,7 @@ if padding_mask is not None:
 3. `cuda`: CUDA-based native operator, fast and high precision (fp32 internally), but may underutilize GPU for long sequences.
 4. TensorFlow CUDA only supports forward pass (no gradients) and relies on JAX’s CUDA kernel.
 5. MLX is not yet integrated into Keras, so native operators are not supported. A forward-only operator is provided.
-
+6. tensorflow kernel only support eager mode
 ---
 
 ## Usage of `rwkv7_op_rnn`
@@ -168,7 +168,7 @@ def rwkv7_op_rnn(
 1. TensorFlow CUDA relies on JAX’s CUDA implementation.
 2. Native implementation reuses `rwkv7_op`’s native code.
 3. **This operator has no gradient support**.
-
+4. tensorflow kernel only support eager mode
 ---
 
 ## Usage of `rwkv6op`

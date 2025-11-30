@@ -8,6 +8,9 @@ import tensorflow as tf
 from typing import Optional, Tuple
 import jax.numpy as jnp
 from .jax_cuda_kernel.wkv7_jax import get_jax_generalized_delta_rule
+from .jax_cuda_kernel_single.wkv7_single_step_jax import (
+    get_jax_generalized_delta_rule_single_step,
+)
 
 
 def transpose_head(x, head_first: bool):
@@ -124,25 +127,21 @@ def get_tf_generalized_delta_rule(HEAD_SIZE=64):
 
 
 def get_tf_generalized_delta_rule_single_step(HEAD_SIZE=64):
-    from .jax_cuda_kernel_single.wkv7_single_step_jax import (
-        get_jax_generalized_delta_rule_single_step,
-    )
-
     # 获取 JAX 版本的单步 generalized delta rule
     _wkv7_single_step_kernel = get_jax_generalized_delta_rule_single_step(HEAD_SIZE)
 
     # ---------- 底层 kernel 包装 ----------
     @tf.py_function(Tout=[tf.bfloat16, tf.float32])
-    def _tf_wkv7_single_step_fwd(w, q, k, v, a, b, h0):
+    def _tf_wkv7_single_step_fwd(w, r, k, v, a, b, h0):
         """tf.py_function 包装 JAX 单步前向"""
         y, s = _wkv7_single_step_kernel(
-            jnp.asarray(w, jnp.bfloat16),
-            jnp.asarray(q, jnp.bfloat16),
-            jnp.asarray(k, jnp.bfloat16),
-            jnp.asarray(v, jnp.bfloat16),
-            jnp.asarray(a, jnp.bfloat16),
-            jnp.asarray(b, jnp.bfloat16),
-            jnp.asarray(h0, jnp.float32),
+            w=jnp.asarray(w, jnp.bfloat16),
+            r=jnp.asarray(r, jnp.bfloat16),
+            k=jnp.asarray(k, jnp.bfloat16),
+            v=jnp.asarray(v, jnp.bfloat16),
+            a=jnp.asarray(a, jnp.bfloat16),
+            b=jnp.asarray(b, jnp.bfloat16),
+            initial_state=jnp.asarray(h0, jnp.float32),
         )
         return (
             tf.convert_to_tensor(y, tf.bfloat16),
