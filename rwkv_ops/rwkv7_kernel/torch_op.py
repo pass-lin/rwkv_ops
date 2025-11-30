@@ -485,7 +485,7 @@ def generalized_delta_rule(
             output_final_state=output_final_state,
         )
     else:
-        from ops.native_keras_op import generalized_delta_rule
+        from .native_keras_op import generalized_delta_rule
 
         out, state = generalized_delta_rule(
             r=r,

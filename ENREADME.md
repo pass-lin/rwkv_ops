@@ -1,16 +1,15 @@
 # RWKV OPS Project
 
-> Since RWKV will continue to iterate, the core operators will be updated accordingly.  
-> This repository is dedicated to maintaining the **operators** themselves, not the layers or models; it aims to provide GPU operators for various frameworks.
+> As RWKV continues to evolve, the core operators will be updated accordingly.  
+> This repository is dedicated to maintaining the **operators** themselves, not layers or models; it aims to provide GPU-accelerated operators for various frameworks.
 
 ### Current Support
-
 | Operator Type | Framework Support |
 |---------------|-------------------|
-| GPU Operators | PyTorch, JAX      |
-| Native Operators | PyTorch, JAX, TensorFlow, NumPy |
+| GPU operators | PyTorch, JAX      |
+| Native operators | PyTorch, JAX, TensorFlow, NumPy |
 
-> In the future, if the Keras ecosystem expands, support for MLX and OpenVINO may be added.  
+> If the Keras ecosystem expands, MLX and OpenVINO may be supported in the future.  
 > Note: This library depends on `keras`.
 
 ---
@@ -21,9 +20,10 @@
 pip install rwkv_ops
 ```
 
-You also can install from source
+However, compiled operators are not fully removed by `pip uninstall`. You can install from source:
+
 ```bash
-git clone https://github.com/pass-lin/rwkv_ops.git
+git clone https://github.com/pass-lin/rwkv_ops.git 
 cd rwkv_ops
 bash install.sh
 ```
@@ -32,20 +32,20 @@ bash install.sh
 
 ## Environment Variables
 
-| Variable Name | Meaning | Values | Default Value | Priority |
-|---------------|---------|--------|---------------|----------|
+| Variable Name | Meaning | Values | Default | Priority |
+|---------------|---------|--------|---------|----------|
 | `KERAS_BACKEND` | Keras backend | `jax` / `torch` / `tensorflow` / `numpy` | — | Low |
 | `KERNEL_BACKEND` | Operator backend | `jax` / `torch` / `tensorflow` / `numpy` | `torch` | **High** |
 | `KERNEL_TYPE` | Implementation type | `triton` / `cuda` / `native` | `cuda` | — |
 
-> If `KERNEL_BACKEND` is set, it will be used directly; if not, `KERAS_BACKEND` will be used; if neither is set, the default is `torch`.
+> If `KERNEL_BACKEND` is set, it is used directly; if not, `KERAS_BACKEND` is used. If both are unset, `torch` is the default.
 
 ---
 
 ## Usage of `rwkv7op`
 
 ```python
-from rwkv_ops import generalized_delta_rule  # or from rwkv_ops import rwkv7_op, which is equivalent
+from rwkv_ops import generalized_delta_rule  # or: from rwkv_ops import rwkv7_op, they are equivalent
 
 def generalized_delta_rule(
     r,
@@ -59,29 +59,29 @@ def generalized_delta_rule(
     head_first: bool = False,
 ):
     """
-    Chunked Delta Rule Attention Interface.
+    Chunked Delta-Rule attention interface.
 
     Args:
-        q:  [B, T, H, K]
+        r:  [B, T, H, K]
         k:  [B, T, H, K]
         v:  [B, T, H, V]
         a:  [B, T, H, K]
         b:  [B, T, H, K]
-        gk: [B, T, H, K]  # decay term in log space!
-        initial_state: Initial state [N, H, K, V], where N is the number of sequences
-        output_final_state: Whether to return the final state
-        head_first: Whether in head-first format, variable-length is not supported
+        w:  [B, T, H, K]  # decay term in log space
+        initial_state: initial state [N, H, K, V], N is number of sequences
+        output_final_state: whether to return the final state
+        head_first: whether to use head-first format (not supported for variable-length)
 
     Returns:
-        o:           Output [B, T, H, V] or [B, H, T, V]
-        final_state: Final state [N, H, K, V] or None
+        o:           output [B, T, H, V] or [B, H, T, V]
+        final_state: final state [N, H, K, V] or None
     """
 ```
 
-### Special Usage for `torch-cuda`
+### Special Notes for `torch-cuda`
 
-- Under `torch-cuda`, `head_size` is also a kernel parameter, defaulting to 64.  
-- If `head_size ≠ 64`, please use:
+- Under `torch-cuda`, `head_size` is also a kernel parameter, defaulting to 64.
+- If `head_size ≠ 64`, use:
 
 ```python
 from rwkv_ops import get_generalized_delta_rule
@@ -91,16 +91,16 @@ generalized_delta_rule, USE_TRITON_KERNEL = get_generalized_delta_rule(
 )
 ```
 
-- `USE_TRITON_KERNEL` is a constant indicating whether the chunkwise operator is used.  
-- The padding handling logic is different for the two:
+- `USE_TRITON_KERNEL` is a constant indicating whether the chunkwise kernel is used.
+- Padding handling differs:
 
 ```python
 if padding_mask is not None:
     w += (1 - padding_mask) * -1e9
 ```
 
-- For the above code, operators based on loops can handle both left padding and right padding successfully.
-- However, if using the chunkwise operator, it is recommended to use left padding uniformly. If using CUDA or native, both left and right padding can be handled correctly.
+- Loop-based kernels handle both left and right padding.
+- For chunkwise kernels, **left padding is recommended**. CUDA and native kernels handle both correctly.
 
 ### Implementation Status of `rwkv7op`
 
@@ -108,15 +108,68 @@ if padding_mask is not None:
 |-------------|------|--------|--------|
 | PyTorch     | ✅   | ✅     | ✅     |
 | JAX         | ✅   | ✅     | ✅     |
-| TensorFlow  | ⚠️   | ❌     | ✅     |
+| TensorFlow  | ⚠️    | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
+| MLX         | ⚠️   | ❌     | ❌     |
+
+1. `native`: no chunking, slow and memory-heavy.
+2. `triton`: chunkwise implementation, fast and highly parallel, but **low precision**.
+3. `cuda`: CUDA-based native operator, fast and high precision (fp32 internally), but may underutilize GPU for long sequences.
+4. TensorFlow CUDA only supports forward pass (no gradients) and relies on JAX’s CUDA kernel.
+5. MLX is not yet integrated into Keras, so native operators are not supported. A forward-only operator is provided.
 
 ---
 
-> `native` refers to native operators, which do not use chunkwise algorithms, are slow, and have high memory usage.
-> `triton` uses chunkwise algorithms, which are fast and highly parallel, but have poor precision—use at your own risk.
-> `cuda` refers to native operators based on CUDA, which are very fast and implemented in fp32 internally, ensuring high precision. However, they may struggle with long sequences.
-> Tensorflow CUDA kernel only support Forward,not get graident.This implement relies on jax cuda kernel.So you should make sure you can work at jax cuda kernel.
+## Usage of `rwkv7_op_rnn`
+
+### Background
+This is a special case of RWKV7 OP for **sequence length = 1**, optimized for the **decoding stage** in inference.
+
+### Usage
+
+```python
+from rwkv_ops import rwkv7_op_rnn
+
+def rwkv7_op_rnn(
+    r: jnp.ndarray,
+    w: jnp.ndarray,
+    k: jnp.ndarray,
+    v: jnp.ndarray,
+    a: jnp.ndarray,
+    b: jnp.ndarray,
+    initial_state: Optional[jnp.ndarray] = None,
+    output_final_state: bool = True,
+    head_first: bool = False,
+):
+    """
+    Single-step generalized delta rule (forward only).
+
+    Args:
+        r, w, k, v, a, b: input tensors, shape must be (B, 1, H, K) or (B, H, 1, K)
+        initial_state: optional (B, H, K, K) initial state, zero-initialized if None
+        output_final_state: whether to return the final state
+        head_first: whether to move head dimension first
+
+    Returns:
+        out: (B, 1, H, K), same dtype as input
+        last_state: (B, H, K, K) if output_final_state=True
+    """
+```
+
+### Implementation Status of `rwkv7_op_rnn`
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ✅   | ❌     | ✅     |
+| JAX         | ✅   | ❌     | ✅     |
+| TensorFlow  | ⚠️    | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+
+1. TensorFlow CUDA relies on JAX’s CUDA implementation.
+2. Native implementation reuses `rwkv7_op`’s native code.
+3. **This operator has no gradient support**.
+
+---
 
 ## Usage of `rwkv6op`
 

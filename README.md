@@ -113,11 +113,55 @@ if padding_mask is not None:
 | MLX       | ⚠️   | ❌     | ❌     |
 
 ---
-> `native` 为原生算子，无 chunkwise，速度慢且显存高。
-> `triton` 使用的是chunkwise算法实现，速度快，并行度高，缺点是精度很差，介意勿用
-> `cuda` 为基于 CUDA 的原生算子，速度很快，并且kernel内部使用fp32实现，所以精度也很高。缺点就是长序列的时候比较吃亏跑不满。
-> tensorflow的CUDA实现只支持前向计算，是没有梯度的。并且这个是使用jax的cuda实现实现的，你需要保证你能够成功运行jax的cuda kernel。
-> 因为MLX还没合并到keras，所以原生算子暂不支持。但是我们提供了一个前向的算子。
+1. `native` 为原生算子，无 chunkwise，速度慢且显存高。
+2. `triton` 使用的是chunkwise算法实现，速度快，并行度高，缺点是精度很差，介意勿用
+3. `cuda` 为基于 CUDA 的原生算子，速度很快，并且kernel内部使用fp32实现，所以精度也很高。缺点就是长序列的时候比较吃亏跑不满。
+4. tensorflow的CUDA实现只支持前向计算，是没有梯度的。并且这个是使用jax的cuda实现实现的，你需要保证你能够成功运行jax的cuda kernel。
+5. 因为MLX还没合并到keras，所以原生算子暂不支持。但是我们提供了一个前向的算子。
+## rwkv7_op_rnn 使用方法
+
+### 背景
+这是RWKV7 OP的特殊情况，就是我们只考虑长度=1的情况。专门用于推理的decode阶段的加速
+
+### 使用方法
+
+```python
+from rwkv_ops import rwkv7_op_rnn
+def rwkv7_op_rnn(
+        r: jnp.ndarray,
+        w: jnp.ndarray,
+        k: jnp.ndarray,
+        v: jnp.ndarray,
+        a: jnp.ndarray,
+        b: jnp.ndarray,
+        initial_state: Optional[jnp.ndarray] = None,
+        output_final_state: bool = True,
+        head_first: bool = False,
+    )
+            """
+        单步广义 delta 规则（仅前向）
+        参数:
+            r,w,k,v,a,b: 输入张量，形状必须为 (B, 1, H, K) 或 (B, H, 1, K)
+            initial_state: 可选 (B, H, K, K) 初始状态，None 则零初始化
+            output_final_state: 是否同时返回最后状态
+            head_first: 是否将 head 维提前
+        返回:
+            out: (B, 1, H, K)  与输入 dtype 一致
+            last_state: (B, H, K, K) 当 output_final_state=True
+        """
+```
+### rwkv7_op_rnn 实现状态
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ✅   | ❌     | ✅     |
+| JAX         | ✅   | ❌     | ✅     |
+| TensorFlow  | ⚠️    | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+
+1. tf的cuda实现依赖于jax的cuda实现，所以需要安装jax
+2. native实现我们直接复用了rwkv7_op的native实现
+3. **这个算子没有梯度**
 
 ## rwkv6op 使用方法
 

@@ -46,7 +46,7 @@ def normalize(
 
 
 T = 128
-B = 2
+B = 5
 H = 6
 K = 128
 np.random.seed(0)

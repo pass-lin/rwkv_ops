@@ -1,4 +1,4 @@
-__version__ = "0.3.4"
+__version__ = "0.3.5"
 import os
 
 KERNEL_TYPE = os.environ.get("KERNEL_TYPE", "cuda").lower()
@@ -18,11 +18,17 @@ else:
     keras.config.set_backend("torch")
 assert KERNEL_TYPE in ["triton", "cuda", "native"]
 assert BACKEND in ["torch", "jax", "numpy", "tensorflow"]
-from .rwkv7_kernel import get_generalized_delta_rule
+from .rwkv7_kernel import get_generalized_delta_rule, get_rnn_generalized_delta_rule
 from .rwkv6_kernel import get_rwkv6_kernel
+
 
 generalized_delta_rule, RWKV7_USE_TRITON_KERNEL = get_generalized_delta_rule(
     KERNEL_TYPE=KERNEL_TYPE
 )
 rwkv7_op = generalized_delta_rule
+
+rnn_generalized_delta_rule = get_rnn_generalized_delta_rule(KERNEL_TYPE=KERNEL_TYPE)
+rwkv7_op_rnn = rnn_generalized_delta_rule
+
+
 RWKV6_OP = get_rwkv6_kernel(KERNEL_TYPE=KERNEL_TYPE)

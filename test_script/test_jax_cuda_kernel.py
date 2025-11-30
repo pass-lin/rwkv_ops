@@ -1,6 +1,6 @@
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.environ["KERAS_BACKEND"] = "jax"
 os.environ["KERNEL_TYPE"] = "cuda"
 
@@ -13,7 +13,7 @@ from jax import grad
 # 1. 构造输入
 # ------------------------------------------------------------------
 T = 512
-B = 2
+B = 5
 H = 6
 K = 64
 inputs = [np.random.randn(B, T, H, K) for _ in range(30)]
