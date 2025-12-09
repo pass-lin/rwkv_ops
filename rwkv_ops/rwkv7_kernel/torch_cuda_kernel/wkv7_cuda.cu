@@ -168,3 +168,56 @@ void cuda_backward(int B, int T, int H,
     assert(T%_CHUNK_LEN_ == 0);
     backward_kernel<<<dim3(H,B), dim3(_C_)>>>(T,H,w,q,k,v,z,a,dy,s,sa,dht,dh0,dw,dq,dk,dv,dz,da);
 }
+/* -------------------- 推理专用 Kernel -------------------- */
+__global__ void forward_inference_kernel(int T, int H,
+                                         F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
+                                         bf *y_, float *s_, float *h0_) {
+    constexpr int C = _C_;
+    int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
+    float state[C] = {0};
+    __shared__ float q[C], k[C], w[C], a[C], b[C];
+    
+    int64_t h0_base = ((int64_t)bb * H + hh) * C * C + i * C; 
+    
+#pragma unroll
+    for (int j = 0; j < C; ++j) state[j] = h0_[h0_base + j];
+
+    for (int t = 0; t < T; ++t) {
+        int64_t ind = (int64_t)bb * T * H * C + (int64_t)t * H * C + hh * C + i;
+        
+        __syncthreads();
+        q[i] = to_float(q_[ind]);
+        w[i] = __expf(-__expf(to_float(w_[ind])));
+        k[i] = to_float(k_[ind]);
+        a[i] = to_float(a_[ind]);
+        b[i] = to_float(b_[ind]);
+        __syncthreads();
+
+        // sa 临时计算，不保存到全局内存
+        float sa = 0.f;
+#pragma unroll
+        for (int j = 0; j < C; ++j) sa += a[j] * state[j];
+
+        float v_val = to_float(v_[ind]);
+        float y = 0.f;
+#pragma unroll
+        for (int j = 0; j < C; ++j) {
+            float &s = state[j];
+            s = s * w[j] + sa * b[j] + k[j] * v_val;
+            y += s * q[j];
+        }
+        y_[ind] = to_bf(y);
+    }
+    
+    // 仅写入最终状态 (B, H, K, K)
+    int64_t base = ((int64_t)bb * H + hh) * C * C + i * C;
+#pragma unroll
+    for (int j = 0; j < C; ++j) s_[base + j] = state[j];
+}
+
+// C 接口
+void cuda_forward_inference(int B, int T, int H, 
+                            bf* w, bf* q, bf* k, bf* v, bf* a, bf* b, 
+                            bf* y, float* s, float* h0) {
+    forward_inference_kernel<<<dim3(H, B), dim3(_C_)>>>(T, H, w, q, k, v, a, b, y, s, h0);
+}

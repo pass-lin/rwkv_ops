@@ -45,8 +45,9 @@ bash install.sh
 ## rwkv7op 使用方法
 
 ```python
-from rwkv_ops import generalized_delta_rule  # 或 from rwkv_ops import rwkv7_op，完全等价
-
+from rwkv_ops import generalized_delta_rule,generalized_delta_rule_inference  # 或 from rwkv_ops import rwkv7_op，完全等价
+#generalized_delta_rule_inference的入口和这个接口一致
+#但是generalized_delta_rule_inference是没有梯度只支持inference的
 def generalized_delta_rule(
     r,
     w,
@@ -77,16 +78,17 @@ def generalized_delta_rule(
         final_state: 最终状态 [N, H, K, V] 或 None
     """
 ```
+generalized_delta_rule_inference和generalized_delta_rule的区别是前者没有梯度。因为不需要存储激活值，所以可以节省一部分显存。
 
-### torch-cuda 特殊用法
+### cuda-kernel 特殊用法
 
-- torch-cuda 下 `head_size` 也是一个 kernel 参数，默认为 64。  
+- torch-cuda和jax-cuda kernel 下 `head_size` 也是一个 kernel 参数，默认为 64。  
 - 若 `head_size ≠ 64`，请使用：
 
 ```python
 from rwkv_ops import get_generalized_delta_rule
 
-generalized_delta_rule, USE_TRITON_KERNEL = get_generalized_delta_rule(
+rwkv7_op, rwkv7_op_inference, USE_TRITON_KERNEL = get_generalized_delta_rule(
     your_head_size, KERNEL_TYPE="cuda"
 )
 ```

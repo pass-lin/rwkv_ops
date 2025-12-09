@@ -22,63 +22,25 @@ def transpose_head(x, head_first: bool):
 
 
 def get_tf_generalized_delta_rule(HEAD_SIZE=64):
-    _, _wkv7_kernel, _wkv7_bwd_kernel = get_jax_generalized_delta_rule(HEAD_SIZE)
+    generalized_delta_rule_inference = get_jax_generalized_delta_rule(HEAD_SIZE)[1]
 
     # ---------- 底层 kernel 包装 ----------
     @tf.py_function(Tout=[tf.bfloat16, tf.float32, tf.float32])
     def _tf_wkv7_fwd(w, q, k, v, a, b, h0):
         """tf.py_function 包装 JAX 前向"""
-        y, s, sa = _wkv7_kernel(
-            jnp.asarray(w, jnp.bfloat16),
-            jnp.asarray(q, jnp.bfloat16),
-            jnp.asarray(k, jnp.bfloat16),
-            jnp.asarray(v, jnp.bfloat16),
-            jnp.asarray(a, jnp.bfloat16),
-            jnp.asarray(b, jnp.bfloat16),
-            jnp.asarray(h0, jnp.float32),
+        y, s = generalized_delta_rule_inference(
+            w=jnp.asarray(w, jnp.bfloat16),
+            r=jnp.asarray(q, jnp.bfloat16),
+            k=jnp.asarray(k, jnp.bfloat16),
+            v=jnp.asarray(v, jnp.bfloat16),
+            a=jnp.asarray(a, jnp.bfloat16),
+            b=jnp.asarray(b, jnp.bfloat16),
+            h0=jnp.asarray(h0, jnp.float32),
         )
         return (
             tf.convert_to_tensor(y, tf.bfloat16),
             tf.convert_to_tensor(s, tf.float32),
-            tf.convert_to_tensor(sa, tf.float32),
         )
-
-    @tf.py_function(Tout=[tf.bfloat16] * 6 + [tf.float32])
-    def _tf_wkv7_bwd(w, q, k, v, a, b, dy, s, sa, dht):
-        """tf.py_function 包装 JAX 反向"""
-        dw, dq, dk, dv, da, db, dh0 = _wkv7_bwd_kernel(
-            jnp.asarray(w, jnp.bfloat16),
-            jnp.asarray(q, jnp.bfloat16),
-            jnp.asarray(k, jnp.bfloat16),
-            jnp.asarray(v, jnp.bfloat16),
-            jnp.asarray(a, jnp.bfloat16),
-            jnp.asarray(b, jnp.bfloat16),
-            jnp.asarray(dy, jnp.bfloat16),
-            jnp.asarray(s, jnp.float32),
-            jnp.asarray(sa, jnp.float32),
-            jnp.asarray(dht, jnp.bfloat16),
-        )
-        return tuple(
-            tf.convert_to_tensor(g, dtype)
-            for g, dtype in zip((dw, dq, dk, dv, da, db), [tf.bfloat16] * 6)
-        ) + (tf.convert_to_tensor(dh0, tf.float32),)
-
-    # ---------- 带梯度的前向 ----------
-    @tf.custom_gradient
-    def _wk7_tf(w, q, k, v, a, b, h0):
-        y, s, sa = _tf_wkv7_fwd(w, q, k, v, a, b, h0)
-
-        def grad(dy, dht):
-            # dy 上层传来的 loss 对 y 的梯度
-            # dht 对最后状态的梯度（没有就传 0）
-            if dht is None:
-                dht = tf.zeros_like(h0)
-            grads = _tf_wkv7_bwd(w, q, k, v, a, b, dy, s, sa, dht)
-            return grads  # (dw, dq, dk, dv, da, db, dh0)
-
-        final_state = s[:, :, -1]  # (B, H, K, K)
-        final_state = tf.transpose(final_state, [0, 1, 3, 2])  # 与 JAX 对齐
-        return (y, final_state), grad
 
     # ---------- 用户接口 ----------
     def generalized_delta_rule(
@@ -116,14 +78,14 @@ def get_tf_generalized_delta_rule(HEAD_SIZE=64):
             h0 = tf.cast(initial_state, tf.float32)
 
         # 带梯度前向
-        out, last_state = _wk7_tf(w, r, k, v, a, b, h0)
+        out, last_state = _tf_wkv7_fwd(w, r, k, v, a, b, h0)
 
         # 转回用户期望 dtype
         out = tf.cast(out, dtype)
 
         return (out, last_state) if output_final_state else out
 
-    return generalized_delta_rule, _tf_wkv7_fwd, _tf_wkv7_bwd
+    return generalized_delta_rule
 
 
 def get_tf_generalized_delta_rule_single_step(HEAD_SIZE=64):

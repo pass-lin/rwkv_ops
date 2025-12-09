@@ -42,11 +42,12 @@ bash install.sh
 
 ---
 
-## Usage of `rwkv7op`
+## rwkv7op Usage Guide
 
 ```python
-from rwkv_ops import generalized_delta_rule  # or: from rwkv_ops import rwkv7_op, they are equivalent
-
+from rwkv_ops import generalized_delta_rule, generalized_delta_rule_inference  # or: from rwkv_ops import rwkv7_op, they are identical
+# generalized_delta_rule_inference has the same signature as generalized_delta_rule
+# but it is inference-only (no gradients) and therefore saves some memory
 def generalized_delta_rule(
     r,
     w,
@@ -62,15 +63,15 @@ def generalized_delta_rule(
     Chunked Delta-Rule attention interface.
 
     Args:
-        r:  [B, T, H, K]
+        q:  [B, T, H, K]
         k:  [B, T, H, K]
         v:  [B, T, H, V]
         a:  [B, T, H, K]
         b:  [B, T, H, K]
-        w:  [B, T, H, K]  # decay term in log space
-        initial_state: initial state [N, H, K, V], N is number of sequences
+        gk: [B, T, H, K]  # decay term in log-space!
+        initial_state: initial state [N, H, K, V], N = number of sequences
         output_final_state: whether to return the final state
-        head_first: whether to use head-first format (not supported for variable-length)
+        head_first: whether to use head-first layout (variable length not supported)
 
     Returns:
         o:           output [B, T, H, V] or [B, H, T, V]
@@ -78,31 +79,34 @@ def generalized_delta_rule(
     """
 ```
 
-### Special Notes for `torch-cuda`
+The only difference between `generalized_delta_rule_inference` and `generalized_delta_rule` is that the former does not compute gradients. Because activations need not be stored, memory consumption is reduced.
 
-- Under `torch-cuda`, `head_size` is also a kernel parameter, defaulting to 64.
-- If `head_size ≠ 64`, use:
+### CUDA-kernel special usage
+
+- In the `torch-cuda` and `jax-cuda` kernels, `head_size` is also a kernel parameter; the default is 64.  
+- If `head_size != 64`, use:
 
 ```python
 from rwkv_ops import get_generalized_delta_rule
 
-generalized_delta_rule, USE_TRITON_KERNEL = get_generalized_delta_rule(
+rwkv7_op, rwkv7_op_inference, USE_TRITON_KERNEL = get_generalized_delta_rule(
     your_head_size, KERNEL_TYPE="cuda"
 )
 ```
 
-- `USE_TRITON_KERNEL` is a constant indicating whether the chunkwise kernel is used.
-- Padding handling differs:
+- `USE_TRITON_KERNEL` is a constant that indicates whether the chunkwise kernel is being used.  
+- The two kernels handle padding differently:
 
 ```python
 if padding_mask is not None:
     w += (1 - padding_mask) * -1e9
 ```
 
-- Loop-based kernels handle both left and right padding.
-- For chunkwise kernels, **left padding is recommended**. CUDA and native kernels handle both correctly.
+- The loop-based kernel can cope with both left and right padding.  
+- When the chunkwise kernel is used, **left padding is recommended**.  
+  With the CUDA or native kernels, both left and right padding work correctly.
 
-### Implementation Status of `rwkv7op`
+### rwkv7op implementation status
 
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
@@ -112,12 +116,14 @@ if padding_mask is not None:
 | NumPy       | ❌   | ❌     | ✅     |
 | MLX         | ⚠️   | ❌     | ❌     |
 
-1. `native`: no chunking, slow and memory-heavy.
-2. `triton`: chunkwise implementation, fast and highly parallel, but **low precision**.
-3. `cuda`: CUDA-based native operator, fast and high precision (fp32 internally), but may underutilize GPU for long sequences.
-4. TensorFlow CUDA only supports forward pass (no gradients) and relies on JAX’s CUDA kernel.
-5. MLX is not yet integrated into Keras, so native operators are not supported. A forward-only operator is provided.
-6. tensorflow kernel only support eager mode
+---
+
+1. `native` = pure-Python / pure-JAX implementation, no chunking, slow and memory-hungry.  
+2. `triton` = chunkwise Triton implementation, fast and highly parallel, but **numerical accuracy is poor—use only if you can tolerate the loss of precision**.  
+3. `cuda` = hand-written CUDA kernel, very fast and internally uses FP32, so accuracy is high. Its weakness is throughput on very long sequences.  
+4. TensorFlow’s CUDA support is forward-only (no gradients). It is actually a thin wrapper around JAX’s CUDA kernel; you must be able to run JAX’s CUDA kernel.  
+5. The TensorFlow kernel works only in eager mode.  
+6. MLX has not yet been merged into Keras, so the native kernel is currently unavailable. A forward-only operator is provided as a stop-gap.
 ---
 
 ## Usage of `rwkv7_op_rnn`

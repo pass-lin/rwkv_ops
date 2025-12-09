@@ -1,4 +1,4 @@
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 import os
 
 KERNEL_TYPE = os.environ.get("KERNEL_TYPE", "cuda").lower()
@@ -22,10 +22,11 @@ from .rwkv7_kernel import get_generalized_delta_rule, get_rnn_generalized_delta_
 from .rwkv6_kernel import get_rwkv6_kernel
 
 
-generalized_delta_rule, RWKV7_USE_TRITON_KERNEL = get_generalized_delta_rule(
-    KERNEL_TYPE=KERNEL_TYPE
+generalized_delta_rule, generalized_delta_rule_inference, RWKV7_USE_TRITON_KERNEL = (
+    get_generalized_delta_rule(KERNEL_TYPE=KERNEL_TYPE)
 )
 rwkv7_op = generalized_delta_rule
+rwkv7_op_inference = generalized_delta_rule_inference
 
 rnn_generalized_delta_rule = get_rnn_generalized_delta_rule(KERNEL_TYPE=KERNEL_TYPE)
 rwkv7_op_rnn = rnn_generalized_delta_rule

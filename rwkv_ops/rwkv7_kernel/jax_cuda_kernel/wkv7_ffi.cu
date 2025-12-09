@@ -284,3 +284,106 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Ret<ffi::Buffer<ffi::BF16>>()   // da
         .Ret<ffi::Buffer<ffi::BF16>>()   // db
 , {ffi::Traits::kCmdBufferCompatible});
+
+/* -------------------- 推理专用 Kernel -------------------- */
+__global__ void forward_inference_kernel(int T, int H,
+                                         F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
+                                         bf *y_, float *s_, float *h0_) {
+    constexpr int C = _C_;
+    int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
+    float state[C] = {0};
+    __shared__ float q[C], k[C], w[C], a[C], b[C];
+    
+    int64_t h0_base = ((int64_t)bb * H + hh) * C * C + i * C; 
+    
+    // 加载初始状态
+#pragma unroll
+    for (int j = 0; j < C; ++j) state[j] = h0_[h0_base + j];
+
+    // 主循环：计算每个时间步，**不保存 sa，不写回中间 s**
+    for (int t = 0; t < T; ++t) {
+        int64_t ind = (int64_t)bb * T * H * C + (int64_t)t * H * C + hh * C + i;
+        
+        __syncthreads();
+        q[i] = to_float(q_[ind]);
+        w[i] = __expf(-__expf(to_float(w_[ind])));
+        k[i] = to_float(k_[ind]);
+        a[i] = to_float(a_[ind]);
+        b[i] = to_float(b_[ind]);
+        __syncthreads();
+
+        // 计算 sa（临时用），**不保存到全局内存**
+        float sa = 0.f;
+#pragma unroll
+        for (int j = 0; j < C; ++j) sa += a[j] * state[j];
+
+        float v = to_float(v_[ind]);
+        float y = 0.f;
+#pragma unroll
+        for (int j = 0; j < C; ++j) {
+            float &s = state[j];
+            s = s * w[j] + sa * b[j] + k[j] * v;
+            y += s * q[j];
+        }
+        y_[ind] = to_bf(y);
+    }
+    
+    // **循环结束后，仅写入最终状态 (B, H, K, K)**
+    int64_t base = ((int64_t)bb * H + hh) * C * C + i * C;
+#pragma unroll
+    for (int j = 0; j < C; ++j) s_[base + j] = state[j];
+}
+
+/* -------------------- 推理 FFI Host -------------------- */
+static ffi::Error WKV7InferenceHost(
+    cudaStream_t stream,
+    ffi::Buffer<ffi::BF16> w,
+    ffi::Buffer<ffi::BF16> q,
+    ffi::Buffer<ffi::BF16> k,
+    ffi::Buffer<ffi::BF16> v,
+    ffi::Buffer<ffi::BF16> z,  // 保持参数顺序一致，推理时未使用
+    ffi::Buffer<ffi::BF16> a,
+    ffi::Buffer<ffi::F32>  h0,
+    ffi::ResultBuffer<ffi::BF16> y,
+    ffi::ResultBuffer<ffi::F32>  s)  // 仅返回最终状态
+{
+    constexpr int C = _C_;
+    auto dims = w.dimensions();
+    int B = dims[0], T = dims[1], H = dims[2];
+    dim3 block(C);
+    dim3 grid(H, B);
+
+    forward_inference_kernel<<<grid, block, 0, stream>>>(
+        T, H,
+        reinterpret_cast<bf *>(w.typed_data()),
+        reinterpret_cast<bf *>(q.typed_data()),
+        reinterpret_cast<bf *>(k.typed_data()),
+        reinterpret_cast<bf *>(v.typed_data()),
+        reinterpret_cast<bf *>(z.typed_data()),  // 占位
+        reinterpret_cast<bf *>(a.typed_data()),
+        reinterpret_cast<bf *>(y->typed_data()),
+        s->typed_data(),
+        h0.typed_data());
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess)
+        return ffi::Error::Internal(
+            std::string("CUDA forward_inference_kernel error: ") + cudaGetErrorString(err));
+    return ffi::Error::Success();
+}
+
+/* -------------------- 注册推理符号 -------------------- */
+XLA_FFI_DEFINE_HANDLER_SYMBOL(
+    Wkv7Inference, WKV7InferenceHost,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Arg<ffi::Buffer<ffi::BF16>>()   // w
+        .Arg<ffi::Buffer<ffi::BF16>>()   // q
+        .Arg<ffi::Buffer<ffi::BF16>>()   // k
+        .Arg<ffi::Buffer<ffi::BF16>>()   // v
+        .Arg<ffi::Buffer<ffi::BF16>>()   // z (占位)
+        .Arg<ffi::Buffer<ffi::BF16>>()   // a
+        .Arg<ffi::Buffer<ffi::F32>>()    // h0
+        .Ret<ffi::Buffer<ffi::BF16>>()   // y
+        .Ret<ffi::Buffer<ffi::F32>>()    // s (final state)
+, {ffi::Traits::kCmdBufferCompatible});

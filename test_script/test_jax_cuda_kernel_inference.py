@@ -1,12 +1,13 @@
 import os
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-os.environ["KERAS_BACKEND"] = "tensorflow"
+os.environ["KERAS_BACKEND"] = "jax"
 os.environ["KERNEL_TYPE"] = "cuda"
 
 import numpy as np
+import jax.numpy as jnp
 from keras import ops
-
+from jax import grad
 
 # ------------------------------------------------------------------
 # 1. 构造输入
@@ -16,7 +17,7 @@ B = 5
 H = 6
 K = 64
 inputs = [np.random.randn(B, T, H, K) for _ in range(30)]
-tf_inputs = [ops.convert_to_tensor(t, "bfloat16") for t in inputs]
+jax_inputs = [jnp.asarray(t, "bfloat16") for t in inputs]
 
 
 def normalize(
@@ -36,16 +37,16 @@ mask = ops.concatenate(
 )
 mask = ops.cast(mask, "bfloat16")
 
-a = -normalize(tf_inputs[3], dim=-1, p=2.0) * mask
-b = normalize(tf_inputs[3], dim=-1, p=2.0) * mask
+a = -normalize(jax_inputs[3], dim=-1, p=2.0) * mask
+b = normalize(jax_inputs[3], dim=-1, p=2.0) * mask
 
-w = tf_inputs[4] * mask  # decay / gate
-r = tf_inputs[0] * mask  # receptance
-k = tf_inputs[1] * mask
-v = tf_inputs[2] * mask
+w = jax_inputs[4] * mask  # decay / gate
+r = jax_inputs[0] * mask  # receptance
+k = jax_inputs[1] * mask
+v = jax_inputs[2] * mask
 w = -ops.softplus(w) - 0.5
 w = ops.where(mask, w, -1e9)
-h0 = ops.convert_to_tensor(np.random.randn(B, H, K, K), "float32")
+h0 = jnp.asarray(np.random.randn(B, H, K, K), "float32")
 # ------------------------------------------------------------------
 # 2. CUDA 版本前向 + 反向
 # ------------------------------------------------------------------
@@ -71,7 +72,7 @@ native_out, native_state = generalized_delta_rule(
 )
 
 
-def test_is_close(name, x1, x2, atol=2.5e-2, rtol=1e-3):
+def test_is_close(name, x1, x2, atol=5e-3, rtol=1e-3):
     x1 = ops.convert_to_numpy(ops.cast(x1, "float32"))
     x2 = ops.convert_to_numpy(ops.cast(x2, "float32"))
     if np.sum(np.isnan(x1)) == 0 and np.sum(np.isnan(x2)) == 0:
@@ -96,4 +97,4 @@ def test_is_close(name, x1, x2, atol=2.5e-2, rtol=1e-3):
 
 test_is_close("fwd_pred", native_out, cuda_out, atol=1e-5, rtol=1e-2)
 test_is_close("fwd_state", native_state, cuda_state, atol=1e-5, rtol=1e-3)
-print("🎉🎉🎉🎉test_script/test_tf_cuda_kernel.py测试结束🎉🎉🎉🎉")
+print("🎉🎉🎉🎉test_script/test_jax_cuda_kernel_inference.py测试结束🎉🎉🎉🎉")

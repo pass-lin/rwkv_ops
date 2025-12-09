@@ -12,29 +12,22 @@ def transpose_head(x, head_first):
 
 
 def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
-    USE_TRITON_KERNEL = False
+    from .native_keras_op import generalized_delta_rule as native_op
+
     if keras.config.backend() == "torch":
         import torch
 
-        if not torch.cuda.is_available():
-            from .native_keras_op import generalized_delta_rule
+        if torch.cuda.is_available():
+            if KERNEL_TYPE.lower() == "triton":
+                from .torch_op import generalized_delta_rule
 
-            return generalized_delta_rule, False
+                return generalized_delta_rule, generalized_delta_rule, True
+            elif KERNEL_TYPE.lower() == "cuda":
+                from .torch_cuda_kernel.wkv7_torch import (
+                    get_torch_generalized_delta_rule,
+                )
 
-        if KERNEL_TYPE.lower() == "triton":
-            from .torch_op import generalized_delta_rule
-
-            USE_TRITON_KERNEL = True
-
-        elif KERNEL_TYPE.lower() == "cuda":
-            from .torch_cuda_kernel.wkv7_torch import get_torch_generalized_delta_rule
-
-            generalized_delta_rule = get_torch_generalized_delta_rule(HEAD_SIZE)
-        else:
-            from .native_keras_op import generalized_delta_rule
-
-            USE_TRITON_KERNEL = False
-
+                return get_torch_generalized_delta_rule(HEAD_SIZE) + [False]
     elif keras.config.backend() == "jax":
         import jax
         import os
@@ -44,15 +37,11 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                 os.environ["JAX_LOG_COMPUTATION"] = "0"
                 from .jax_op import generalized_delta_rule
 
-                USE_TRITON_KERNEL = True
+                return generalized_delta_rule, native_op, False
             elif KERNEL_TYPE.lower() == "cuda":
                 from .jax_cuda_kernel.wkv7_jax import get_jax_generalized_delta_rule
 
-                generalized_delta_rule = get_jax_generalized_delta_rule(HEAD_SIZE)[0]
-            else:
-                from .native_keras_op import generalized_delta_rule
-        else:
-            from .native_keras_op import generalized_delta_rule
+                return get_jax_generalized_delta_rule(HEAD_SIZE) + [False]
     elif keras.config.backend() == "tensorflow":
         import tensorflow as tf
 
@@ -72,16 +61,15 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                 print("🎉" * 10)
                 from .tf_eager_kernel import get_tf_generalized_delta_rule
 
-                generalized_delta_rule = get_tf_generalized_delta_rule(HEAD_SIZE)[0]
-            else:
-                from .native_keras_op import generalized_delta_rule
-        else:
-            from .native_keras_op import generalized_delta_rule
+                generalized_delta_rule_inference = get_tf_generalized_delta_rule(
+                    HEAD_SIZE
+                )
+                return native_op, generalized_delta_rule_inference, False
     elif keras.config.backend() == "mlx" and KERNEL_TYPE.lower() == "cuda":
         from .mlx_op import generalized_delta_rule
-    else:
-        from .native_keras_op import generalized_delta_rule
-    return generalized_delta_rule, USE_TRITON_KERNEL
+
+        return native_op, generalized_delta_rule, False
+    return native_op, native_op, False
 
 
 def get_rnn_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):

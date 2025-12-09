@@ -87,6 +87,9 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
     jax.ffi.register_ffi_target(
         "wkv7_bwd", jax.ffi.pycapsule(_lib.Wkv7Bwd), platform="CUDA"
     )
+    jax.ffi.register_ffi_target(
+        "wkv7_inference", jax.ffi.pycapsule(_lib.Wkv7Inference), platform="CUDA"
+    )
 
     # ---------- 工具 ----------
     def _transpose_head(x: jnp.ndarray, head_first: bool) -> jnp.ndarray:
@@ -235,4 +238,74 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
             return out, last_state
         return out
 
-    return generalized_delta_rule, _wkv7_kernel, _wkv7_bwd_kernel
+    def _wkv7_inference_kernel(
+        w: jnp.ndarray,
+        q: jnp.ndarray,
+        k: jnp.ndarray,
+        v: jnp.ndarray,
+        a: jnp.ndarray,
+        b: jnp.ndarray,
+        h0: jnp.ndarray,
+    ):
+        """
+        推理专用 kernel，不保存 sa 和中间 s
+        返回: y (B, T, H, K), final_state (B, H, K, K)
+        """
+        B, T, H, K = q.shape
+        dtype = q.dtype
+        out_type = jax.ShapeDtypeStruct((B, T, H, K), dtype)
+        # **关键：仅返回最终状态，非 chunk 历史**
+        s_type = jax.ShapeDtypeStruct((B, H, K, K), jnp.float32)
+
+        y, s = jax.ffi.ffi_call(
+            "wkv7_inference", (out_type, s_type), vmap_method="broadcast_all"
+        )(w, q, k, v, a, b, h0)  # z 参数自动忽略
+
+        return y, s
+
+    # -------------------- 公共推理 API --------------------
+    def generalized_delta_rule_inference(
+        r: jnp.ndarray,
+        w: jnp.ndarray,
+        k: jnp.ndarray,
+        v: jnp.ndarray,
+        a: jnp.ndarray,
+        b: jnp.ndarray,
+        output_final_state: bool = True,
+        initial_state: Optional[jnp.ndarray] = None,
+        head_first: bool = False,
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        """
+        纯推理版本的广义 delta 规则
+
+        参数:
+            r,w,k,v,a,b: 输入张量，形状 (B, T, H, K) 或 (B, H, T, K)
+            initial_state: (B, H, K, K) 初始状态，None 则零初始化
+            head_first: 是否将 head 维提前
+        返回:
+            out: (B, T, H, K) 输出，dtype 与输入一致
+            final_state: (B, H, K, K) 仅最终状态
+        """
+        dtype = r.dtype
+        r = _transpose_head(r, head_first)
+        w = _transpose_head(w, head_first)
+        k = _transpose_head(k, head_first)
+        v = _transpose_head(v, head_first)
+        a = _transpose_head(a, head_first)
+        b = _transpose_head(b, head_first)
+
+        B, T, H, K = r.shape
+
+        # 处理初始状态
+        if initial_state is None:
+            h0 = jnp.zeros((B, H, K, K), jnp.float32)
+        else:
+            h0 = jnp.asarray(initial_state, jnp.float32)
+
+        # **无需 checkpoint，推理不保存中间值**
+        out, final_state = _wkv7_inference_kernel(w, r, k, v, a, b, h0)
+        out = jnp.asarray(out, dtype)
+        return out, final_state if output_final_state else out
+
+    # 返回两个函数，用户按需选择
+    return [generalized_delta_rule, generalized_delta_rule_inference]
