@@ -12,7 +12,7 @@ def transpose_head(x, head_first):
 
 
 def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
-    assert HEAD_SIZE%4==0
+    assert HEAD_SIZE % 4 == 0
     from .native_keras_op import generalized_delta_rule as native_op
 
     if keras.config.backend() == "torch":
@@ -74,7 +74,7 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
 
 
 def get_rnn_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
-    assert HEAD_SIZE%4==0
+    assert HEAD_SIZE % 4 == 0
     from .native_keras_op import generalized_delta_rule
 
     if KERNEL_TYPE == "cuda":
