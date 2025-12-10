@@ -7,7 +7,6 @@ os.environ["KERNEL_TYPE"] = "cuda"
 import numpy as np
 import jax.numpy as jnp
 from keras import ops
-from jax import grad
 
 # ------------------------------------------------------------------
 # 1. 构造输入

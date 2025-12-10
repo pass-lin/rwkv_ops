@@ -5,8 +5,6 @@
 #include <cstdint>
 
 namespace ffi = xla::ffi;
-
-/* -------------------- 类型别名 -------------------- */
 using bf = __nv_bfloat16;
 
 /* -------------------- 设备端辅助 -------------------- */
@@ -16,16 +14,16 @@ __device__ inline float to_float(const bf &u) {
 __device__ inline bf to_bf(const float &u) {
     return __float2bfloat16_rn(u);
 }
-
 typedef bf *__restrict__ F_;
 
-/* -------------------- 前向 Kernel -------------------- */
+/* -------------------- 前向 Kernel（修复） -------------------- */
+template<int C> 
+__launch_bounds__(C, 2)
 __global__ void forward_kernel_single_step(
     int B, int H,
     F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
     bf *y_, float *s_, float *h0_)
 {
-    constexpr int C = _C_;
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
     float state[C] = {0};
     __shared__ float q[C], k[C], w[C], a[C], b[C];
@@ -46,12 +44,10 @@ __global__ void forward_kernel_single_step(
     b[i] = to_float(b_[ind]);
     __syncthreads();
 
-    // 实时计算 sa，不存储
     float sa = 0.f;
 #pragma unroll
     for (int j = 0; j < C; ++j) sa += a[j] * state[j];
 
-    // 状态更新与输出计算
     float v_val = to_float(v_[ind]);
     float y = 0.f;
 #pragma unroll
@@ -60,15 +56,67 @@ __global__ void forward_kernel_single_step(
         s = s * w[j] + sa * b[j] + k[j] * v_val;
         y += s * q[j];
     }
-    y_[ind] = to_bf(y);  // y 输出形状: (B, H, C)
+    y_[ind] = to_bf(y);
 
-    // ✅ 修复：正确 Row-Major 存储 (B, H, C, C)
+    // 写入最终状态
     int64_t s_base = ((int64_t)bb * H + hh) * C * C + i * C;
 #pragma unroll
     for (int j = 0; j < C; ++j) s_[s_base + j] = state[j];
 }
 
-/* -------------------- Host 函数 -------------------- */
+/* -------------------- 反向 Kernel（补充） -------------------- */
+template<int C> 
+__launch_bounds__(C, 2) 
+__global__ void backward_kernel_single_step(
+    int B, int H,
+    F_ w_, F_ q_, F_ k_, F_ v_, F_ dy_,
+    float *s_, float *dht_, bf *dw_, bf *dq_, bf *dk_, bf *dv_, bf *da_, bf *db_)
+{
+    int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
+    float stateT[C] = {0}, dstate[C] = {0};
+    
+    int64_t dht_base = ((int64_t)bb * H + hh) * C * C + i * C;
+#pragma unroll
+    for (int j = 0; j < C; ++j) dstate[j] = dht_[dht_base + j];
+
+    __shared__ float w[C], q[C], k[C], v[C], dy[C];
+    int64_t ind = (int64_t)bb * H * C + hh * C + i;
+    
+    __syncthreads();
+    q[i] = to_float(q_[ind]);
+    float wi_fac = -__expf(to_float(w_[ind]));
+    w[i] = __expf(wi_fac);
+    k[i] = to_float(k_[ind]);
+    v[i] = to_float(v_[ind]);
+    dy[i] = to_float(dy_[ind]);
+    __syncthreads();
+
+    // 从 s_ 加载 stateT（float4 优化可在此处添加）
+    int64_t s_base = ((int64_t)bb * H + hh) * C * C + i * C;
+#pragma unroll
+    for (int j = 0; j < C; ++j) stateT[j] = s_[s_base + j];
+
+    float dq_val = 0.f, dw_val = 0.f, dk_val = 0.f, dv_val = 0.f, da_val = 0.f, db_val = 0.f;
+    float iwi = 1.0f / (w[i] + 1e-6f);
+    
+#pragma unroll
+    for (int j = 0; j < C; ++j) {
+        stateT[j] = (stateT[j] - k[i] * v[j]) * iwi;
+        dstate[j] += dy[i] * q[j];
+        
+        dq_val += stateT[j] * dy[j];
+        dw_val += dstate[j] * stateT[j];
+        dk_val += dstate[j] * v[j];
+        dv_val += dstate[j] * k[j];
+    }
+    
+    dq_[ind] = to_bf(dq_val);
+    dw_[ind] = to_bf(dw_val * w[i] * wi_fac);
+    dk_[ind] = to_bf(dk_val);
+    dv_[ind] = to_bf(dv_val);
+}
+
+/* -------------------- Host 函数（修复调用） -------------------- */
 static ffi::Error WKV7SingleStepFwdHost(
     cudaStream_t stream,
     ffi::Buffer<ffi::BF16> w,
@@ -83,11 +131,12 @@ static ffi::Error WKV7SingleStepFwdHost(
 {
     auto dims = w.dimensions();
     int B = dims[0], H = dims[1];
-    constexpr int C = _C_;
+    constexpr int C = _C_;  // 从编译选项获取
     dim3 block(C);
     dim3 grid(H, B);
 
-    forward_kernel_single_step<<<grid, block, 0, stream>>>(
+    // ✅ 修复：显式指定模板参数 <_C_>
+    forward_kernel_single_step<_C_><<<grid, block, 0, stream>>>(
         B, H,
         reinterpret_cast<bf *>(w.typed_data()),
         reinterpret_cast<bf *>(q.typed_data()),
