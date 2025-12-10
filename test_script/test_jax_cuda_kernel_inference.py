@@ -1,6 +1,6 @@
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 os.environ["KERAS_BACKEND"] = "jax"
 os.environ["KERNEL_TYPE"] = "cuda"
 

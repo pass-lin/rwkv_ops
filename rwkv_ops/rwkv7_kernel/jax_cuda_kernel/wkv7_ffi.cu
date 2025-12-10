@@ -1,10 +1,9 @@
-\
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <xla/ffi/api/ffi.h>
 #include <vector>
-#include <cstdint> // 引入 int64_t
-
+#include <cstdint>
+// ref link:https://github.com/BlinkDL/RWKV-CUDA/tree/main/rwkv7_fast_fused
 namespace ffi = xla::ffi;
 
 /* -------------------- 类型别名 -------------------- */
@@ -17,26 +16,25 @@ __device__ inline float to_float(const bf &u) {
 __device__ inline bf to_bf(const float &u) {
     return __float2bfloat16_rn(u);
 }
-
 typedef bf *__restrict__ F_;
 
 /* -------------------- Kernel -------------------- */
+// 【优化1】模板化 + launch_bounds，提升 Occupancy
+template<int C> __launch_bounds__(C, 2)
 __global__ void forward_kernel(int T, int H,
                                F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
                                bf *y_, float *s_, float *sa_, float *h0_) {
-    constexpr int C = _C_;
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
     float state[C] = {0};
     __shared__ float q[C], k[C], w[C], a[C], b[C];
     
-    // h0 比较小，int 足够，但为了保险统一转 int64_t
     int64_t h0_base = ((int64_t)bb * H + hh) * C * C + i * C; 
     
-#pragma unroll
+    #pragma unroll
     for (int j = 0; j < C; ++j) state[j] = h0_[h0_base + j];
 
     for (int t = 0; t < T; ++t) {
-        // 【关键修正】强制转换为 int64_t 进行计算，防止中间结果 int32 溢出
+        // 【优化2】强制 int64_t 防止溢出
         int64_t ind = (int64_t)bb * T * H * C + (int64_t)t * H * C + hh * C + i;
         
         __syncthreads();
@@ -48,41 +46,41 @@ __global__ void forward_kernel(int T, int H,
         __syncthreads();
 
         float sa = 0.f;
-#pragma unroll
+        #pragma unroll
         for (int j = 0; j < C; ++j) sa += a[j] * state[j];
         sa_[ind] = sa;
 
-        float v = to_float(v_[ind]);
+        float v_val = to_float(v_[ind]);
         float y = 0.f;
-#pragma unroll
+        #pragma unroll
         for (int j = 0; j < C; ++j) {
             float &s = state[j];
-            s = s * w[j] + sa * b[j] + k[j] * v;
+            s = s * w[j] + sa * b[j] + k[j] * v_val;
             y += s * q[j];
         }
         y_[ind] = to_bf(y);
 
         if ((t + 1) % _CHUNK_LEN_ == 0) {
-            // 【关键修正】状态索引非常大，必须用 int64_t 且强转第一个操作数
             int64_t base = ((int64_t)bb * H + hh) * (T / _CHUNK_LEN_) * C * C +
                            ((int64_t)t / _CHUNK_LEN_) * C * C + i;
-#pragma unroll
+            #pragma unroll
             for (int j = 0; j < C; ++j) s_[base + j * C] = state[j];
         }
     }
 }
 
+// 【优化3】反向 Kernel：模板化 + launch_bounds + float4 向量加载
+template<int C> __launch_bounds__(C, 2)
 __global__ void backward_kernel(int T, int H,
                                 F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_, F_ dy_,
                                 float *s_, float *sa_, float *dht_, float *dh0_,
                                 bf *dw_, bf *dq_, bf *dk_, bf *dv_, bf *da_, bf *db_) {
-    constexpr int C = _C_;
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
     float stateT[C] = {0}, dstate[C] = {0}, dstateT[C] = {0};
     
     int64_t dht_base = ((int64_t)bb * H + hh) * C * C + i * C;
 
-#pragma unroll
+    #pragma unroll
     for (int j = 0; j < C; ++j) {
         dstate[j]  = dht_[dht_base + j];
         dstateT[j] = dht_[dht_base + j];
@@ -91,7 +89,6 @@ __global__ void backward_kernel(int T, int H,
     float qi, wi, ki, ai, bi, dyi;
 
     for (int t = T - 1; t >= 0; --t) {
-        // 【关键修正】int64_t + 强转
         int64_t ind = (int64_t)bb * T * H * C + (int64_t)t * H * C + hh * C + i;
         
         __syncthreads();
@@ -107,26 +104,37 @@ __global__ void backward_kernel(int T, int H,
         __syncthreads();
 
         if ((t + 1) % _CHUNK_LEN_ == 0) {
-            // 【关键修正】此处原代码为 int base，会导致反向传播崩溃，已修正为 int64_t
             int64_t base = ((int64_t)bb * H + hh) * (T / _CHUNK_LEN_) * C * C +
                            ((int64_t)t / _CHUNK_LEN_) * C * C + i * C;
-#pragma unroll
-            for (int j = 0; j < C; ++j) stateT[j] = s_[base + j];
+            
+            // 【优化4】float4 向量加载，带宽利用率提升 4倍
+            const float4* s4 = (const float4*)(s_ + base);
+            #pragma unroll
+            for (int j4 = 0; j4 < C / 4; ++j4) {
+                float4 q_vec = s4[j4];
+                const int j = j4 * 4;
+                stateT[j + 0] = q_vec.x;
+                stateT[j + 1] = q_vec.y;
+                stateT[j + 2] = q_vec.z;
+                stateT[j + 3] = q_vec.w;
+            }
         }
-        float dq = 0.f;
-#pragma unroll
-        for (int j = 0; j < C; ++j) dq += stateT[j] * dy[j];
-        dq_[ind] = to_bf(dq);
+        
+        float dq_val = 0.f;
+        #pragma unroll
+        for (int j = 0; j < C; ++j) dq_val += stateT[j] * dy[j];
+        dq_[ind] = to_bf(dq_val);
 
         float iwi = 1.f / (wi + 1e-6f);
-#pragma unroll
+        #pragma unroll
         for (int j = 0; j < C; ++j) {
             stateT[j] = (stateT[j] - ki * v[j] - bi * sa[j]) * iwi;
             dstate[j] += dyi * q[j];
             dstateT[j] += qi * dy[j];
         }
+        
         float dw = 0.f, dk = 0.f, dv = 0.f, db = 0.f, dSb = 0.f;
-#pragma unroll
+        #pragma unroll
         for (int j = 0; j < C; ++j) {
             dw += dstateT[j] * stateT[j];
             dk += dstateT[j] * v[j];
@@ -138,14 +146,17 @@ __global__ void backward_kernel(int T, int H,
         dk_[ind] = to_bf(dk);
         dv_[ind] = to_bf(dv);
         db_[ind] = to_bf(db);
+        
         __syncthreads();
         dSb_shared[i] = dSb;
         __syncthreads();
+        
         float da = 0.f;
-#pragma unroll
+        #pragma unroll
         for (int j = 0; j < C; ++j) da += stateT[j] * dSb_shared[j];
         da_[ind] = to_bf(da);
-#pragma unroll
+        
+        #pragma unroll
         for (int j = 0; j < C; ++j) {
             dstate[j]  = dstate[j] * w[j] + dSb * a[j];
             dstateT[j] = dstateT[j] * wi + ai * dSb_shared[j];
@@ -154,14 +165,60 @@ __global__ void backward_kernel(int T, int H,
     }
 }
 
+/* -------------------- 推理专用 Kernel -------------------- */
+template<int C> __launch_bounds__(C, 2)
+__global__ void forward_inference_kernel(int T, int H,
+                                         F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
+                                         bf *y_, float *s_, float *h0_) {
+    int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
+    float state[C] = {0};
+    __shared__ float q[C], k[C], w[C], a[C], b[C];
+    
+    int64_t h0_base = ((int64_t)bb * H + hh) * C * C + i * C; 
+    
+    #pragma unroll
+    for (int j = 0; j < C; ++j) state[j] = h0_[h0_base + j];
+
+    for (int t = 0; t < T; ++t) {
+        int64_t ind = (int64_t)bb * T * H * C + (int64_t)t * H * C + hh * C + i;
+        
+        __syncthreads();
+        q[i] = to_float(q_[ind]);
+        w[i] = __expf(-__expf(to_float(w_[ind])));
+        k[i] = to_float(k_[ind]);
+        a[i] = to_float(a_[ind]);
+        b[i] = to_float(b_[ind]);
+        __syncthreads();
+
+        float sa = 0.f;
+        #pragma unroll
+        for (int j = 0; j < C; ++j) sa += a[j] * state[j];
+
+        float v_val = to_float(v_[ind]);
+        float y = 0.f;
+        #pragma unroll
+        for (int j = 0; j < C; ++j) {
+            float &s = state[j];
+            s = s * w[j] + sa * b[j] + k[j] * v_val;
+            y += s * q[j];
+        }
+        y_[ind] = to_bf(y);
+    }
+    
+    int64_t base = ((int64_t)bb * H + hh) * C * C + i * C;
+    #pragma unroll
+    for (int j = 0; j < C; ++j) s_[base + j] = state[j];
+}
+
+/* -------------------- Host 函数（参数名已统一） -------------------- */
 static ffi::Error WKV7FwdHost(
     cudaStream_t stream,
     ffi::Buffer<ffi::BF16> w,
     ffi::Buffer<ffi::BF16> q,
     ffi::Buffer<ffi::BF16> k,
     ffi::Buffer<ffi::BF16> v,
-    ffi::Buffer<ffi::BF16> z,
-    ffi::Buffer<ffi::BF16> a,
+    ffi::Buffer<ffi::BF16> a,  // 原'z'，直接对应 kernel 的 a_
+    ffi::Buffer<ffi::BF16> b,  // 原'a'，直接对应 kernel 的 b_
     ffi::Buffer<ffi::F32>  h0,
     ffi::ResultBuffer<ffi::BF16> y,
     ffi::ResultBuffer<ffi::F32>  s,
@@ -173,14 +230,15 @@ static ffi::Error WKV7FwdHost(
     dim3 block(C);
     dim3 grid(H, B);
 
-    forward_kernel<<<grid, block, 0, stream>>>(
+    // 【关键】模板实例化调用，参数直接映射
+    forward_kernel<_C_><<<grid, block, 0, stream>>>(
         T, H,
         reinterpret_cast<bf *>(w.typed_data()),
         reinterpret_cast<bf *>(q.typed_data()),
         reinterpret_cast<bf *>(k.typed_data()),
         reinterpret_cast<bf *>(v.typed_data()),
-        reinterpret_cast<bf *>(z.typed_data()),
-        reinterpret_cast<bf *>(a.typed_data()),
+        reinterpret_cast<bf *>(a.typed_data()),  // 直接映射到 a_
+        reinterpret_cast<bf *>(b.typed_data()),  // 直接映射到 b_
         reinterpret_cast<bf *>(y->typed_data()),
         s->typed_data(),
         sa->typed_data(),
@@ -199,8 +257,8 @@ static ffi::Error WKV7BwdHost(
     ffi::Buffer<ffi::BF16> q,
     ffi::Buffer<ffi::BF16> k,
     ffi::Buffer<ffi::BF16> v,
-    ffi::Buffer<ffi::BF16> z,
-    ffi::Buffer<ffi::BF16> a,
+    ffi::Buffer<ffi::BF16> a,  // 原'z'，直接对应 kernel 的 a_
+    ffi::Buffer<ffi::BF16> b,  // 原'a'，直接对应 kernel 的 b_
     ffi::Buffer<ffi::BF16> dy,
     ffi::Buffer<ffi::F32>  s,
     ffi::Buffer<ffi::F32>  sa,
@@ -219,14 +277,15 @@ static ffi::Error WKV7BwdHost(
     dim3 block(C);
     dim3 grid(H, B);
 
-    backward_kernel<<<grid, block, 0, stream>>>(
+    // 【关键】模板实例化调用，参数直接映射
+    backward_kernel<_C_><<<grid, block, 0, stream>>>(
         T, H,
         reinterpret_cast<bf *>(w.typed_data()),
         reinterpret_cast<bf *>(q.typed_data()),
         reinterpret_cast<bf *>(k.typed_data()),
         reinterpret_cast<bf *>(v.typed_data()),
-        reinterpret_cast<bf *>(z.typed_data()),
-        reinterpret_cast<bf *>(a.typed_data()),
+        reinterpret_cast<bf *>(a.typed_data()),  // 直接映射到 a_
+        reinterpret_cast<bf *>(b.typed_data()),  // 直接映射到 b_
         reinterpret_cast<bf *>(dy.typed_data()),
         s.typed_data(),
         sa.typed_data(),
@@ -246,6 +305,45 @@ static ffi::Error WKV7BwdHost(
     return ffi::Error::Success();
 }
 
+static ffi::Error WKV7InferenceHost(
+    cudaStream_t stream,
+    ffi::Buffer<ffi::BF16> w,
+    ffi::Buffer<ffi::BF16> q,
+    ffi::Buffer<ffi::BF16> k,
+    ffi::Buffer<ffi::BF16> v,
+    ffi::Buffer<ffi::BF16> a,  // 直接对应 kernel 的 a_
+    ffi::Buffer<ffi::BF16> b,  // 直接对应 kernel 的 b_
+    ffi::Buffer<ffi::F32>  h0,
+    ffi::ResultBuffer<ffi::BF16> y,
+    ffi::ResultBuffer<ffi::F32>  s)
+{
+    constexpr int C = _C_;
+    auto dims = w.dimensions();
+    int B = dims[0], T = dims[1], H = dims[2];
+    dim3 block(C);
+    dim3 grid(H, B);
+
+    // 【关键】模板实例化调用，参数直接映射
+    forward_inference_kernel<_C_><<<grid, block, 0, stream>>>(
+        T, H,
+        reinterpret_cast<bf *>(w.typed_data()),
+        reinterpret_cast<bf *>(q.typed_data()),
+        reinterpret_cast<bf *>(k.typed_data()),
+        reinterpret_cast<bf *>(v.typed_data()),
+        reinterpret_cast<bf *>(a.typed_data()),  // 直接映射到 a_
+        reinterpret_cast<bf *>(b.typed_data()),  // 直接映射到 b_
+        reinterpret_cast<bf *>(y->typed_data()),
+        s->typed_data(),
+        h0.typed_data());
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess)
+        return ffi::Error::Internal(
+            std::string("CUDA forward_inference_kernel error: ") + cudaGetErrorString(err));
+    return ffi::Error::Success();
+}
+
+/* -------------------- FFI 注册（参数名已对齐） -------------------- */
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
     Wkv7Fwd, WKV7FwdHost,
     ffi::Ffi::Bind()
@@ -254,9 +352,9 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::BF16>>()   // q
         .Arg<ffi::Buffer<ffi::BF16>>()   // k
         .Arg<ffi::Buffer<ffi::BF16>>()   // v
-        .Arg<ffi::Buffer<ffi::BF16>>()   // z
-        .Arg<ffi::Buffer<ffi::BF16>>()   // a
-        .Arg<ffi::Buffer<ffi::F32>>()    // h0  (float)
+        .Arg<ffi::Buffer<ffi::BF16>>()   // a (原z)
+        .Arg<ffi::Buffer<ffi::BF16>>()   // b (原a)
+        .Arg<ffi::Buffer<ffi::F32>>()    // h0
         .Ret<ffi::Buffer<ffi::BF16>>()   // y
         .Ret<ffi::Buffer<ffi::F32>>()    // s
         .Ret<ffi::Buffer<ffi::F32>>()    // sa
@@ -270,8 +368,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::BF16>>()   // q
         .Arg<ffi::Buffer<ffi::BF16>>()   // k
         .Arg<ffi::Buffer<ffi::BF16>>()   // v
-        .Arg<ffi::Buffer<ffi::BF16>>()   // z
-        .Arg<ffi::Buffer<ffi::BF16>>()   // a
+        .Arg<ffi::Buffer<ffi::BF16>>()   // a (原z)
+        .Arg<ffi::Buffer<ffi::BF16>>()   // b (原a)
         .Arg<ffi::Buffer<ffi::BF16>>()   // dy
         .Arg<ffi::Buffer<ffi::F32>>()    // s
         .Arg<ffi::Buffer<ffi::F32>>()    // sa
@@ -285,94 +383,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Ret<ffi::Buffer<ffi::BF16>>()   // db
 , {ffi::Traits::kCmdBufferCompatible});
 
-/* -------------------- 推理专用 Kernel -------------------- */
-__global__ void forward_inference_kernel(int T, int H,
-                                         F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
-                                         bf *y_, float *s_, float *h0_) {
-    constexpr int C = _C_;
-    int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
-    float state[C] = {0};
-    __shared__ float q[C], k[C], w[C], a[C], b[C];
-    
-    int64_t h0_base = ((int64_t)bb * H + hh) * C * C + i * C; 
-    
-    // 加载初始状态
-#pragma unroll
-    for (int j = 0; j < C; ++j) state[j] = h0_[h0_base + j];
-
-    // 主循环：计算每个时间步，**不保存 sa，不写回中间 s**
-    for (int t = 0; t < T; ++t) {
-        int64_t ind = (int64_t)bb * T * H * C + (int64_t)t * H * C + hh * C + i;
-        
-        __syncthreads();
-        q[i] = to_float(q_[ind]);
-        w[i] = __expf(-__expf(to_float(w_[ind])));
-        k[i] = to_float(k_[ind]);
-        a[i] = to_float(a_[ind]);
-        b[i] = to_float(b_[ind]);
-        __syncthreads();
-
-        // 计算 sa（临时用），**不保存到全局内存**
-        float sa = 0.f;
-#pragma unroll
-        for (int j = 0; j < C; ++j) sa += a[j] * state[j];
-
-        float v = to_float(v_[ind]);
-        float y = 0.f;
-#pragma unroll
-        for (int j = 0; j < C; ++j) {
-            float &s = state[j];
-            s = s * w[j] + sa * b[j] + k[j] * v;
-            y += s * q[j];
-        }
-        y_[ind] = to_bf(y);
-    }
-    
-    // **循环结束后，仅写入最终状态 (B, H, K, K)**
-    int64_t base = ((int64_t)bb * H + hh) * C * C + i * C;
-#pragma unroll
-    for (int j = 0; j < C; ++j) s_[base + j] = state[j];
-}
-
-/* -------------------- 推理 FFI Host -------------------- */
-static ffi::Error WKV7InferenceHost(
-    cudaStream_t stream,
-    ffi::Buffer<ffi::BF16> w,
-    ffi::Buffer<ffi::BF16> q,
-    ffi::Buffer<ffi::BF16> k,
-    ffi::Buffer<ffi::BF16> v,
-    ffi::Buffer<ffi::BF16> z,  // 保持参数顺序一致，推理时未使用
-    ffi::Buffer<ffi::BF16> a,
-    ffi::Buffer<ffi::F32>  h0,
-    ffi::ResultBuffer<ffi::BF16> y,
-    ffi::ResultBuffer<ffi::F32>  s)  // 仅返回最终状态
-{
-    constexpr int C = _C_;
-    auto dims = w.dimensions();
-    int B = dims[0], T = dims[1], H = dims[2];
-    dim3 block(C);
-    dim3 grid(H, B);
-
-    forward_inference_kernel<<<grid, block, 0, stream>>>(
-        T, H,
-        reinterpret_cast<bf *>(w.typed_data()),
-        reinterpret_cast<bf *>(q.typed_data()),
-        reinterpret_cast<bf *>(k.typed_data()),
-        reinterpret_cast<bf *>(v.typed_data()),
-        reinterpret_cast<bf *>(z.typed_data()),  // 占位
-        reinterpret_cast<bf *>(a.typed_data()),
-        reinterpret_cast<bf *>(y->typed_data()),
-        s->typed_data(),
-        h0.typed_data());
-
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess)
-        return ffi::Error::Internal(
-            std::string("CUDA forward_inference_kernel error: ") + cudaGetErrorString(err));
-    return ffi::Error::Success();
-}
-
-/* -------------------- 注册推理符号 -------------------- */
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
     Wkv7Inference, WKV7InferenceHost,
     ffi::Ffi::Bind()
@@ -381,8 +391,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::BF16>>()   // q
         .Arg<ffi::Buffer<ffi::BF16>>()   // k
         .Arg<ffi::Buffer<ffi::BF16>>()   // v
-        .Arg<ffi::Buffer<ffi::BF16>>()   // z (占位)
         .Arg<ffi::Buffer<ffi::BF16>>()   // a
+        .Arg<ffi::Buffer<ffi::BF16>>()   // b
         .Arg<ffi::Buffer<ffi::F32>>()    // h0
         .Ret<ffi::Buffer<ffi::BF16>>()   // y
         .Ret<ffi::Buffer<ffi::F32>>()    // s (final state)

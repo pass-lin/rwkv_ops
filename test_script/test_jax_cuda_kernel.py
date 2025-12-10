@@ -1,6 +1,6 @@
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 os.environ["KERAS_BACKEND"] = "jax"
 os.environ["KERNEL_TYPE"] = "cuda"
 
@@ -87,9 +87,9 @@ def test_is_close(name, x1, x2, atol=5e-3, rtol=1e-3):
             atol=atol,
             rtol=rtol,
         )
-        print(f"✅ {name} 梯度一致")
+        print(f"✅ {name} 一致")
     except AssertionError as e:
-        print(f"❌ {name} 梯度不一致")
+        print(f"❌ {name} 不一致")
         print(e)
 
 

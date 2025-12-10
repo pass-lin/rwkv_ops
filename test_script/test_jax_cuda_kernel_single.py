@@ -1,6 +1,6 @@
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 os.environ["KERAS_BACKEND"] = "jax"
 os.environ["KERNEL_TYPE"] = "cuda"
 
@@ -86,7 +86,7 @@ def test_is_close(name, x1, x2, atol=5e-3, rtol=1e-3):
         print(e)
 
 
-test_is_close("fwd_pred", native_out, cuda_out, atol=1e-5, rtol=1e-2)
+test_is_close("fwd_pred", native_out, cuda_out, atol=1e-5, rtol=1e-3)
 test_is_close("fwd_state", native_state, cuda_state, atol=1e-5, rtol=1e-3)
 
 print("🎉🎉🎉🎉test_script/test_jax_cuda_kernel_single.py测试结束🎉🎉🎉🎉")
