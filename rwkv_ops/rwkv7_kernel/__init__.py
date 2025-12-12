@@ -47,7 +47,7 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
         import tensorflow as tf
 
         if len(tf.config.list_physical_devices("GPU")) > 0:
-            if KERNEL_TYPE.lower() == "cuda" and HEAD_SIZE == 64:
+            if KERNEL_TYPE.lower() == "cuda" and HEAD_SIZE:
                 try:
                     from jax.lib import xla_bridge
 

@@ -25,7 +25,7 @@ def get_tf_generalized_delta_rule(HEAD_SIZE=64):
     generalized_delta_rule_inference = get_jax_generalized_delta_rule(HEAD_SIZE)[1]
 
     # ---------- 底层 kernel 包装 ----------
-    @tf.py_function(Tout=[tf.bfloat16, tf.float32, tf.float32])
+    @tf.py_function(Tout=[tf.bfloat16, tf.float32])
     def _tf_wkv7_fwd(w, q, k, v, a, b, h0):
         """tf.py_function 包装 JAX 前向"""
         y, s = generalized_delta_rule_inference(
@@ -35,7 +35,7 @@ def get_tf_generalized_delta_rule(HEAD_SIZE=64):
             v=jnp.asarray(v, jnp.bfloat16),
             a=jnp.asarray(a, jnp.bfloat16),
             b=jnp.asarray(b, jnp.bfloat16),
-            h0=jnp.asarray(h0, jnp.float32),
+            initial_state=jnp.asarray(h0, jnp.float32),
         )
         return (
             tf.convert_to_tensor(y, tf.bfloat16),
