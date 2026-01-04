@@ -7,6 +7,7 @@
 // 公共头文件路径
 #include "../common_kernel/include/mhc_types.h"
 #include "../common_kernel/kernels/sinkhorn_knopp.cuh"
+#include "../common_kernel/kernels/rmsnorm.cuh"
 
 namespace ffi = xla::ffi;
 
@@ -107,4 +108,67 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Ret<ffi::Buffer<ffi::F32>>()      // d_inp
         .Attr<std::int32_t>("num_iters")    // 显式指定32位整数
         .Attr<float>("eps")                 // float 默认是32位
+);
+
+static ffi::Error RMSNormFwdHost(
+    cudaStream_t stream,
+    ffi::Buffer<ffi::BF16> inp,        // 输入: [N, C]
+    ffi::ResultBuffer<ffi::BF16> out,  // 输出: [N, C]
+    float eps
+) {
+    auto dims = inp.dimensions();
+    int64_t N = dims[0];
+    int64_t C = dims[1];
+    
+    const nv_bfloat16* inp_ptr = reinterpret_cast<const nv_bfloat16*>(inp.typed_data());
+    nv_bfloat16* out_ptr = reinterpret_cast<nv_bfloat16*>(out->typed_data());
+    
+    // 调用包装函数
+    mhc::rmsnorm_forward(out_ptr, inp_ptr, N, C, eps, stream);
+    
+    return ffi::Error::Success();
+}
+
+// 反向FFI处理器
+static ffi::Error RMSNormBwdHost(
+    cudaStream_t stream,
+    ffi::Buffer<ffi::BF16> grad,       // 梯度: [N, C]
+    ffi::Buffer<ffi::BF16> inp,        // 原始输入: [N, C]
+    ffi::ResultBuffer<ffi::BF16> dx,   // 输入梯度: [N, C]
+    float eps
+) {
+    auto dims = grad.dimensions();
+    int64_t N = dims[0];
+    int64_t C = dims[1];
+    
+    const nv_bfloat16* grad_ptr = reinterpret_cast<const nv_bfloat16*>(grad.typed_data());
+    const nv_bfloat16* inp_ptr = reinterpret_cast<const nv_bfloat16*>(inp.typed_data());
+    nv_bfloat16* dx_ptr = reinterpret_cast<nv_bfloat16*>(dx->typed_data());
+    
+    // 调用包装函数
+    mhc::rmsnorm_backward(dx_ptr, grad_ptr, inp_ptr, N, C, eps, stream);
+    
+    return ffi::Error::Success();
+}
+
+/* -------------------- 注册 FFI 符号 -------------------- */
+
+// 在文件末尾追加注册
+XLA_FFI_DEFINE_HANDLER_SYMBOL(
+    RMSNormFwd, RMSNormFwdHost,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Arg<ffi::Buffer<ffi::BF16>>()      // inp
+        .Ret<ffi::Buffer<ffi::BF16>>()      // out
+        .Attr<float>("eps")                  // eps
+);
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(
+    RMSNormBwd, RMSNormBwdHost,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Arg<ffi::Buffer<ffi::BF16>>()      // grad
+        .Arg<ffi::Buffer<ffi::BF16>>()      // inp
+        .Ret<ffi::Buffer<ffi::BF16>>()      // dx
+        .Attr<float>("eps")                  // eps
 );
