@@ -6,9 +6,8 @@
 #include "../common_kernel/kernels/stream_mix.cuh"
 #include "../common_kernel/kernels/stream_aggregate.cuh"
 #include "../common_kernel/kernels/stream_distribute.cuh"
-// 在 mhc_cuda.cu 中添加
 #include "../common_kernel/kernels/mhc_post_op.cuh"
-
+#include "../common_kernel/kernels/mhc_pre_op.cuh"
 
 namespace mhc {
 // --- Post-Op 融合前向 ---
@@ -154,6 +153,54 @@ void cuda_stream_distribute_bwd(
         reinterpret_cast<const mhc::floatX*>(grad),
         reinterpret_cast<const mhc::floatX*>(inp),
         B, T, n, C
+    );
+}
+void cuda_mhc_pre_op_fwd(
+    nv_bfloat16* x_layer_in, 
+    float* H_pre, 
+    float* H_post, 
+    float* H_res,
+    const nv_bfloat16* x_expanded, 
+    const float* h_pre_raw, 
+    const float* h_post_raw, 
+    const float* h_res_raw,
+    int64_t B, int64_t T, int n, int64_t C, 
+    int sinkhorn_iters, float eps, cudaStream_t stream) 
+{
+    // 调用 .cuh 中的融合接口
+    mhc::mhc_pre_op_forward(
+        reinterpret_cast<mhc::floatX*>(x_layer_in),
+        H_pre, H_post, H_res,
+        reinterpret_cast<const mhc::floatX*>(x_expanded),
+        h_pre_raw, h_post_raw, h_res_raw,
+        B, T, n, C, sinkhorn_iters, eps, stream
+    );
+}
+
+void cuda_mhc_pre_op_bwd(
+    nv_bfloat16* d_x_expanded, 
+    float* d_h_pre_raw, 
+    float* d_h_post_raw, 
+    float* d_h_res_raw,
+    const nv_bfloat16* grad_layer_in, 
+    const float* grad_H_post, 
+    const float* grad_H_res,
+    const nv_bfloat16* x_expanded, 
+    const float* H_pre, 
+    const float* H_post, 
+    const float* H_res_out, 
+    const float* H_res_in_raw,
+    int64_t B, int64_t T, int n, int64_t C, 
+    int sinkhorn_iters, float eps, cudaStream_t stream) 
+{
+    mhc::mhc_pre_op_backward(
+        reinterpret_cast<mhc::floatX*>(d_x_expanded),
+        d_h_pre_raw, d_h_post_raw, d_h_res_raw,
+        reinterpret_cast<const mhc::floatX*>(grad_layer_in),
+        grad_H_post, grad_H_res,
+        reinterpret_cast<const mhc::floatX*>(x_expanded),
+        H_pre, H_post, H_res_out, H_res_in_raw,
+        B, T, n, C, sinkhorn_iters, eps, stream
     );
 }
 

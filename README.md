@@ -42,7 +42,193 @@ bash install.sh
 
 ---
 
-## rwkv7op 使用方法
+
+## [MHC 算子](https://arxiv.org/abs/2512.24880)
+
+虽然和RWKV无关，但是我懒得再开一个包做分发了，就集成在这了吧。 
+
+### 背景
+
+在多头架构中，传统做法通常是简单的线性变换或加权。MHC 引入了 **Sinkhorn-Knopp** 算法，将控制权重约束在双稳态矩阵空间内，从而保证了信息流动的守恒性和稳定性。由于这些操作涉及大量的中间变量和迭代计算，原生实现的显存占用极高。本库提供的 CUDA 算子通过 **算子融合（Operator Fusion）** 技术，显著降低了显存消耗并提升了运行速度。
+
+需要注意的是，这个仓库只提供最朴素的cuda实现。使用了https://github.com/AndreSlavescu/mHC.cu 和 Gemini协助完成。现在的代码可以成功通过测试
+
+---
+
+### MHC 算子列表
+
+| 算子名称 | 核心功能 |
+| --- | --- |
+| `mhc_pre_op` | **前置融合算子**：处理输入流聚合与 Sinkhorn 矩阵准备。 |
+| `mhc_post_op` | **后置融合算子**：处理层输出分发与多头残差融合。 |
+| `sinkhorn_knopp` | 矩阵双稳态归一化（支持高精度反向迭代）。 |
+| `rmsnorm` | 针对 MHC 输入分布优化的 RMS 归一化。 |
+| `stream_aggregate` | 特征流加权聚合（多流转单流）。 |
+| `stream_distribute` | 特征流加权分发（单流转多流）。 |
+| `stream_mix` | 特征流间的动态混合（Cross-head Mixing）。 |
+
+---
+
+### MHC 典型集成流程
+
+MHC 算子的使用流程，这是一个取代resnet的框架。我懒得写容器了，大概的使用流程如下所示：
+
+```python
+from rwkv_ops import rmsnorm, mhc_pre_op, mhc_post_op
+
+# 1. 归一化输入
+x_norm = rmsnorm(x_expanded)
+
+# 2. 生成原始控制参数 (通常通过 Linear 层)
+# h_res_raw: [B, T, N, N], h_pre_raw/h_post_raw: [B, T, N]
+h_res_raw, h_pre_raw, h_post_raw = linear_and_reshape(x_norm)
+
+# 3. MHC 前置处理 (Fused Kernel)
+x_layer_in, H_post, H_res = mhc_pre_op(
+    x_expanded, h_pre_raw, h_post_raw, h_res_raw, num_iters=20
+)
+
+# 4. 执行核心层逻辑 (x_layer_in 为聚合后的单流 [B, T, C])
+layer_out = YourCoreLayer(x_layer_in)
+
+# 5. MHC 后置处理 (Fused Kernel)
+x_next = mhc_post_op(layer_out, x_expanded, H_post, H_res)
+
+```
+
+---
+
+### 算子详细定义
+
+#### 1. `mhc_pre_op` (Fused Pre-computation)
+
+**融合说明**：该算子等价于以下原生操作的融合：
+
+* 对 `h_pre_raw` 执行 `Sigmoid` 得到前置门控。
+* 对 `h_res_raw` 执行 `Exp` + `Sinkhorn-Knopp` 得到双稳态权重矩阵。
+* 对 `x_expanded` 执行 `stream_aggregate`（按头聚合）。
+* **融合优势**：避免了存储巨大的 Exp 矩阵和中间迭代状态，显存占用降低约 80%。
+
+**接口定义**：
+
+* **输入**:
+* `x_expanded` : 展开后的  个特征头。
+* `h_pre_raw` : 原始前置系数。
+* `h_post_raw` : 原始后置系数。
+* `h_res_raw` : 原始 Sinkhorn 输入。
+
+
+* **返回**:
+* `x_layer_in` : 融合后的层输入。
+* `H_pre`, `H_post`, `H_res`: 供 `post_op` 及反向传播使用的归一化系数。
+
+
+
+#### 2. `mhc_post_op` (Fused Post-computation)
+
+**融合说明**：该算子等价于以下原生操作的融合：
+
+* 执行 `stream_distribute` 将单流输出映射回多流。
+* 执行 `stream_mix` 利用 `H_res` 进行头间信息交换。
+* 对 `H_post` 执行  并作为残差门控。
+* 执行多头残差加法：。
+
+**接口定义**：
+
+* **输入**: `layer_out` , `x_expanded` , `H_post`, `H_res`。
+* **返回**: `x_next` 。
+
+
+#### 3. `sinkhorn_knopp`
+
+* **定义**: 。
+* **特点**: CUDA 实现采用双向迭代，其梯度计算通过求解伴随状态方程实现，比直接对迭代过程进行自动微分更稳定且更省显存。
+
+#### 4. `rmsnorm`
+
+* **定义**: 标准的归一化与流操作，但在 CUDA 实现中针对 MHC 的特征分布（通常在  维度上）进行了特定的访存优化。参考mHC的实现，这个rmsnorm是不带参数的。
+
+
+### 5. `stream_aggregate`   
+
+**功能定义**：
+该算子执行加权空间压缩。它将  个独立的特征头（Streams）根据给定的权重向量进行线性加权求和，坍缩为一个统一的特征表示。
+
+* **数学表达式**：，其中 ，。
+* **等价操作**：相当于执行了 `torch.einsum('btn,btnc->btc', weights, x)`。
+
+**接口定义**：
+
+* **输入**:
+* `x`:  多流特征张量。
+* `weights`:  每个流对应的权重系数。
+
+
+* **返回**:
+* `out`:  聚合后的单流特征。
+
+
+
+---
+
+### 6. `stream_distribute`  
+
+**功能定义**：
+该算子执行特征的空间广播与重加权。它将一个单流特征复制到  个通道，并分别乘以对应的分发权重。
+
+* **数学表达式**：，其中 。
+* **等价操作**：相当于执行了 `x.unsqueeze(2) * weights.unsqueeze(-1)`。
+
+**接口定义**：
+
+* **输入**:
+* `x`:  待分发的单流特征（通常来自核心层输出）。
+* `weights`:  分发到每个头的权重系数。
+
+
+* **返回**:
+* `out`:  分发后的多流特征张量。
+
+
+
+---
+
+### 7. `stream_mix` (流混合)
+
+**功能定义**：
+该算子是 MHC 实现头间通信（Cross-head Communication）的关键。它利用一个  的变换矩阵（通常是 Sinkhorn 归一化后的矩阵），在不同的特征头之间进行线性重组。
+
+* **数学表达式**：。
+* **等价操作**：相当于执行了 `torch.einsum('btnm,btmc->btnc', gate, x)`。
+* **物理意义**：实现了信息的“非局部”重分配，使得每个头都能吸收来自其他头的信息。
+
+**接口定义**：
+
+* **输入**:
+* `x`:  原始多流特征。
+* `gate`:  混合矩阵（控制信息流动的开关与强度）。
+
+
+* **返回**:
+* `out`:  混合后的多流特征。
+
+
+
+---
+
+### MHC 实现状态
+
+| Framework | cuda | triton | native |
+| --- | --- | --- | --- |
+| **PyTorch** | ✅ | ❌ | ✅ |
+| **JAX** | ❌ | ❌ | ✅ |
+| **TensorFlow** | ❌ | ❌ | ✅ |
+| **NumPy** | ❌ | ❌ | ✅ |
+
+
+---
+
+
 
 ```python
 from rwkv_ops import generalized_delta_rule,generalized_delta_rule_inference  # 或 from rwkv_ops import rwkv7_op，完全等价

@@ -208,3 +208,83 @@ def rmsnorm(inp, eps=1e-5):
 
 def stream_mix(inp, M):
     return StreamMixFunction.apply(inp, M)
+
+
+class MHCPreOpFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx, x_expanded, h_pre_raw, h_post_raw, h_res_raw, num_iters=20, eps=1e-8
+    ):
+        # 1. 保存原始类型
+        ctx.x_dtype = x_expanded.dtype
+        ctx.h_dtype = h_pre_raw.dtype  # 通常是 fp32，但需要记录
+
+        # 2. 强制类型检查与转换 (为了对齐 C++ 接口)
+        # x_expanded 必须是 bfloat16 (对应 nv_bfloat16*)
+        x_expanded = x_expanded.to(dtype=torch.bfloat16).contiguous()
+        # 参数类 tensor 必须是 float32 (对应 float*)
+        h_pre_raw = h_pre_raw.to(dtype=torch.float32).contiguous()
+        h_post_raw = h_post_raw.to(dtype=torch.float32).contiguous()
+        h_res_raw = h_res_raw.to(dtype=torch.float32).contiguous()
+
+        # 3. 调用 CUDA 接口 (返回: x_layer_in [bf16], H_pre [f32], H_post [f32], H_res [f32])
+        x_layer_in, H_pre, H_post, H_res = mhc_lib.mhc_pre_op_fwd(
+            x_expanded, h_pre_raw, h_post_raw, h_res_raw, num_iters, eps
+        )
+
+        # 4. 保存反向传播需要的中间变量
+        ctx.save_for_backward(x_expanded, H_pre, H_post, H_res, h_res_raw)
+        ctx.num_iters = num_iters
+        ctx.eps = eps
+
+        # 5. 将主干输出转回原始类型 (通常是 bf16)
+        return x_layer_in.to(dtype=ctx.x_dtype), H_post, H_res
+
+    @staticmethod
+    def backward(ctx, grad_layer_in, grad_H_post, grad_H_res):
+        x_expanded, H_pre, H_post, H_res, h_res_raw = ctx.saved_tensors
+
+        # 1. 强制梯度类型对齐 C++ 反向接口
+        grad_layer_in = grad_layer_in.to(dtype=torch.bfloat16).contiguous()
+        grad_H_post = grad_H_post.to(dtype=torch.float32).contiguous()
+        grad_H_res = grad_H_res.to(dtype=torch.float32).contiguous()
+
+        # 2. 调用 CUDA 反向内核
+        # 返回 grads: [d_x_expanded, d_h_pre_raw, d_h_post_raw, d_h_res_raw]
+        grads = mhc_lib.mhc_pre_op_bwd(
+            grad_layer_in,
+            grad_H_post,
+            grad_H_res,
+            x_expanded,
+            H_pre,
+            H_post,
+            H_res,
+            h_res_raw,
+            ctx.num_iters,
+            ctx.eps,
+        )
+
+        # 3. 类型还原：将计算出的梯度转回输入时的原始数据类型
+        # 防止下游优化器（如 Adam）因为梯度类型不匹配而报错或增加额外的 cast 开销
+        dx = grads[0].to(dtype=ctx.x_dtype)
+        d_h_pre = grads[1].to(dtype=ctx.h_dtype)
+        d_h_post = grads[2].to(dtype=ctx.h_dtype)
+        d_h_res = grads[3].reshape(h_res_raw.shape).to(dtype=ctx.h_dtype)
+
+        # 返回 4 个输入对应的梯度，最后两个参数 num_iters/eps 对应 None
+        return dx, d_h_pre, d_h_post, d_h_res, None, None
+
+
+def mhc_pre_op(x_expanded, h_pre_raw, h_post_raw, h_res_raw, num_iters=20, eps=1e-8):
+    """
+    mHC 前处理融合算子接口
+    """
+    # 预处理：h_res_raw 可能是 [B, T, n, n] 或 [B, T, n*n]
+    if h_res_raw.dim() == 4:
+        h_res_raw_flat = h_res_raw.reshape(h_res_raw.shape[0], h_res_raw.shape[1], -1)
+    else:
+        h_res_raw_flat = h_res_raw
+
+    return MHCPreOpFunction.apply(
+        x_expanded, h_pre_raw, h_post_raw, h_res_raw_flat, num_iters, eps
+    )

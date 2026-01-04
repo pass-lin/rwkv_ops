@@ -28,6 +28,183 @@ cd rwkv_ops
 bash install.sh
 ```
 
+
+---
+
+## [MHC Operators](https://arxiv.org/abs/2512.24880)
+
+Although unrelated to RWKV, these operators are integrated here for ease of distribution.
+
+### Background
+
+In multi-head architectures, the traditional approach usually involves simple linear transformations or weighting. MHC introduces the **Sinkhorn-Knopp** algorithm to constrain control weights within the space of doubly stochastic matrices, ensuring conservation and stability of information flow. Since these operations involve numerous intermediate variables and iterative calculations, native implementations are extremely memory-intensive. The CUDA operators provided in this library use **Operator Fusion** technology to significantly reduce memory consumption and improve execution speed.
+
+Note: This repository provides a straightforward CUDA implementation, developed with reference to [mHC.cu](https://github.com/AndreSlavescu/mHC.cu) and assisted by Gemini. The current code successfully passes all numerical parity tests.
+
+---
+
+### MHC Operator List
+
+| Operator Name | Core Functionality |
+| --- | --- |
+| `mhc_pre_op` | **Fused Pre-computation**: Handles input stream aggregation and Sinkhorn matrix preparation. |
+| `mhc_post_op` | **Fused Post-computation**: Handles layer output distribution and multi-head residual fusion. |
+| `sinkhorn_knopp` | Matrix doubly stochastic normalization (supports high-precision adjoint gradient). |
+| `rmsnorm` | RMS normalization optimized for MHC input distributions. |
+| `stream_aggregate` | Weighted feature stream aggregation (multi-stream to single-stream). |
+| `stream_distribute` | Feature stream weighted distribution (single-stream to multi-stream). |
+| `stream_mix` | Dynamic mixing between feature streams (Cross-head Mixing). |
+
+---
+
+### MHC Typical Integration Workflow
+
+The MHC operator workflow is designed as a framework to replace traditional ResNet-style skip connections. A high-level usage example is shown below:
+
+```python
+from rwkv_ops import rmsnorm, mhc_pre_op, mhc_post_op
+
+# 1. Normalize input
+x_norm = rmsnorm(x_expanded)
+
+# 2. Generate raw control parameters (typically via Linear layers)
+# h_res_raw: [B, T, N, N], h_pre_raw/h_post_raw: [B, T, N]
+h_res_raw, h_pre_raw, h_post_raw = linear_and_reshape(x_norm)
+
+# 3. MHC Pre-computation (Fused Kernel)
+x_layer_in, H_post, H_res = mhc_pre_op(
+    x_expanded, h_pre_raw, h_post_raw, h_res_raw, num_iters=20
+)
+
+# 4. Execute core layer logic (x_layer_in is the aggregated single stream [B, T, C])
+layer_out = YourCoreLayer(x_layer_in)
+
+# 5. MHC Post-computation (Fused Kernel)
+x_next = mhc_post_op(layer_out, x_expanded, H_post, H_res)
+
+```
+
+---
+
+### Operator Definitions
+
+#### 1. `mhc_pre_op` (Fused Pre-computation)
+
+**Fusion Logic**: This operator is equivalent to fusing the following native operations:
+
+* Applying `Sigmoid` to `h_pre_raw` to get pre-gating coefficients.
+* Applying `Exp` + `Sinkhorn-Knopp` to `h_res_raw` to obtain the doubly stochastic weight matrix.
+* Executing `stream_aggregate` on `x_expanded` (per-head aggregation).
+* **Fusion Advantage**: Avoids storing massive exponential matrices and intermediate iteration states, reducing memory usage by approximately 80%.
+
+**Interface**:
+
+* **Inputs**:
+* `x_expanded`: Expanded  feature heads.
+* `h_pre_raw`: Raw pre-computation coefficients.
+* `h_post_raw`: Raw post-computation coefficients.
+* `h_res_raw`: Raw Sinkhorn inputs.
+
+
+* **Returns**:
+* `x_layer_in`: Fused layer input.
+* `H_pre`, `H_post`, `H_res`: Normalized coefficients used by `post_op` and for backpropagation.
+
+
+
+#### 2. `mhc_post_op` (Fused Post-computation)
+
+**Fusion Logic**: This operator is equivalent to fusing the following native operations:
+
+* Executing `stream_distribute` to map single-stream output back to multi-stream.
+* Executing `stream_mix` using `H_res` for cross-head information exchange.
+* Applying  to `H_post` as the residual gate.
+* Executing multi-head residual addition: .
+
+**Interface**:
+
+* **Inputs**: `layer_out`, `x_expanded`, `H_post`, `H_res`.
+* **Returns**: `x_next`.
+
+#### 3. `sinkhorn_knopp`
+
+* **Definition**: .
+* **Features**: The CUDA implementation uses bidirectional iteration. Gradient calculation is implemented by solving the **Adjoint State Equation**, which is more numerically stable and memory-efficient than naive automatic differentiation through the iterative process.
+
+#### 4. `rmsnorm`
+
+* **Definition**: Standard RMS normalization. The CUDA implementation includes memory access optimizations specifically for the MHC feature distribution (typically optimized along the  or  dimensions). Following the mHC implementation, this version is parameter-less (no learnable affine transform).
+
+#### 5. `stream_aggregate`
+
+**Function**: Weighted spatial compression. It performs a linear weighted sum of  independent feature heads (streams) based on a given weight vector.
+
+* **Mathematical Expression**: , where  and .
+* **Equivalent Operation**: `torch.einsum('btn,btnc->btc', weights, x)`.
+
+**Interface**:
+
+* **Inputs**:
+* `x`:  multi-stream feature tensor.
+* `weights`:  weight coefficients for each stream.
+
+
+* **Returns**:
+* `out`:  aggregated single-stream features.
+
+
+
+#### 6. `stream_distribute`
+
+**Function**: Spatial broadcasting and re-weighting. It copies a single-stream feature into  channels and multiplies each by its corresponding distribution weight.
+
+* **Mathematical Expression**: , where .
+* **Equivalent Operation**: `x.unsqueeze(2) * weights.unsqueeze(-1)`.
+
+**Interface**:
+
+* **Inputs**:
+* `x`:  single-stream features (usually from a core layer output).
+* `weights`:  distribution weights for each head.
+
+
+* **Returns**:
+* `out`:  distributed multi-stream feature tensor.
+
+
+
+#### 7. `stream_mix` (Stream Mixing)
+
+**Function**: The key to cross-head communication in MHC. It uses an  transformation matrix (usually the Sinkhorn normalized matrix) to linearly recombine features across different heads.
+
+* **Mathematical Expression**: .
+* **Equivalent Operation**: `torch.einsum('btnm,btmc->btnc', gate, x)`.
+* **Physical Significance**: Enables "non-local" information redistribution, allowing each head to absorb information from other heads.
+
+**Interface**:
+
+* **Inputs**:
+* `x`:  raw multi-stream features.
+* `gate`:  mixing matrix.
+
+
+* **Returns**:
+* `out`:  mixed multi-stream features.
+
+
+
+---
+
+### MHC Implementation Status
+
+| Framework | cuda | triton | native |
+| --- | --- | --- | --- |
+| **PyTorch** | ✅ | ❌ | ✅ |
+| **JAX** | ❌ | ❌ | ✅ |
+| **TensorFlow** | ❌ | ❌ | ✅ |
+| **NumPy** | ❌ | ❌ | ✅ |
+
+
 ---
 
 ## Environment Variables

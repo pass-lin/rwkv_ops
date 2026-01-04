@@ -9,6 +9,7 @@ def get_mhu_kernel(KERNEL_TYPE):
         stream_distribute,
         stream_mix,
         mhc_post_op,
+        mhc_pre_op,
     )
 
     if KERNEL_TYPE == "cuda":
@@ -23,6 +24,7 @@ def get_mhu_kernel(KERNEL_TYPE):
                     stream_distribute,
                     stream_mix,
                     mhc_post_op,
+                    mhc_pre_op,
                 )
 
     return (
@@ -32,4 +34,5 @@ def get_mhu_kernel(KERNEL_TYPE):
         stream_distribute,
         stream_mix,
         mhc_post_op,
+        mhc_pre_op,
     )

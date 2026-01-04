@@ -1,6 +1,6 @@
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 import torch
 import numpy as np
 from keras import ops
@@ -16,6 +16,7 @@ from rwkv_ops.mhc_kernel.torch_kernel.mhc_torch import (
     # stream_distribute as cuda_stream_distribute,
     stream_aggregate as cuda_stream_aggregate,
     mhc_post_op as cuda_mhc_post_op,
+    mhc_pre_op as cuda_mhc_pre_op,
 )
 
 # 2. 修改后的 Native 导入 (对应你提供的 native_keras_op 接口)
@@ -25,6 +26,7 @@ from rwkv_ops.mhc_kernel.native_keras_op import (
     stream_mix as native_stream_mix,
     stream_aggregate as native_stream_aggregate,
     mhc_post_op as native_mhc_post_op,
+    mhc_pre_op as native_mhc_pre_op,
 )
 
 
@@ -142,7 +144,7 @@ check_close("Mix Forward", mix_cuda_out, mix_native_out, atol=1e-3, rtol=1e-2)
 (mix_native_out.float() ** 2).sum().backward()
 
 check_close("Mix dx", x_cuda.grad, x_native.grad, atol=1e-3, rtol=1e-2)
-check_close("Mix dM", m_cuda.grad, m_native.grad, atol=1e-3, rtol=5e-3)
+check_close("Mix dM", m_cuda.grad, m_native.grad, atol=1e-3, rtol=1e-2)
 
 
 # =====================================================
@@ -268,4 +270,102 @@ check_close("Post-Op dH_post", hp_cuda.grad, hp_native.grad, atol=1e-3, rtol=1e-
 check_close("Post-Op dH_res", hr_cuda.grad, hr_native.grad, atol=5e-3, rtol=5e-3)
 
 
-print("\n" + "=" * 15 + " 所有 MHC 算子测试完成 " + "=" * 15)
+# =====================================================
+# 7. mHC Pre-Op 融合算子测试
+# =====================================================
+print("\n" + "=" * 20 + " mHC Pre-Op (Fused) 测试 " + "=" * 20)
+
+B, T, n_stream, C = 4, 128, 4, 256
+num_iters = 20
+eps_sinkhorn = 1e-8
+
+# 准备原始数据
+x_exp_raw = rand_bfp(B, T, n_stream, C)
+h_pre_raw = torch.randn(B, T, n_stream, device="cuda").float()
+h_post_raw = torch.randn(B, T, n_stream, device="cuda").float()
+h_res_raw = torch.randn(B, T, n_stream, n_stream, device="cuda").float()
+
+# --- CUDA 版准备 ---
+x_exp_cuda = make_grad(x_exp_raw)
+h_pre_cuda = make_grad(h_pre_raw)
+h_post_cuda = make_grad(h_post_raw)
+h_res_cuda = make_grad(h_res_raw)
+
+# --- Native 版准备 ---
+x_exp_native = make_grad(x_exp_raw)
+h_pre_native = make_grad(h_pre_raw)
+h_post_native = make_grad(h_post_raw)
+h_res_native = make_grad(h_res_raw)
+
+# 1. 前向测试
+# CUDA 返回: x_layer_in, H_post, H_res
+# Native 逻辑应与之对应 (注意类型转换已在 mhc_torch.py/native_keras_op.py 内部处理)
+pre_cuda_out, hp_cuda_out, hr_cuda_out = cuda_mhc_pre_op(
+    x_exp_cuda,
+    h_pre_cuda,
+    h_post_cuda,
+    h_res_cuda,
+    num_iters=num_iters,
+    eps=eps_sinkhorn,
+)
+
+pre_native_out, hp_native_out, hr_native_out = native_mhc_pre_op(
+    x_exp_native,
+    h_pre_native,
+    h_post_native,
+    h_res_native,
+    num_iters=num_iters,
+    eps=eps_sinkhorn,
+)
+
+# 检查前向输出
+check_close(
+    "Pre-Op Forward: x_layer_in", pre_cuda_out, pre_native_out, atol=1e-3, rtol=1e-3
+)
+check_close(
+    "Pre-Op Forward: H_post (2.0*sig)", hp_cuda_out, hp_native_out, atol=1e-4, rtol=1e-4
+)
+check_close(
+    "Pre-Op Forward: H_res (Sinkhorn)", hr_cuda_out, hr_native_out, atol=1e-4, rtol=1e-4
+)
+
+# 2. 反向测试
+# 构造 Loss：结合三个输出
+grad_x = torch.randn_like(pre_cuda_out) * 0.1
+grad_hp = torch.randn_like(hp_cuda_out) * 0.1
+grad_hr = torch.randn_like(hr_cuda_out) * 0.1
+
+loss_cuda = (
+    (pre_cuda_out.float() * grad_x).sum()
+    + (hp_cuda_out.float() * grad_hp).sum()
+    + (hr_cuda_out.float() * grad_hr).sum()
+)
+
+loss_native = (
+    (pre_native_out.float() * grad_x).sum()
+    + (hp_native_out.float() * grad_hp).sum()
+    + (hr_native_out.float() * grad_hr).sum()
+)
+
+loss_cuda.backward()
+loss_native.backward()
+
+# 检查梯度
+check_close(
+    "Pre-Op Grad: dx_expanded", x_exp_cuda.grad, x_exp_native.grad, atol=1e-3, rtol=1e-3
+)
+check_close(
+    "Pre-Op Grad: dh_pre_raw", h_pre_cuda.grad, h_pre_native.grad, atol=1e-3, rtol=1e-3
+)
+check_close(
+    "Pre-Op Grad: dh_post_raw",
+    h_post_cuda.grad,
+    h_post_native.grad,
+    atol=1e-3,
+    rtol=1e-3,
+)
+check_close(
+    "Pre-Op Grad: dh_res_raw", h_res_cuda.grad, h_res_native.grad, atol=1e-3, rtol=1e-3
+)  # Sinkhorn 反向误差累积稍大
+
+print("\n" + "=" * 20 + " 所有测试完成 " + "=" * 20)

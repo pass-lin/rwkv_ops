@@ -29,6 +29,15 @@ namespace mhc {
     void cuda_mhc_post_op_bwd(nv_bfloat16* d_layer_out, nv_bfloat16* d_x_expanded, float* d_H_post, float* d_H_res,
                              const nv_bfloat16* grad_next, const nv_bfloat16* layer_out, const nv_bfloat16* x_expanded,
                              const float* H_post, const float* H_res, int64_t B, int64_t T, int n, int64_t C, cudaStream_t stream);
+
+    void cuda_mhc_pre_op_fwd(nv_bfloat16* x_layer_in, float* H_pre, float* H_post, float* H_res,
+                            const nv_bfloat16* x_expanded, const float* h_pre_raw, const float* h_post_raw, const float* h_res_raw,
+                            int64_t B, int64_t T, int n, int64_t C, int sinkhorn_iters, float eps, cudaStream_t stream);
+
+    void cuda_mhc_pre_op_bwd(nv_bfloat16* d_x_expanded, float* d_h_pre_raw, float* d_h_post_raw, float* d_h_res_raw,
+                            const nv_bfloat16* grad_layer_in, const float* grad_H_post, const float* grad_H_res,
+                            const nv_bfloat16* x_expanded, const float* H_pre, const float* H_post, const float* H_res_out, const float* H_res_in_raw,
+                            int64_t B, int64_t T, int n, int64_t C, int sinkhorn_iters, float eps, cudaStream_t stream);
 }
 
 // --- Sinkhorn 绑定 ---
@@ -179,6 +188,95 @@ std::vector<torch::Tensor> mhc_post_op_backward(torch::Tensor grad_next, torch::
 
     return {d_layer_out, d_x_expanded, d_H_post, d_H_res};
 }
+#include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
+#include <vector>
+
+// 声明 CUDA 包装函数（定义在 mhc_cuda.cu 中）
+namespace mhc {
+    void cuda_mhc_pre_op_fwd(nv_bfloat16* x_layer_in, float* H_pre, float* H_post, float* H_res,
+                            const nv_bfloat16* x_expanded, const float* h_pre_raw, const float* h_post_raw, const float* h_res_raw,
+                            int64_t B, int64_t T, int n, int64_t C, int sinkhorn_iters, float eps, cudaStream_t stream);
+
+    void cuda_mhc_pre_op_bwd(nv_bfloat16* d_x_expanded, float* d_h_pre_raw, float* d_h_post_raw, float* d_h_res_raw,
+                            const nv_bfloat16* grad_layer_in, const float* grad_H_post, const float* grad_H_res,
+                            const nv_bfloat16* x_expanded, const float* H_pre, const float* H_post, const float* H_res_out, const float* H_res_in_raw,
+                            int64_t B, int64_t T, int n, int64_t C, int sinkhorn_iters, float eps, cudaStream_t stream);
+}
+
+// ----------------------------------------------------------------------------
+// 1. Forward 接口：全部改为 zeros 确保输出纯净
+// ----------------------------------------------------------------------------
+std::vector<torch::Tensor> mhc_pre_op_forward(
+    torch::Tensor x_expanded, torch::Tensor h_pre_raw, torch::Tensor h_post_raw, torch::Tensor h_res_raw,
+    int sinkhorn_iters, float eps) 
+{
+    int64_t B = x_expanded.size(0);
+    int64_t T = x_expanded.size(1);
+    int n = x_expanded.size(2);
+    int64_t C = x_expanded.size(3);
+
+    // 使用 zeros 替代 empty，防止 kernel 未覆盖区域产生脏数据污染 Sinkhorn
+    auto x_layer_in = torch::zeros({B, T, C}, x_expanded.options());
+    auto H_pre = torch::zeros({B, T, n}, h_pre_raw.options());
+    auto H_post = torch::zeros({B, T, n}, h_post_raw.options());
+    auto H_res = torch::zeros({B, T, n, n}, h_res_raw.options());
+
+    mhc::cuda_mhc_pre_op_fwd(
+        (nv_bfloat16*)x_layer_in.data_ptr<at::BFloat16>(),
+        H_pre.data_ptr<float>(),
+        H_post.data_ptr<float>(),
+        H_res.data_ptr<float>(),
+        (nv_bfloat16*)x_expanded.contiguous().data_ptr<at::BFloat16>(),
+        h_pre_raw.contiguous().data_ptr<float>(),
+        h_post_raw.contiguous().data_ptr<float>(),
+        h_res_raw.contiguous().data_ptr<float>(),
+        B, T, n, C, sinkhorn_iters, eps, 
+        c10::cuda::getCurrentCUDAStream()
+    );
+
+    return {x_layer_in, H_pre, H_post, H_res};
+}
+
+// ----------------------------------------------------------------------------
+// 2. Backward 接口：全部改为 zeros 确保梯度累加安全
+// ----------------------------------------------------------------------------
+std::vector<torch::Tensor> mhc_pre_op_backward(
+    torch::Tensor grad_layer_in, torch::Tensor grad_H_post, torch::Tensor grad_H_res,
+    torch::Tensor x_expanded, torch::Tensor H_pre, torch::Tensor H_post, 
+    torch::Tensor H_res_out, torch::Tensor h_res_raw,
+    int sinkhorn_iters, float eps) 
+{
+    int64_t B = x_expanded.size(0);
+    int64_t T = x_expanded.size(1);
+    int n = x_expanded.size(2);
+    int64_t C = x_expanded.size(3);
+
+    // 梯度 Tensor 必须清零，因为内核可能涉及原子加或特定线程写回
+    auto d_x_expanded = torch::zeros_like(x_expanded);
+    auto d_h_pre_raw = torch::zeros_like(H_pre); 
+    auto d_h_post_raw = torch::zeros_like(H_post);
+    auto d_h_res_raw = torch::zeros({B, T, n * n}, h_res_raw.options());
+
+    mhc::cuda_mhc_pre_op_bwd(
+        (nv_bfloat16*)d_x_expanded.data_ptr<at::BFloat16>(),
+        d_h_pre_raw.data_ptr<float>(),
+        d_h_post_raw.data_ptr<float>(),
+        d_h_res_raw.data_ptr<float>(),
+        (nv_bfloat16*)grad_layer_in.contiguous().data_ptr<at::BFloat16>(),
+        grad_H_post.contiguous().data_ptr<float>(),
+        grad_H_res.contiguous().data_ptr<float>(),
+        (nv_bfloat16*)x_expanded.contiguous().data_ptr<at::BFloat16>(),
+        H_pre.contiguous().data_ptr<float>(),
+        H_post.contiguous().data_ptr<float>(),
+        H_res_out.contiguous().data_ptr<float>(),
+        h_res_raw.contiguous().data_ptr<float>(),
+        B, T, n, C, sinkhorn_iters, eps,
+        c10::cuda::getCurrentCUDAStream()
+    );
+
+    return {d_x_expanded, d_h_pre_raw, d_h_post_raw, d_h_res_raw};
+}
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("sinkhorn_fwd", &sinkhorn_forward);
@@ -193,4 +291,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("stream_distribute_bwd", &stream_distribute_backward, "Stream Distribute Backward");
     m.def("mhc_post_op_fwd", &mhc_post_op_forward);
     m.def("mhc_post_op_bwd", &mhc_post_op_backward);
+    m.def("mhc_pre_op_bwd", &mhc_pre_op_backward);
+    m.def("mhc_pre_op_fwd", &mhc_pre_op_forward);
 }

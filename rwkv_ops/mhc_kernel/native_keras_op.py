@@ -13,6 +13,7 @@ def fp32_sigmoid(x):
 # --- 核心 MHC 算子 ---
 
 
+@keras.remat
 def sinkhorn_knopp(inp, num_iters=20, eps=1e-8):
     """
     将输入矩阵投影为双拟随机矩阵 (Doubly Stochastic Matrix)。
@@ -34,6 +35,7 @@ def sinkhorn_knopp(inp, num_iters=20, eps=1e-8):
     return ops.cast(P, dtype)
 
 
+@keras.remat
 def rmsnorm(inp, eps=1e-5):
     """
     标准 RMSNorm 算子。
@@ -48,6 +50,7 @@ def rmsnorm(inp, eps=1e-5):
     return ops.cast(x_normed, dtype)
 
 
+@keras.remat
 def stream_aggregate(inp, H_pre):
     # 1. 转换为 float32 进行高精度计算
     inp_f32 = ops.cast(inp, "float32")
@@ -60,6 +63,7 @@ def stream_aggregate(inp, H_pre):
     return ops.cast(out_f32, inp.dtype)
 
 
+@keras.remat
 def stream_distribute(inp, H_post, n=0):
     """
     Distribute (1 -> n): 将单流输出分发回多流。
@@ -86,6 +90,7 @@ def stream_distribute(inp, H_post, n=0):
     return ops.cast(res_fp32, original_dtype)
 
 
+@keras.remat
 def stream_mix(inp, M):
     """
     Mix (n -> n): 残差流之间的线性交互。
@@ -103,41 +108,7 @@ def stream_mix(inp, M):
     return ops.cast(out, dtype)
 
 
-def mhc_pre_op(x_expanded, h_pre_raw, h_post_raw, h_res_raw, num_iters=20):
-    """
-    mHC 前处理融合算子
-    输入:
-        x_expanded: [B, T, n, C] - 当前的扩展残差流
-        h_pre_raw, h_post_raw: [B, T, n] - 线性投影后的原始激活值
-        h_res_raw: [B, T, n*n] - 用于生成 Sinkhorn 矩阵的原始值
-    返回:
-        x_layer_in: [B, T, C] - 聚合后准备进入 Layer (Attention/FFN) 的输入
-        H_post: [B, T, n] - 激活后的分发权重
-        H_res: [B, T, n, n] - 经过流形约束后的混合矩阵
-    """
-    B, T, n, C = ops.shape(x_expanded)
-
-    # 1. 计算 H_pre 并进行流聚合 (Stream Aggregate)
-    # H_pre 控制哪些流的信息进入当前的 F(x)
-    H_pre = fp32_sigmoid(h_pre_raw)  # [B, T, n]
-    x_layer_in = stream_aggregate(x_expanded, H_pre)  # [B, T, C]
-
-    # 2. 计算 H_post (带有论文中的 2.0 缩放因子)
-    # H_post 控制 Layer 输出如何反馈回各条流
-    H_post = 2.0 * fp32_sigmoid(h_post_raw)  # [B, T, n]
-
-    # 3. 计算 H_res (Sinkhorn 投影)
-    # 将线性层输出 reshape 回 n x n 矩阵进行投影
-    h_res_reshaped = ops.reshape(h_res_raw, (B, T, n, n))
-    H_res = sinkhorn_knopp(h_res_reshaped, num_iters=num_iters)
-
-    return x_layer_in, H_post, H_res
-
-
-import keras
-from keras import ops
-
-
+@keras.remat
 def stream_mix_fp32(x_expanded, H_res):
     """内部强制使用 FP32 计算的流混合"""
     # x_expanded: [B, T, n, C], H_res: [B, T, n, n]
@@ -147,6 +118,7 @@ def stream_mix_fp32(x_expanded, H_res):
     return ops.matmul(h_f32, x_f32)
 
 
+@keras.remat
 def stream_distribute_fp32(layer_out, H_post):
     """内部强制使用 FP32 计算的分发"""
     # layer_out: [B, T, C], H_post: [B, T, n]
@@ -157,10 +129,17 @@ def stream_distribute_fp32(layer_out, H_post):
     return ops.expand_dims(l_f32, -2) * ops.expand_dims(h_f32, -1)
 
 
+@keras.remat
 def mhc_post_op(layer_out, x_expanded, H_post, H_res):
     """
-    修改后的朴素实现：
-    通过将中间过程全部保留在 FP32，模拟 CUDA 内核的寄存器融合逻辑。
+    mHC 后处理融合算子
+    输入:
+        layer_out: [B, T, C] - 核心层 (Attention/FFN) 处理后的输出
+        x_expanded: [B, T, n, C] - 之前的扩展残差流 (Pre-Op 之前的状态)
+        H_post: [B, T, n] - 分发权重 (来自 Pre-Op)，2*sigmoid后的数值
+        H_res: [B, T, n, n] - 流混合矩阵 (来自 Pre-Op)
+    返回:
+        x_next: [B, T, n, C] - 更新后的扩展残差流
     """
     # 1. 在 FP32 下计算混合路径
     x_mixed_f32 = stream_mix_fp32(x_expanded, H_res)
@@ -174,3 +153,52 @@ def mhc_post_op(layer_out, x_expanded, H_post, H_res):
     # 4. 只在最后输出时进行一次 BF16 转换
     # 这一步对应 CUDA 内核中最后的 to_bf()
     return ops.cast(x_next_f32, x_expanded.dtype)
+
+
+@keras.remat
+def mhc_pre_op(x_expanded, h_pre_raw, h_post_raw, h_res_raw, num_iters=20, eps=1e-8):
+    """
+    mHC 前处理融合算子
+    输入:
+        x_expanded: [B, T, n, C] - 当前的扩展残差流
+        h_pre_raw, h_post_raw: [B, T, n] - 线性投影后的原始激活值
+        h_res_raw: [B, T, n*n] - 用于生成 Sinkhorn 矩阵的原始值
+    返回:
+        x_layer_in: [B, T, C] - 聚合后准备进入 Layer (Attention/FFN) 的输入
+        H_post: [B, T, n] - 激活后的分发权重
+        H_res: [B, T, n, n] - 经过流形约束后的混合矩阵
+    """
+    original_dtype = x_expanded.dtype
+    B, T, n, C = ops.shape(x_expanded)
+
+    # --- 0. 提升精度 ---
+    x_exp_f32 = ops.cast(x_expanded, "float32")
+    h_pre_f32 = ops.cast(h_pre_raw, "float32")
+    h_post_f32 = ops.cast(h_post_raw, "float32")
+    h_res_f32 = ops.cast(h_res_raw, "float32")
+
+    # --- 1. Stream Aggregate (n -> 1) ---
+    # H_pre = sigmoid(h_pre)
+    H_pre_f32 = ops.nn.sigmoid(h_pre_f32)
+
+    # x_layer_in = sum(H_pre_i * x_expanded_i)
+    # 使用 expand_dims 确保广播正确：[B, T, n, 1] * [B, T, n, C] -> [B, T, n, C] -> sum -> [B, T, C]
+    x_layer_in_f32 = ops.sum(ops.expand_dims(H_pre_f32, -1) * x_exp_f32, axis=-2)
+
+    # --- 2. H_post 计算 (带 2.0 缩放) ---
+    # 根据论文，这里使用 2.0 * sigmoid 确保恒等映射的初始化稳定性
+    H_post_f32 = 2.0 * ops.nn.sigmoid(h_post_f32)
+
+    # --- 3. Sinkhorn-Knopp (n x n 投影) ---
+    h_res_reshaped_f32 = ops.reshape(h_res_f32, (B, T, n, n))
+
+    # 内部执行 sinkhorn 迭代（确保 sinkhorn_knopp 内部也是 float32）
+    H_res_f32 = sinkhorn_knopp(h_res_reshaped_f32, num_iters=num_iters, eps=eps)
+
+    # --- 4. 转换回原始格式 ---
+    # 模拟 CUDA Kernel 最后写回显存时的 cast 操作
+    return (
+        ops.cast(x_layer_in_f32, original_dtype),
+        ops.cast(H_post_f32, "float32"),  # H 权重通常在模型中保持 FP32 精度
+        ops.cast(H_res_f32, "float32"),
+    )
