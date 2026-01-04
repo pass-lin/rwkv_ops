@@ -137,6 +137,7 @@ def mhc_pre_op(x_expanded, h_pre_raw, h_post_raw, h_res_raw, num_iters=20):
 import keras
 from keras import ops
 
+
 def stream_mix_fp32(x_expanded, H_res):
     """内部强制使用 FP32 计算的流混合"""
     # x_expanded: [B, T, n, C], H_res: [B, T, n, n]
@@ -145,14 +146,16 @@ def stream_mix_fp32(x_expanded, H_res):
     # 执行矩阵乘法: [B, T, n, n] @ [B, T, n, C] -> [B, T, n, C]
     return ops.matmul(h_f32, x_f32)
 
+
 def stream_distribute_fp32(layer_out, H_post):
     """内部强制使用 FP32 计算的分发"""
     # layer_out: [B, T, C], H_post: [B, T, n]
     l_f32 = ops.cast(layer_out, "float32")
     h_f32 = ops.cast(H_post, "float32")
-    
+
     # [B, T, 1, C] * [B, T, n, 1] -> [B, T, n, C]
     return ops.expand_dims(l_f32, -2) * ops.expand_dims(h_f32, -1)
+
 
 def mhc_post_op(layer_out, x_expanded, H_post, H_res):
     """

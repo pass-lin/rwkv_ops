@@ -28,6 +28,7 @@ from .mhc_kernel import get_mhu_kernel
     mhc_stream_aggregate,
     mhc_stream_distribute,
     mhc_stream_mix,
+    mhc_post_op,
 ) = get_mhu_kernel(KERNEL_TYPE)
 
 generalized_delta_rule, generalized_delta_rule_inference, RWKV7_USE_TRITON_KERNEL = (

@@ -256,13 +256,16 @@ grad_signal = torch.randn_like(post_cuda_out) * 0.1
 (post_native_out.float() * grad_signal).sum().backward()
 
 # 1. 检查数据流梯度 (由融合内核计算)
-check_close("Post-Op dl (layer_out grad)", l_cuda.grad, l_native.grad, atol=1e-3, rtol=1e-3)
-check_close("Post-Op dx (x_expanded grad)", x_cuda.grad, x_native.grad, atol=1e-3, rtol=1e-3)
+check_close(
+    "Post-Op dl (layer_out grad)", l_cuda.grad, l_native.grad, atol=1e-3, rtol=1e-3
+)
+check_close(
+    "Post-Op dx (x_expanded grad)", x_cuda.grad, x_native.grad, atol=1e-3, rtol=1e-3
+)
 
 # 2. 检查权重梯度 (由复用的 stream_ops 内核计算)
 check_close("Post-Op dH_post", hp_cuda.grad, hp_native.grad, atol=1e-3, rtol=1e-3)
 check_close("Post-Op dH_res", hr_cuda.grad, hr_native.grad, atol=5e-3, rtol=5e-3)
-
 
 
 print("\n" + "=" * 15 + " 所有 MHC 算子测试完成 " + "=" * 15)
