@@ -82,6 +82,12 @@ jax.ffi.register_ffi_target(
 jax.ffi.register_ffi_target(
     "rmsnorm_bwd", jax.ffi.pycapsule(_LIB.RMSNormBwd), platform="CUDA"
 )
+jax.ffi.register_ffi_target(
+    "stream_mix_fwd", jax.ffi.pycapsule(_LIB.StreamMixFwd), platform="CUDA"
+)
+jax.ffi.register_ffi_target(
+    "stream_mix_bwd", jax.ffi.pycapsule(_LIB.StreamMixBwd), platform="CUDA"
+)
 
 
 def _normalize_shape(x: jnp.ndarray, expected_ndim: int, name: str) -> jnp.ndarray:
@@ -173,7 +179,7 @@ def sinkhorn_knopp(
     # 类型和形状检查
     inp = _normalize_shape(inp, 4, "sinkhorn_knopp")
     original_dtype = inp.dtype
-
+    inp = jnp.asarray(inp, "float32")
     # 关键修复：在创建kernel前转换为numpy 32位类型
     kernel = _create_sinkhorn_kernel(np.int32(num_iters), np.float32(eps))
 
@@ -192,7 +198,7 @@ def sinkhorn_knopp(
 def _rmsnorm_ffi_fwd(inp: jnp.ndarray, eps: np.float32) -> jnp.ndarray:
     """内部FFI前向调用"""
     # 确保bf16和连续性
-    inp = inp.astype(jnp.bfloat16)
+
     out_type = jax.ShapeDtypeStruct(inp.shape, jnp.bfloat16)
 
     out = jax.ffi.ffi_call("rmsnorm_fwd", out_type, vmap_method="broadcast_all")(
@@ -257,7 +263,7 @@ def rmsnorm(inp: jnp.ndarray, eps: float = 1e-5) -> jnp.ndarray:
 
     original_dtype = inp.dtype
     original_shape = inp.shape
-
+    inp = inp.astype(jnp.bfloat16)
     # 展平到2D: [N, C]
     N = inp.shape[0]
     C = inp.shape[-1]
@@ -273,3 +279,92 @@ def rmsnorm(inp: jnp.ndarray, eps: float = 1e-5) -> jnp.ndarray:
 
     # 恢复形状
     return result_2d.astype(original_dtype).reshape(original_shape)
+
+
+# ---------- Stream Mix 核心实现 ----------
+def _stream_mix_fwd(inp: jnp.ndarray, M: jnp.ndarray) -> jnp.ndarray:
+    """内部FFI前向调用"""
+    # 强制类型转换
+
+    out_type = jax.ShapeDtypeStruct(inp.shape, jnp.bfloat16)
+
+    out = jax.ffi.ffi_call("stream_mix_fwd", out_type, vmap_method="broadcast_all")(
+        inp, M
+    )
+
+    return out
+
+
+def _stream_mix_bwd(
+    grad: jnp.ndarray, inp: jnp.ndarray, M: jnp.ndarray
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """内部FFI反向调用"""
+    # 关键修复：梯度必须是 fp32，不是 bf16
+    grad = grad.astype(jnp.float32)  # 从 jnp.bfloat16 改为 jnp.float32
+    inp = inp.astype(jnp.bfloat16)
+    M = M.astype(jnp.float32)
+
+    d_inp_type = jax.ShapeDtypeStruct(inp.shape, jnp.bfloat16)
+    d_M_type = jax.ShapeDtypeStruct(M.shape, jnp.float32)
+
+    d_inp, d_M = jax.ffi.ffi_call(
+        "stream_mix_bwd", (d_inp_type, d_M_type), vmap_method="broadcast_all"
+    )(grad, inp, M)  # 现在 grad 是 F32，匹配 FFI 签名
+
+    return d_inp, d_M
+
+
+def _create_stream_mix_kernel():
+    """创建Stream Mix kernel（无静态参数）"""
+
+    @jax.custom_vjp
+    def _kernel(inp: jnp.ndarray, M: jnp.ndarray) -> jnp.ndarray:
+        return _stream_mix_fwd(inp, M)
+
+    def _fwd(inp: jnp.ndarray, M: jnp.ndarray):
+        out = _stream_mix_fwd(inp, M)
+        # 保存输入用于反向
+        return out, (inp, M)
+
+    def _bwd(saved_vals: Tuple[jnp.ndarray, jnp.ndarray], grad: jnp.ndarray):
+        inp, M = saved_vals
+        d_inp, d_M = _stream_mix_bwd(grad, inp, M)
+        # 返回两个梯度，对应forward的两个输入
+        return d_inp, d_M
+
+    _kernel.defvjp(_fwd, _bwd)
+    return _kernel
+
+
+# ---------- 公共API ----------
+def stream_mix(inp: jnp.ndarray, M: jnp.ndarray) -> jnp.ndarray:
+    """
+    JAX FFI版Stream Mix算子
+
+    参数:
+        inp: [B, T, n, C] 输入张量（支持任意dtype，内部转bf16）
+        M: [B, T, n, n] 权重矩阵（支持任意dtype，内部转fp32）
+
+    返回:
+        [B, T, n, C] 混合结果，dtype与inp一致
+    """
+    # 形状检查
+    if inp.ndim != 4:
+        raise ValueError(f"Stream Mix需要4维输入，但得到{inp.ndim}维")
+    if M.ndim != 4:
+        raise ValueError(f"Stream Mix权重需要4维，但得到{M.ndim}维")
+    if inp.shape[:3] != M.shape[:3]:
+        raise ValueError(f"Batch/Time/Stream维度不匹配: inp{inp.shape}, M{M.shape}")
+
+    original_dtype = inp.dtype
+    inp = inp.astype(jnp.bfloat16)
+    M = M.astype(jnp.float32)
+    # 创建并执行kernel
+    kernel = _create_stream_mix_kernel()
+    checkpointed_kernel = jax.checkpoint(
+        kernel, policy=cp.save_anything_except_these_names(())
+    )
+
+    result = checkpointed_kernel(inp, M)
+
+    return result.astype(original_dtype)

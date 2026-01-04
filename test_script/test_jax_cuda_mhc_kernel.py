@@ -1,6 +1,6 @@
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # 请根据实际情况修改
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"  # 请根据实际情况修改
 os.environ["KERAS_BACKEND"] = "jax"
 
 import jax
@@ -17,8 +17,8 @@ import rwkv_ops.mhc_kernel.native_keras_op as native_mhc
 
 def check_close(name, x1, x2, atol=1e-4, rtol=1e-4):
     """精度对比辅助函数"""
-    x1_val = np.array(x1)
-    x2_val = np.array(x2)
+    x1_val = np.array(x1.astype("float32"))
+    x2_val = np.array(x2.astype("float32"))
     error = np.abs(x1_val - x2_val)
     if np.sum(error) == 0:
         print("✅✅✅完全一致✅✅✅")
@@ -29,7 +29,10 @@ def check_close(name, x1, x2, atol=1e-4, rtol=1e-4):
         return True
     except AssertionError as e:
         max_diff = np.max(np.abs(x1_val - x2_val))
-        print(f"❌ {name:25} Fail (Max Diff: {max_diff:.6e})")
+        print(f"❌ {e}")
+        print(
+            f"{float(np.sum(error == 0)) / float(np.cumprod(error.shape)[-1])}是完全一模一样的，平均误差是{error.mean()}"
+        )
         return False
 
 
@@ -88,7 +91,7 @@ def rms_loss(m, x):
 )
 check_close("RMSNorm Forward", out_jax, out_nat, atol=1e-2)
 check_close("RMSNorm Gradient", g_jax, g_nat, atol=1e-3)
-raise (1)
+
 # =====================================================
 # 3. Stream Mix 测试
 # =====================================================
@@ -103,15 +106,15 @@ def mix_loss(m, x, mat):
 
 
 (l1, out_jax), g_jax = jax.value_and_grad(
-    partial(mix_loss, jax_mhc), has_aux=True, argnums=(1, 2)
+    partial(mix_loss, jax_mhc), has_aux=True, argnums=(0, 1)
 )(x_mix, m_mat)
 (l2, out_nat), g_nat = jax.value_and_grad(
-    partial(mix_loss, native_mhc), has_aux=True, argnums=(1, 2)
+    partial(mix_loss, native_mhc), has_aux=True, argnums=(0, 1)
 )(x_mix, m_mat)
-check_close("StreamMix Forward", out_jax, out_nat)
-check_close("StreamMix Grad: dx", g_jax[0], g_nat[0])
-check_close("StreamMix Grad: dM", g_jax[1], g_nat[1])
-
+check_close("StreamMix Forward", out_jax, out_nat, 5e-3, 7e-3)
+check_close("StreamMix Grad: dx", g_jax[0], g_nat[0], 5e-3, 5e-3)
+check_close("StreamMix Grad: dM", g_jax[1], g_nat[1], 5e-3, 5e-3)
+raise (1)
 # =====================================================
 # 4. Stream Aggregate 测试
 # =====================================================

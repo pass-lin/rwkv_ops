@@ -8,7 +8,7 @@
 #include "../common_kernel/include/mhc_types.h"
 #include "../common_kernel/kernels/sinkhorn_knopp.cuh"
 #include "../common_kernel/kernels/rmsnorm.cuh"
-
+#include "../common_kernel/kernels/stream_mix.cuh"
 namespace ffi = xla::ffi;
 
 /* -------------------- Sinkhorn Knopp FFI -------------------- */
@@ -171,4 +171,81 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::BF16>>()      // inp
         .Ret<ffi::Buffer<ffi::BF16>>()      // dx
         .Attr<float>("eps")                  // eps
+);
+
+/* -------------------- Stream Mix FFI -------------------- */
+
+// 前向FFI处理器
+static ffi::Error StreamMixFwdHost(
+    cudaStream_t stream,
+    ffi::Buffer<ffi::BF16> inp,        // 输入: [B, T, n, C]
+    ffi::Buffer<ffi::F32> M,           // 权重: [B, T, n, n]
+    ffi::ResultBuffer<ffi::BF16> out   // 输出: [B, T, n, C]
+) {
+    auto dims = inp.dimensions();
+    int64_t B = dims[0];
+    int64_t T = dims[1];
+    int64_t n = dims[2];
+    int64_t C = dims[3];
+    
+    const nv_bfloat16* inp_ptr = reinterpret_cast<const nv_bfloat16*>(inp.typed_data());
+    const float* M_ptr = M.typed_data();
+    nv_bfloat16* out_ptr = reinterpret_cast<nv_bfloat16*>(out->typed_data());
+    
+    // 调用包装函数
+    mhc::stream_mix_forward(out_ptr, inp_ptr, M_ptr, B, T, static_cast<int>(n), C, stream);
+    
+    return ffi::Error::Success();
+}
+
+// 反向FFI处理器
+// 修改1: 函数签名
+static ffi::Error StreamMixBwdHost(
+    cudaStream_t stream,
+    ffi::Buffer<ffi::F32> grad,        // 从 BF16 改为 F32
+    ffi::Buffer<ffi::BF16> inp,
+    ffi::Buffer<ffi::F32> M,
+    ffi::ResultBuffer<ffi::BF16> d_inp,
+    ffi::ResultBuffer<ffi::F32> d_M
+) {
+    auto dims = grad.dimensions();  // 现在用 grad 获取维度
+    int64_t B = dims[0];
+    int64_t T = dims[1];
+    int64_t n = dims[2];
+    int64_t C = dims[3];
+    
+    const float* grad_ptr = grad.typed_data();  // 直接获取 float*
+    const nv_bfloat16* inp_ptr = reinterpret_cast<const nv_bfloat16*>(inp.typed_data());
+    const float* M_ptr = M.typed_data();
+    nv_bfloat16* d_inp_ptr = reinterpret_cast<nv_bfloat16*>(d_inp->typed_data());
+    float* d_M_ptr = d_M->typed_data();
+    
+    mhc::stream_mix_backward(d_inp_ptr, d_M_ptr, grad_ptr, inp_ptr, M_ptr, 
+                            B, T, static_cast<int>(n), C, stream);
+    
+    return ffi::Error::Success();
+}
+
+
+
+/* -------------------- 注册 FFI 符号 -------------------- */
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(
+    StreamMixFwd, StreamMixFwdHost,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Arg<ffi::Buffer<ffi::BF16>>()      // inp
+        .Arg<ffi::Buffer<ffi::F32>>()      // M
+        .Ret<ffi::Buffer<ffi::BF16>>()      // out
+);
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(
+    StreamMixBwd, StreamMixBwdHost,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Arg<ffi::Buffer<ffi::F32>>()      // grad: F32
+        .Arg<ffi::Buffer<ffi::BF16>>()      // inp: BF16
+        .Arg<ffi::Buffer<ffi::F32>>()      // M: F32
+        .Ret<ffi::Buffer<ffi::BF16>>()      // d_inp: BF16
+        .Ret<ffi::Buffer<ffi::F32>>()      // d_M: F32
 );
