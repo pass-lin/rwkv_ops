@@ -49,15 +49,15 @@ def rmsnorm(inp, eps=1e-5):
 
 
 def stream_aggregate(inp, H_pre):
-    """
-    Aggregate (n -> 1): 聚合多个残差流。
-    inp: [B, T, n, C]
-    H_pre: [B, T, n] 或 [n] (权重)
-    """
-    # 如果 H_pre 是 raw 值，通常外部会先经过 sigmoid
-    # 这里假设 H_pre 已经是激活后的权重
-    # [B, T, n, 1] * [B, T, n, C] -> sum over n -> [B, T, C]
-    return ops.sum(inp * ops.expand_dims(H_pre, -1), axis=-2)
+    # 1. 转换为 float32 进行高精度计算
+    inp_f32 = ops.cast(inp, "float32")
+    H_f32 = ops.cast(H_pre, "float32")
+    
+    # 2. 在 float32 空间完成乘法和累加
+    out_f32 = ops.sum(inp_f32 * ops.expand_dims(H_f32, -1), axis=-2)
+    
+    # 3. 最后转回原先的格式 (如 bf16)
+    return ops.cast(out_f32, inp.dtype)
 
 
 def stream_distribute(inp, H_post, n=0):

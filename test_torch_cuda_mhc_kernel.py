@@ -14,7 +14,7 @@ from rwkv_ops.mhc_kernel.torch_kernel.mhc_torch import (
     rmsnorm as cuda_rmsnorm,
     stream_mix as cuda_stream_mix,
     # stream_distribute as cuda_stream_distribute,
-    # stream_aggregate as cuda_stream_aggregate
+    stream_aggregate as cuda_stream_aggregate
 )
 
 # 2. 修改后的 Native 导入 (对应你提供的 native_keras_op 接口)
@@ -22,6 +22,7 @@ from rwkv_ops.mhc_kernel.native_keras_op import (
     sinkhorn_knopp as native_sinkhorn,
     rmsnorm as native_rmsnorm,
     stream_mix as native_stream_mix,
+    stream_aggregate as native_stream_aggregate
 )
 
 
@@ -140,4 +141,26 @@ check_close("Mix Forward", mix_cuda_out, mix_native_out, atol=1e-3, rtol=1e-2)
 
 check_close("Mix dx", x_cuda.grad, x_native.grad, atol=1e-3, rtol=1e-2)
 check_close("Mix dM", m_cuda.grad, m_native.grad, atol=1e-3, rtol=5e-3)
+
+
+# =====================================================
+# 4. Stream Mix aggregate
+# =====================================================
+print("\n" + "=" * 20 + " Stream aggregate 测试 " + "=" * 20)
+inp_mix = rand_bfp(B, T, n_stream, C)
+H_pre = rand_bfp(B,T, n_stream)
+
+H_pre_cuda, x_cuda = make_grad(H_pre), make_grad(inp_mix)
+H_pre_native, x_native = make_grad(H_pre), make_grad(inp_mix)
+
+native_out = native_stream_aggregate(x_native, H_pre_native)
+cuda_out = cuda_stream_aggregate(x_cuda, H_pre_cuda)
+check_close("Mix aggregate", cuda_out, native_out, atol=1e-3, rtol=1e-3)
+
+(cuda_out.float() ** 2).sum().backward()
+(native_out.float() ** 2).sum().backward()
+
+check_close("Mix dx", x_cuda.grad, x_native.grad, atol=1e-3, rtol=1e-3)
+check_close("Mix H_pre", H_pre_cuda.grad, H_pre_native.grad, atol=1e-3, rtol=1e-3)
+
 print("\n" + "=" * 15 + " 所有 MHC 算子测试完成 " + "=" * 15)
