@@ -120,7 +120,8 @@ check_close("StreamMix Grad: dM", g_jax[1], g_nat[1], 5e-3, 5e-3)
 # =====================================================
 print(f"\n{' Stream Aggregate 测试 ':=^50}")
 x_agg = rand_bfp(key, (B, T, n, C))
-H_agg = rand_f32(key, (B, T, n))  
+H_agg = rand_f32(key, (B, T, n))
+
 
 def agg_loss(m, x, h):
     out = m.stream_aggregate(x, h)

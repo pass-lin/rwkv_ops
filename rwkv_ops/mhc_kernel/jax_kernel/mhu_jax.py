@@ -95,6 +95,7 @@ jax.ffi.register_ffi_target(
     "stream_aggregate_bwd", jax.ffi.pycapsule(_LIB.StreamAggregateBwd), platform="CUDA"
 )
 
+
 def _normalize_shape(x: jnp.ndarray, expected_ndim: int, name: str) -> jnp.ndarray:
     """确保数组维度正确"""
     if x.ndim != expected_ndim:
@@ -374,42 +375,35 @@ def stream_mix(inp: jnp.ndarray, M: jnp.ndarray) -> jnp.ndarray:
 
     return result.astype(original_dtype)
 
+
 # ---------- Stream Aggregate 核心实现 ----------
 def _stream_aggregate_ffi_fwd(
-    inp: jnp.ndarray, 
-    H_pre: jnp.ndarray,
-    per_token: bool
+    inp: jnp.ndarray, H_pre: jnp.ndarray, per_token: bool
 ) -> jnp.ndarray:
     """内部FFI前向调用"""
     # 强制类型转换: BF16 输入, FP32 权重
 
-    
     # 输出形状: [B, T, C]
     B, T, n, C = inp.shape
     out_shape = (B, T, C)
     out_type = jax.ShapeDtypeStruct(out_shape, jnp.bfloat16)
 
     out = jax.ffi.ffi_call(
-        "stream_aggregate_fwd", 
-        out_type, 
-        vmap_method="broadcast_all"
-    )(inp_bf16, H_f32, per_token=per_token)
+        "stream_aggregate_fwd", out_type, vmap_method="broadcast_all"
+    )(inp, H_pre, per_token=per_token)
 
     return out
 
 
 def _stream_aggregate_ffi_bwd(
-    grad: jnp.ndarray,
-    inp: jnp.ndarray,
-    H_pre: jnp.ndarray,
-    per_token: bool
+    grad: jnp.ndarray, inp: jnp.ndarray, H_pre: jnp.ndarray, per_token: bool
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """内部FFI反向调用"""
     # 关键：梯度用 float32 进行高精度规约
     grad_f32 = grad.astype(jnp.float32)
     inp_bf16 = inp.astype(jnp.bfloat16)
     H_f32 = H_pre.astype(jnp.float32)
-    
+
     B, T, n, C = inp.shape
     # 输出梯度形状
     d_inp_type = jax.ShapeDtypeStruct(inp.shape, jnp.bfloat16)
@@ -418,11 +412,9 @@ def _stream_aggregate_ffi_bwd(
     d_H_type = jax.ShapeDtypeStruct(d_H_shape, jnp.float32)
 
     d_inp, d_H = jax.ffi.ffi_call(
-        "stream_aggregate_bwd",
-        (d_inp_type, d_H_type),
-        vmap_method="broadcast_all"
+        "stream_aggregate_bwd", (d_inp_type, d_H_type), vmap_method="broadcast_all"
     )(grad_f32, inp_bf16, H_f32, per_token=per_token)
-    
+
     return d_inp, d_H
 
 
@@ -452,16 +444,16 @@ def _create_stream_aggregate_kernel(per_token: bool):
 def stream_aggregate(inp: jnp.ndarray, H_pre: jnp.ndarray) -> jnp.ndarray:
     """
     JAX FFI版Stream Aggregate算子
-    
+
     功能: Out = sum(inp * H_pre, axis=-2)
     高精度策略: 在float32空间完成乘法和累加，最后转回输入dtype
-    
+
     参数:
         inp: [B, T, n, C] 输入张量（任意dtype）
         H_pre: [B, T, n] 或 [n] 权重张量（任意dtype）
                - [B, T, n]: per-token权重，每个token有独立权重
                - [n]: per-stream权重，所有token共享权重
-    
+
     返回:
         [B, T, C] 聚合结果，dtype与inp一致
     """
@@ -470,7 +462,7 @@ def stream_aggregate(inp: jnp.ndarray, H_pre: jnp.ndarray) -> jnp.ndarray:
         raise ValueError(f"Stream Aggregate需要4维输入，但得到{inp.ndim}维")
     if H_pre.ndim not in [1, 3]:
         raise ValueError(f"H_pre必须是1维或3维，但得到{H_pre.ndim}维")
-    
+
     B, T, n, C = inp.shape
     if H_pre.ndim == 1:
         if H_pre.shape[0] != n:
@@ -478,7 +470,9 @@ def stream_aggregate(inp: jnp.ndarray, H_pre: jnp.ndarray) -> jnp.ndarray:
         per_token = False
     else:  # H_pre.ndim == 3
         if H_pre.shape != (B, T, n):
-            raise ValueError(f"Per-token权重H_pre形状{H_pre.shape}与输入形状{(B,T,n)}不匹配")
+            raise ValueError(
+                f"Per-token权重H_pre形状{H_pre.shape}与输入形状{(B, T, n)}不匹配"
+            )
         per_token = True
 
     original_dtype = inp.dtype
