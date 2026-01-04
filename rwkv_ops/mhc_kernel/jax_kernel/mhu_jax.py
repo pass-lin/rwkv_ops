@@ -488,3 +488,101 @@ def stream_aggregate(inp: jnp.ndarray, H_pre: jnp.ndarray) -> jnp.ndarray:
     result = checkpointed_kernel(inp, H_pre)
 
     return result.astype(original_dtype)
+
+
+# 1. 在 register_ffi_target 部分追加
+jax.ffi.register_ffi_target(
+    "stream_distribute_fwd",
+    jax.ffi.pycapsule(_LIB.StreamDistributeFwd),
+    platform="CUDA",
+)
+jax.ffi.register_ffi_target(
+    "stream_distribute_bwd",
+    jax.ffi.pycapsule(_LIB.StreamDistributeBwd),
+    platform="CUDA",
+)
+
+
+# 2. 实现核心逻辑
+def _stream_distribute_ffi_fwd(inp: jnp.ndarray, H_post: jnp.ndarray) -> jnp.ndarray:
+    """内部FFI前向调用"""
+    B, T, C = inp.shape
+    n = H_post.shape[-1]
+    out_type = jax.ShapeDtypeStruct((B, T, n, C), jnp.bfloat16)
+
+    # 接口对齐：inp用bf16, H_post用f32
+    return jax.ffi.ffi_call(
+        "stream_distribute_fwd", out_type, vmap_method="broadcast_all"
+    )(inp.astype(jnp.bfloat16), H_post.astype(jnp.float32))
+
+
+def _stream_distribute_ffi_bwd(
+    grad: jnp.ndarray, inp: jnp.ndarray, H_post: jnp.ndarray
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """内部FFI反向调用"""
+    # 强制将梯度转为 bf16 匹配 FFI 签名，内部会转 float 计算
+    grad_bf16 = grad.astype(jnp.bfloat16)
+    inp_bf16 = inp.astype(jnp.bfloat16)
+    H_f32 = H_post.astype(jnp.float32)
+
+    d_inp_type = jax.ShapeDtypeStruct(inp.shape, jnp.bfloat16)
+    d_H_type = jax.ShapeDtypeStruct(H_post.shape, jnp.float32)
+
+    return jax.ffi.ffi_call(
+        "stream_distribute_bwd", (d_inp_type, d_H_type), vmap_method="broadcast_all"
+    )(grad_bf16, inp_bf16, H_f32)
+
+
+def _create_stream_distribute_kernel():
+    """创建 Stream Distribute kernel"""
+
+    @jax.custom_vjp
+    def _kernel(inp: jnp.ndarray, H_post: jnp.ndarray) -> jnp.ndarray:
+        return _stream_distribute_ffi_fwd(inp, H_post)
+
+    def _fwd(inp: jnp.ndarray, H_post: jnp.ndarray):
+        out = _stream_distribute_ffi_fwd(inp, H_post)
+        return out, (inp, H_post)
+
+    def _bwd(saved_vals: Tuple[jnp.ndarray, jnp.ndarray], grad: jnp.ndarray):
+        inp, H_post = saved_vals
+        d_inp, d_H_post = _stream_distribute_ffi_bwd(grad, inp, H_post)
+        return d_inp, d_H_post
+
+    _kernel.defvjp(_fwd, _bwd)
+    return _kernel
+
+
+# 3. 公共 API
+def stream_distribute(inp: jnp.ndarray, H_post: jnp.ndarray) -> jnp.ndarray:
+    """
+    JAX FFI 版 Stream Distribute 算子 (1 -> n)
+    功能: Out = inp[:, :, None, :] * H_post[:, :, :, None]
+
+    参数:
+        inp: [B, T, C] 输入张量
+        H_post: [B, T, n] 权重张量
+    返回:
+        [B, T, n, C] 分发后的多流张量，dtype 与 inp 一致
+    """
+    # 形状检查
+    if inp.ndim != 3 or H_post.ndim != 3:
+        raise ValueError(
+            f"stream_distribute 要求输入均为 3 维，得到 {inp.ndim} 和 {H_post.ndim}"
+        )
+
+    original_dtype = inp.dtype
+    inp = inp.astype(jnp.bfloat16)
+    H_post = H_post.astype(jnp.float32)
+    # 创建并执行 kernel
+    kernel = _create_stream_distribute_kernel()
+
+    # 统一设置永不重计算 (checkpoint policy)
+    checkpointed_kernel = jax.checkpoint(
+        kernel, policy=cp.save_anything_except_these_names(())
+    )
+
+    result = checkpointed_kernel(inp, H_post)
+
+    # 类型还原，避免梯度计算中出现不必要的类型漂移
+    return result.astype(original_dtype)

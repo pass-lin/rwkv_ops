@@ -137,29 +137,39 @@ def agg_loss(m, x, h):
 check_close("StreamAggregate Forward", out_jax, out_nat, atol=5e-3, rtol=5e-3)
 check_close("StreamAggregate Grad: dx", g_jax[0], g_nat[0], atol=5e-3, rtol=5e-3)
 check_close("StreamAggregate Grad: dH", g_jax[1], g_nat[1], atol=5e-3, rtol=5e-3)
-raise (1)
+
 # =====================================================
 # 5. Stream Distribute 测试
 # =====================================================
 print(f"\n{' Stream Distribute 测试 ':=^50}")
-l_out = rand_bfp(key, (B, T, C))
-h_post = rand_f32(key, (B, T, n))
+# 输入形状: Inp [B, T, C], H_post [B, T, n] -> Out [B, T, n, C]
+x_dist = rand_bfp(key, (B, T, C))
+H_dist = rand_f32(key, (B, T, n))
 
 
-def dist_loss(m, l, h):
-    out = m.stream_distribute(l, h)
+def dist_loss(m, x, h):
+    out = m.stream_distribute(x, h)
+    # 聚合回标量以计算梯度
     return jnp.sum(out.astype(jnp.float32)), out
 
 
+# 计算 JAX FFI 版本的 Loss 和梯度
 (l1, out_jax), g_jax = jax.value_and_grad(
-    partial(dist_loss, jax_mhc), has_aux=True, argnums=(1, 2)
-)(l_out, h_post)
-(l2, out_nat), g_nat = jax.value_and_grad(
-    partial(dist_loss, native_mhc), has_aux=True, argnums=(1, 2)
-)(l_out, h_post)
-check_close("StreamDist Forward", out_jax, out_nat)
-check_close("StreamDist Grad: dl", g_jax[0], g_nat[0])
+    partial(dist_loss, jax_mhc), has_aux=True, argnums=(0, 1)
+)(x_dist, H_dist)
 
+# 计算 Native (Keras/JAX) 版本的 Loss 和梯度
+(l2, out_nat), g_nat = jax.value_and_grad(
+    partial(dist_loss, native_mhc), has_aux=True, argnums=(0, 1)
+)(x_dist, H_dist)
+
+# 验证
+check_close("StreamDistribute Forward", out_jax, out_nat, atol=5e-3, rtol=5e-3)
+check_close(
+    "StreamDistribute Grad: dx", g_jax[0], g_nat[1], atol=5e-3, rtol=5e-3
+)  # 注意对应的argnums
+check_close("StreamDistribute Grad: dH", g_jax[1], g_nat[1], atol=5e-3, rtol=5e-3)
+raise (1)
 # =====================================================
 # 6. MHC Pre-Op (Fused) 测试
 # =====================================================

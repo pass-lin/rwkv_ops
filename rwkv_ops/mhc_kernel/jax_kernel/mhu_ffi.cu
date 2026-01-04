@@ -336,3 +336,92 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Ret<ffi::Buffer<ffi::F32>>()      // d_H_pre
         .Attr<bool>("per_token")            // 权重模式
 );
+
+/* -------------------- Stream Distribute FFI -------------------- */
+
+// 前向：[B, T, C] (BF16), [B, T, n] (F32) -> [B, T, n, C] (BF16)
+static ffi::Error StreamDistributeFwdHost(
+    cudaStream_t stream,
+    ffi::Buffer<ffi::BF16> inp,     // [B, T, C]
+    ffi::Buffer<ffi::F32> H_post,   // [B, T, n]
+    ffi::ResultBuffer<ffi::BF16> out // [B, T, n, C]
+) {
+    auto dims_inp = inp.dimensions();
+    auto dims_h = H_post.dimensions();
+    
+    int64_t B = dims_inp[0];
+    int64_t T = dims_inp[1];
+    int64_t C = dims_inp[2];
+    int64_t n = dims_h[2];
+
+    // blockIdx.x 覆盖 B*T*C，blockIdx.y 覆盖 n
+    dim3 threads(256);
+    dim3 blocks((B * T * C + 255) / 256, n);
+
+    mhc::stream_distribute_fwd_kernel<<<blocks, threads, 0, stream>>>(
+        reinterpret_cast<mhc::floatX*>(out->typed_data()),
+        reinterpret_cast<const mhc::floatX*>(inp.typed_data()),
+        H_post.typed_data(),
+        B, T, static_cast<int>(n), C
+    );
+
+    return ffi::Error::Success();
+}
+
+// 反向
+static ffi::Error StreamDistributeBwdHost(
+    cudaStream_t stream,
+    ffi::Buffer<ffi::BF16> grad,    // [B, T, n, C]
+    ffi::Buffer<ffi::BF16> inp,     // [B, T, C]
+    ffi::Buffer<ffi::F32> H_post,   // [B, T, n]
+    ffi::ResultBuffer<ffi::BF16> d_inp,   // [B, T, C]
+    ffi::ResultBuffer<ffi::F32> d_H_post  // [B, T, n]
+) {
+    auto dims = grad.dimensions();
+    int64_t B = dims[0];
+    int64_t T = dims[1];
+    int64_t n = dims[2];
+    int64_t C = dims[3];
+
+    // 1. 计算 dx: [B, T, C]
+    dim3 threads(256);
+    dim3 blocks_dx((B * T * C + 255) / 256);
+    mhc::stream_distribute_bwd_dx_kernel<<<blocks_dx, threads, 0, stream>>>(
+        reinterpret_cast<mhc::floatX*>(d_inp->typed_data()),
+        reinterpret_cast<const mhc::floatX*>(grad.typed_data()),
+        H_post.typed_data(),
+        B, T, static_cast<int>(n), C
+    );
+
+    // 2. 计算 dH: [B, T, n]
+    dim3 blocks_dh(B * T, n);
+    mhc::stream_distribute_bwd_dh_kernel<256><<<blocks_dh, threads, 0, stream>>>(
+        d_H_post->typed_data(),
+        reinterpret_cast<const mhc::floatX*>(grad.typed_data()),
+        reinterpret_cast<const mhc::floatX*>(inp.typed_data()),
+        B, T, static_cast<int>(n), C
+    );
+
+    return ffi::Error::Success();
+}
+
+// 注册 FFI 符号 (追加到文件末尾的 XLA_FFI_DEFINE_HANDLER_SYMBOL 序列中)
+XLA_FFI_DEFINE_HANDLER_SYMBOL(
+    StreamDistributeFwd, StreamDistributeFwdHost,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Arg<ffi::Buffer<ffi::BF16>>() // inp
+        .Arg<ffi::Buffer<ffi::F32>>()  // H_post
+        .Ret<ffi::Buffer<ffi::BF16>>() // out
+);
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(
+    StreamDistributeBwd, StreamDistributeBwdHost,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Arg<ffi::Buffer<ffi::BF16>>() // grad
+        .Arg<ffi::Buffer<ffi::BF16>>() // inp
+        .Arg<ffi::Buffer<ffi::F32>>()  // H_post
+        .Ret<ffi::Buffer<ffi::BF16>>() // d_inp
+        .Ret<ffi::Buffer<ffi::F32>>()  // d_H_post
+);
