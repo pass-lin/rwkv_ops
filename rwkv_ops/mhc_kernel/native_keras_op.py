@@ -59,7 +59,7 @@ def stream_aggregate(inp, H_pre):
     return ops.cast(out_f32, inp.dtype)
 
 
-def stream_distribute(inp, H_post, n=0):
+def stream_distribute(inp, H_post):
     """
     Distribute (1 -> n): 将单流输出分发回多流。
     对齐精度版：强制在 FP32 下进行广播乘法。

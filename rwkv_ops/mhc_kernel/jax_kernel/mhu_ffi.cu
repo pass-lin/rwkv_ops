@@ -9,6 +9,10 @@
 #include "../common_kernel/kernels/sinkhorn_knopp.cuh"
 #include "../common_kernel/kernels/rmsnorm.cuh"
 #include "../common_kernel/kernels/stream_mix.cuh"
+#include "../common_kernel/kernels/stream_aggregate.cuh"
+#include "../common_kernel/kernels/stream_distribute.cuh"
+#include "../common_kernel/kernels/mhc_post_op.cuh"
+#include "../common_kernel/kernels/mhc_pre_op.cuh"
 namespace ffi = xla::ffi;
 
 /* -------------------- Sinkhorn Knopp FFI -------------------- */
@@ -248,4 +252,87 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::F32>>()      // M: F32
         .Ret<ffi::Buffer<ffi::BF16>>()      // d_inp: BF16
         .Ret<ffi::Buffer<ffi::F32>>()      // d_M: F32
+);
+/* -------------------- Stream Aggregate FFI -------------------- */
+
+// 前向FFI处理器
+static ffi::Error StreamAggregateFwdHost(
+    cudaStream_t stream,
+    ffi::Buffer<ffi::BF16> inp,        // 输入: [B, T, n, C]
+    ffi::Buffer<ffi::F32> H_pre,       // 权重: [B, T, n] 或 [n]
+    ffi::ResultBuffer<ffi::BF16> out,  // 输出: [B, T, C]
+    bool per_token                     // 是否为per-token权重模式
+) {
+    auto dims = inp.dimensions();
+    int64_t B = dims[0];
+    int64_t T = dims[1];
+    int64_t n = dims[2];
+    int64_t C = dims[3];
+    
+    const nv_bfloat16* inp_ptr = reinterpret_cast<const nv_bfloat16*>(inp.typed_data());
+    const float* H_pre_ptr = H_pre.typed_data();
+    nv_bfloat16* out_ptr = reinterpret_cast<nv_bfloat16*>(out->typed_data());
+    
+    // 调用包装函数（注意：内部会自动处理per_token逻辑）
+    mhc::stream_aggregate_forward(
+        out_ptr, inp_ptr, H_pre_ptr, 
+        B * T, static_cast<int>(n), C, per_token, stream
+    );
+    
+    return ffi::Error::Success();
+}
+
+// 反向FFI处理器
+static ffi::Error StreamAggregateBwdHost(
+    cudaStream_t stream,
+    ffi::Buffer<ffi::F32> grad,        // 梯度: [B, T, C] (float32)
+    ffi::Buffer<ffi::BF16> inp,        // 原始输入: [B, T, n, C]
+    ffi::Buffer<ffi::F32> H_pre,       // 权重: [B, T, n] 或 [n]
+    ffi::ResultBuffer<ffi::BF16> d_inp,      // 输入梯度: [B, T, n, C]
+    ffi::ResultBuffer<ffi::F32> d_H_pre,     // 权重梯度: [B, T, n] 或 [n]
+    bool per_token                     // 是否为per-token权重模式
+) {
+    auto dims = inp.dimensions();
+    int64_t B = dims[0];
+    int64_t T = dims[1];
+    int64_t n = dims[2];
+    int64_t C = dims[3];
+    
+    const float* grad_ptr = grad.typed_data();
+    const nv_bfloat16* inp_ptr = reinterpret_cast<const nv_bfloat16*>(inp.typed_data());
+    const float* H_pre_ptr = H_pre.typed_data();
+    nv_bfloat16* d_inp_ptr = reinterpret_cast<nv_bfloat16*>(d_inp->typed_data());
+    float* d_H_pre_ptr = d_H_pre->typed_data();
+    
+    // 调用包装函数（内部会处理per_token逻辑和梯度累加）
+    mhc::stream_aggregate_backward(
+        d_inp_ptr, d_H_pre_ptr, grad_ptr, inp_ptr, H_pre_ptr, 
+        B * T, static_cast<int>(n), C, per_token, stream
+    );
+    
+    return ffi::Error::Success();
+}
+
+/* -------------------- 注册 FFI 符号 -------------------- */
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(
+    StreamAggregateFwd, StreamAggregateFwdHost,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Arg<ffi::Buffer<ffi::BF16>>()      // inp
+        .Arg<ffi::Buffer<ffi::F32>>()      // H_pre
+        .Ret<ffi::Buffer<ffi::BF16>>()      // out
+        .Attr<bool>("per_token")            // 权重模式
+);
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(
+    StreamAggregateBwd, StreamAggregateBwdHost,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Arg<ffi::Buffer<ffi::F32>>()      // grad
+        .Arg<ffi::Buffer<ffi::BF16>>()      // inp
+        .Arg<ffi::Buffer<ffi::F32>>()      // H_pre
+        .Ret<ffi::Buffer<ffi::BF16>>()      // d_inp
+        .Ret<ffi::Buffer<ffi::F32>>()      // d_H_pre
+        .Attr<bool>("per_token")            // 权重模式
 );

@@ -114,13 +114,13 @@ def mix_loss(m, x, mat):
 check_close("StreamMix Forward", out_jax, out_nat, 5e-3, 7e-3)
 check_close("StreamMix Grad: dx", g_jax[0], g_nat[0], 5e-3, 5e-3)
 check_close("StreamMix Grad: dM", g_jax[1], g_nat[1], 5e-3, 5e-3)
-raise (1)
+
 # =====================================================
-# 4. Stream Aggregate 测试
+# 4. stream_aggregate 测试
 # =====================================================
 print(f"\n{' Stream Aggregate 测试 ':=^50}")
-h_pre = rand_f32(key, (B, T, n))
-
+x_agg = rand_bfp(key, (B, T, n, C))
+H_agg = rand_f32(key, (B, T, n))  
 
 def agg_loss(m, x, h):
     out = m.stream_aggregate(x, h)
@@ -128,14 +128,15 @@ def agg_loss(m, x, h):
 
 
 (l1, out_jax), g_jax = jax.value_and_grad(
-    partial(agg_loss, jax_mhc), has_aux=True, argnums=(1, 2)
-)(x_mix, h_pre)
+    partial(agg_loss, jax_mhc), has_aux=True, argnums=(0, 1)
+)(x_agg, H_agg)
 (l2, out_nat), g_nat = jax.value_and_grad(
-    partial(agg_loss, native_mhc), has_aux=True, argnums=(1, 2)
-)(x_mix, h_pre)
-check_close("StreamAgg Forward", out_jax, out_nat)
-check_close("StreamAgg Grad: dx", g_jax[0], g_nat[0])
-
+    partial(agg_loss, native_mhc), has_aux=True, argnums=(0, 1)
+)(x_agg, H_agg)
+check_close("StreamAggregate Forward", out_jax, out_nat, atol=5e-3, rtol=5e-3)
+check_close("StreamAggregate Grad: dx", g_jax[0], g_nat[0], atol=5e-3, rtol=5e-3)
+check_close("StreamAggregate Grad: dH", g_jax[1], g_nat[1], atol=5e-3, rtol=5e-3)
+raise (1)
 # =====================================================
 # 5. Stream Distribute 测试
 # =====================================================
