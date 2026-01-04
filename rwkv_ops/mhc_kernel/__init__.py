@@ -19,7 +19,7 @@ def get_mhu_kernel(KERNEL_TYPE):
                     sinkhorn_knopp,
                     rmsnorm,
                     stream_aggregate,
-                    # stream_distribute,
+                    stream_distribute,
                     stream_mix,
                 )
 
