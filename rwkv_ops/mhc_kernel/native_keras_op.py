@@ -4,7 +4,7 @@ from keras import ops
 # --- 辅助函数：确保在 fp32 下计算以保证数值稳定性 ---
 
 
-@keras.remat
+
 def fp32_sigmoid(x):
     dtype = x.dtype
     return ops.cast(ops.nn.sigmoid(ops.cast(x, "float32")), dtype)
@@ -13,7 +13,7 @@ def fp32_sigmoid(x):
 # --- 核心 MHC 算子 ---
 
 
-@keras.remat
+
 def sinkhorn_knopp(inp, num_iters=20, eps=1e-8):
     """
     将输入矩阵投影为双拟随机矩阵 (Doubly Stochastic Matrix)。
@@ -35,7 +35,7 @@ def sinkhorn_knopp(inp, num_iters=20, eps=1e-8):
     return ops.cast(P, dtype)
 
 
-@keras.remat
+
 def rmsnorm(inp, eps=1e-5):
     """
     标准 RMSNorm 算子。
@@ -50,7 +50,7 @@ def rmsnorm(inp, eps=1e-5):
     return ops.cast(x_normed, dtype)
 
 
-@keras.remat
+
 def stream_aggregate(inp, H_pre):
     # 1. 转换为 float32 进行高精度计算
     inp_f32 = ops.cast(inp, "float32")
@@ -63,7 +63,7 @@ def stream_aggregate(inp, H_pre):
     return ops.cast(out_f32, inp.dtype)
 
 
-@keras.remat
+
 def stream_distribute(inp, H_post, n=0):
     """
     Distribute (1 -> n): 将单流输出分发回多流。
@@ -90,7 +90,7 @@ def stream_distribute(inp, H_post, n=0):
     return ops.cast(res_fp32, original_dtype)
 
 
-@keras.remat
+
 def stream_mix(inp, M):
     """
     Mix (n -> n): 残差流之间的线性交互。
@@ -108,7 +108,7 @@ def stream_mix(inp, M):
     return ops.cast(out, dtype)
 
 
-@keras.remat
+
 def stream_mix_fp32(x_expanded, H_res):
     """内部强制使用 FP32 计算的流混合"""
     # x_expanded: [B, T, n, C], H_res: [B, T, n, n]
@@ -118,7 +118,7 @@ def stream_mix_fp32(x_expanded, H_res):
     return ops.matmul(h_f32, x_f32)
 
 
-@keras.remat
+
 def stream_distribute_fp32(layer_out, H_post):
     """内部强制使用 FP32 计算的分发"""
     # layer_out: [B, T, C], H_post: [B, T, n]
@@ -129,7 +129,7 @@ def stream_distribute_fp32(layer_out, H_post):
     return ops.expand_dims(l_f32, -2) * ops.expand_dims(h_f32, -1)
 
 
-@keras.remat
+
 def mhc_post_op(layer_out, x_expanded, H_post, H_res):
     """
     mHC 后处理融合算子
@@ -155,7 +155,7 @@ def mhc_post_op(layer_out, x_expanded, H_post, H_res):
     return ops.cast(x_next_f32, x_expanded.dtype)
 
 
-@keras.remat
+
 def mhc_pre_op(x_expanded, h_pre_raw, h_post_raw, h_res_raw, num_iters=20, eps=1e-8):
     """
     mHC 前处理融合算子
@@ -202,3 +202,4 @@ def mhc_pre_op(x_expanded, h_pre_raw, h_post_raw, h_res_raw, num_iters=20, eps=1
         ops.cast(H_post_f32, "float32"),  # H 权重通常在模型中保持 FP32 精度
         ops.cast(H_res_f32, "float32"),
     )
+
