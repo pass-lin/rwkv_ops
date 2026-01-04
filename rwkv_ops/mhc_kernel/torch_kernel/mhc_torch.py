@@ -148,6 +148,50 @@ class StreamDistributeFunction(torch.autograd.Function):
         # 对应 forward 的参数顺序：inp, H_post
         return d_inp.to(ctx.inp_dtype), d_H_post.to(ctx.H_post_dtype)
 
+class MHCPostOpFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, layer_out, x_expanded, H_post, H_res):
+        # 强制连续性
+        layer_out = layer_out.contiguous()
+        x_expanded = x_expanded.contiguous()
+        H_post = H_post.contiguous()
+        H_res = H_res.contiguous()
+        
+        # 保存用于反向传播的张量
+        ctx.save_for_backward(layer_out, x_expanded, H_post, H_res)
+        
+        # 调用融合前向内核
+        x_next = mhc_lib.mhc_post_op_fwd(layer_out, x_expanded, H_post, H_res)
+        return x_next
+
+    @staticmethod
+    def backward(ctx, grad_next):
+        # 获取保存的张量
+        layer_out, x_expanded, H_post, H_res = ctx.saved_tensors
+        grad_next = grad_next.contiguous()
+        
+        # 调用全量融合反向内核
+        # 返回列表: [d_layer_out, d_x_expanded, d_H_post, d_H_res]
+        grads = mhc_lib.mhc_post_op_bwd(
+            grad_next, 
+            layer_out, 
+            x_expanded, 
+            H_post, 
+            H_res
+        )
+        
+        # 返回 4 个梯度，对应 forward 的 4 个输入
+        return grads[0], grads[1], grads[2], grads[3]
+
+def mhc_post_op(layer_out, x_expanded, H_post, H_res):
+    """
+    mHC 融合后处理算子
+    layer_out: [B, T, C]
+    x_expanded: [B, T, n, C]
+    H_post: [B, T, n]
+    H_res: [B, T, n, n]
+    """
+    return MHCPostOpFunction.apply(layer_out, x_expanded, H_post, H_res)
 
 def stream_distribute(inp, H_post):
     """

@@ -134,26 +134,40 @@ def mhc_pre_op(x_expanded, h_pre_raw, h_post_raw, h_res_raw, num_iters=20):
     return x_layer_in, H_post, H_res
 
 
+import keras
+from keras import ops
+
+def stream_mix_fp32(x_expanded, H_res):
+    """内部强制使用 FP32 计算的流混合"""
+    # x_expanded: [B, T, n, C], H_res: [B, T, n, n]
+    x_f32 = ops.cast(x_expanded, "float32")
+    h_f32 = ops.cast(H_res, "float32")
+    # 执行矩阵乘法: [B, T, n, n] @ [B, T, n, C] -> [B, T, n, C]
+    return ops.matmul(h_f32, x_f32)
+
+def stream_distribute_fp32(layer_out, H_post):
+    """内部强制使用 FP32 计算的分发"""
+    # layer_out: [B, T, C], H_post: [B, T, n]
+    l_f32 = ops.cast(layer_out, "float32")
+    h_f32 = ops.cast(H_post, "float32")
+    
+    # [B, T, 1, C] * [B, T, n, 1] -> [B, T, n, C]
+    return ops.expand_dims(l_f32, -2) * ops.expand_dims(h_f32, -1)
+
 def mhc_post_op(layer_out, x_expanded, H_post, H_res):
     """
-    mHC 后处理融合算子
-    输入:
-        layer_out: [B, T, C] - 核心层 (Attention/FFN) 处理后的输出
-        x_expanded: [B, T, n, C] - 之前的扩展残差流 (Pre-Op 之前的状态)
-        H_post: [B, T, n] - 分发权重 (来自 Pre-Op)
-        H_res: [B, T, n, n] - 流混合矩阵 (来自 Pre-Op)
-    返回:
-        x_next: [B, T, n, C] - 更新后的扩展残差流
+    修改后的朴素实现：
+    通过将中间过程全部保留在 FP32，模拟 CUDA 内核的寄存器融合逻辑。
     """
-    # 1. Stream Mix: 处理旧流之间的交互 (Identity Mapping 路径)
-    # x_mixed = H_res @ x_expanded
-    x_mixed = stream_mix(x_expanded, H_res)
+    # 1. 在 FP32 下计算混合路径
+    x_mixed_f32 = stream_mix_fp32(x_expanded, H_res)
 
-    # 2. Stream Distribute: 将当前层的增量分发到各条流
-    # x_delta = layer_out * H_post
-    x_delta = stream_distribute(layer_out, H_post)
+    # 2. 在 FP32 下计算增量路径
+    x_delta_f32 = stream_distribute_fp32(layer_out, H_post)
 
-    # 3. Residual Add: 融合结果
-    x_next = x_mixed + x_delta
+    # 3. 在 FP32 下完成最后的残差加法
+    x_next_f32 = x_mixed_f32 + x_delta_f32
 
-    return x_next
+    # 4. 只在最后输出时进行一次 BF16 转换
+    # 这一步对应 CUDA 内核中最后的 to_bf()
+    return ops.cast(x_next_f32, x_expanded.dtype)

@@ -6,8 +6,63 @@
 #include "../common_kernel/kernels/stream_mix.cuh"
 #include "../common_kernel/kernels/stream_aggregate.cuh"
 #include "../common_kernel/kernels/stream_distribute.cuh"
+// 在 mhc_cuda.cu 中添加
+#include "../common_kernel/kernels/mhc_post_op.cuh"
+
 
 namespace mhc {
+// --- Post-Op 融合前向 ---
+void cuda_mhc_post_op_fwd(
+    nv_bfloat16* out,               // [B, T, n, C]
+    const nv_bfloat16* layer_out,   // [B, T, C]
+    const nv_bfloat16* x_expanded,  // [B, T, n, C]
+    const float* H_post,            // [B, T, n]
+    const float* H_res,             // [B, T, n, n]
+    int64_t B, int64_t T, int n, int64_t C, 
+    cudaStream_t stream) 
+{
+    // 调用 .cuh 中的 inline 包装函数
+    mhc::mhc_post_op_forward(
+        reinterpret_cast<mhc::floatX*>(out),
+        reinterpret_cast<const mhc::floatX*>(layer_out),
+        reinterpret_cast<const mhc::floatX*>(x_expanded),
+        H_post,
+        H_res,
+        B, T, n, C,
+        stream
+    );
+}
+
+// --- 反向传播包装 (融合版) ---
+void cuda_mhc_post_op_bwd(
+    nv_bfloat16* d_layer_out,      // [B, T, C]
+    nv_bfloat16* d_x_expanded,     // [B, T, n, C]
+    float* d_H_post,               // [B, T, n]
+    float* d_H_res,                // [B, T, n, n]
+    const nv_bfloat16* grad_next,  // [B, T, n, C]
+    const nv_bfloat16* layer_out,  // [B, T, C]
+    const nv_bfloat16* x_expanded, // [B, T, n, C]
+    const float* H_post,
+    const float* H_res,
+    int64_t B, int64_t T, int n, int64_t C, 
+    cudaStream_t stream) 
+{
+    // 调用 .cuh 中的全量反向融合内核
+    // 该内核内部会处理 dx, dl, dH_post, dH_res 的全部逻辑
+    mhc::mhc_post_op_backward_full(
+        reinterpret_cast<mhc::floatX*>(d_layer_out),
+        reinterpret_cast<mhc::floatX*>(d_x_expanded),
+        d_H_post,
+        d_H_res,
+        reinterpret_cast<const mhc::floatX*>(grad_next),
+        reinterpret_cast<const mhc::floatX*>(layer_out),
+        reinterpret_cast<const mhc::floatX*>(x_expanded),
+        H_post,
+        H_res,
+        B, T, n, C,
+        stream
+    );
+}
 
 // --- Sinkhorn 包装 ---
 void cuda_sinkhorn_fwd(float* out, const float* inp, int64_t B, int64_t M, int64_t N, int iters, float eps, cudaStream_t stream) {

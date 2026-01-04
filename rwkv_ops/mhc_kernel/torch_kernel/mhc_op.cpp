@@ -22,6 +22,13 @@ namespace mhc {
 
     void cuda_stream_distribute_fwd(nv_bfloat16* out, const nv_bfloat16* inp, const float* H, int64_t B, int64_t T, int n, int64_t C, cudaStream_t stream);
     void cuda_stream_distribute_bwd(nv_bfloat16* d_inp, float* d_H, const nv_bfloat16* grad, const nv_bfloat16* inp, const float* H, int64_t B, int64_t T, int n, int64_t C, cudaStream_t stream);
+
+    void cuda_mhc_post_op_fwd(nv_bfloat16* out, const nv_bfloat16* layer_out, const nv_bfloat16* x_expanded, 
+                             const float* H_post, const float* H_res, int64_t B, int64_t T, int n, int64_t C, cudaStream_t stream);
+
+    void cuda_mhc_post_op_bwd(nv_bfloat16* d_layer_out, nv_bfloat16* d_x_expanded, float* d_H_post, float* d_H_res,
+                             const nv_bfloat16* grad_next, const nv_bfloat16* layer_out, const nv_bfloat16* x_expanded,
+                             const float* H_post, const float* H_res, int64_t B, int64_t T, int n, int64_t C, cudaStream_t stream);
 }
 
 // --- Sinkhorn 绑定 ---
@@ -126,6 +133,53 @@ std::vector<torch::Tensor> stream_distribute_backward(torch::Tensor grad, torch:
     );
     return {d_inp, d_H};
 }
+torch::Tensor mhc_post_op_forward(torch::Tensor layer_out, torch::Tensor x_expanded, torch::Tensor H_post, torch::Tensor H_res) {
+    int64_t B = layer_out.size(0);
+    int64_t T = layer_out.size(1);
+    int64_t C = layer_out.size(2);
+    int n = H_post.size(2);
+
+    auto out = torch::empty_like(x_expanded);
+    mhc::cuda_mhc_post_op_fwd(
+        (nv_bfloat16*)out.data_ptr<at::BFloat16>(),
+        (nv_bfloat16*)layer_out.contiguous().data_ptr<at::BFloat16>(),
+        (nv_bfloat16*)x_expanded.contiguous().data_ptr<at::BFloat16>(),
+        H_post.contiguous().data_ptr<float>(),
+        H_res.contiguous().data_ptr<float>(),
+        B, T, n, C, at::cuda::getCurrentCUDAStream()
+    );
+    return out;
+}
+
+// 反向 Torch 接口 (全量融合)
+std::vector<torch::Tensor> mhc_post_op_backward(torch::Tensor grad_next, torch::Tensor layer_out, torch::Tensor x_expanded, torch::Tensor H_post, torch::Tensor H_res) {
+    int64_t B = layer_out.size(0);
+    int64_t T = layer_out.size(1);
+    int64_t C = layer_out.size(2);
+    int n = H_post.size(2);
+
+    auto d_layer_out = torch::empty_like(layer_out);
+    auto d_x_expanded = torch::empty_like(x_expanded);
+    // 参数梯度使用 zeros，因为内核内部是原子累加
+    auto d_H_post = torch::zeros_like(H_post);
+    auto d_H_res = torch::zeros_like(H_res);
+
+    mhc::cuda_mhc_post_op_bwd(
+        (nv_bfloat16*)d_layer_out.data_ptr<at::BFloat16>(),
+        (nv_bfloat16*)d_x_expanded.data_ptr<at::BFloat16>(),
+        d_H_post.data_ptr<float>(),
+        d_H_res.data_ptr<float>(),
+        (nv_bfloat16*)grad_next.contiguous().data_ptr<at::BFloat16>(),
+        (nv_bfloat16*)layer_out.contiguous().data_ptr<at::BFloat16>(),
+        (nv_bfloat16*)x_expanded.contiguous().data_ptr<at::BFloat16>(),
+        H_post.contiguous().data_ptr<float>(),
+        H_res.contiguous().data_ptr<float>(),
+        B, T, n, C, at::cuda::getCurrentCUDAStream()
+    );
+
+    return {d_layer_out, d_x_expanded, d_H_post, d_H_res};
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("sinkhorn_fwd", &sinkhorn_forward);
     m.def("sinkhorn_bwd", &sinkhorn_backward);
@@ -137,4 +191,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("stream_aggregate_bwd", &stream_aggregate_bwd);
     m.def("stream_distribute_fwd", &stream_distribute_fwd, "Stream Distribute Forward");
     m.def("stream_distribute_bwd", &stream_distribute_backward, "Stream Distribute Backward");
+    m.def("mhc_post_op_fwd", &mhc_post_op_forward);
+    m.def("mhc_post_op_bwd", &mhc_post_op_backward);
 }

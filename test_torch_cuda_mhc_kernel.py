@@ -15,6 +15,7 @@ from rwkv_ops.mhc_kernel.torch_kernel.mhc_torch import (
     stream_mix as cuda_stream_mix,
     # stream_distribute as cuda_stream_distribute,
     stream_aggregate as cuda_stream_aggregate,
+    mhc_post_op as cuda_mhc_post_op,
 )
 
 # 2. 修改后的 Native 导入 (对应你提供的 native_keras_op 接口)
@@ -23,6 +24,7 @@ from rwkv_ops.mhc_kernel.native_keras_op import (
     rmsnorm as native_rmsnorm,
     stream_mix as native_stream_mix,
     stream_aggregate as native_stream_aggregate,
+    mhc_post_op as native_mhc_post_op,
 )
 
 
@@ -213,5 +215,54 @@ check_close("Distribute dx", x_cuda_dist.grad, x_native_dist.grad, atol=1e-3, rt
 check_close(
     "Distribute dH_post", H_cuda_dist.grad, H_native_dist.grad, atol=1e-3, rtol=1e-3
 )
+
+# =====================================================
+# 6. mHC Post-Op 融合算子测试
+# =====================================================
+print("\n" + "=" * 20 + " mHC Post-Op (Fused) 测试 " + "=" * 20)
+# 准备数据
+# layer_out: [B, T, C], x_expanded: [B, T, n, C]
+# H_post: [B, T, n], H_res: [B, T, n, n]
+B, T, n_stream, C = 4, 256, 4, 512
+
+l_out_raw = rand_bfp(B, T, C)
+x_exp_raw = rand_bfp(B, T, n_stream, C)
+h_post_raw = torch.randn(B, T, n_stream, device="cuda").float()
+h_res_raw = torch.randn(B, T, n_stream, n_stream, device="cuda").float()
+
+# 创建带梯度的副本 (CUDA 版)
+l_cuda = make_grad(l_out_raw)
+x_cuda = make_grad(x_exp_raw)
+hp_cuda = make_grad(h_post_raw)
+hr_cuda = make_grad(h_res_raw)
+
+# 创建带梯度的副本 (Native 版)
+l_native = make_grad(l_out_raw)
+x_native = make_grad(x_exp_raw)
+hp_native = make_grad(h_post_raw)
+hr_native = make_grad(h_res_raw)
+
+# 前向测试
+# 公式: x_next = (H_res @ x_expanded) + (layer_out * H_post)
+post_cuda_out = cuda_mhc_post_op(l_cuda, x_cuda, hp_cuda, hr_cuda)
+post_native_out = native_mhc_post_op(l_native, x_native, hp_native, hr_native)
+
+check_close("Post-Op Forward", post_cuda_out, post_native_out, atol=1e-3, rtol=1e-3)
+
+# 反向测试
+# 构造 Loss
+grad_signal = torch.randn_like(post_cuda_out) * 0.1
+(post_cuda_out.float() * grad_signal).sum().backward()
+(post_native_out.float() * grad_signal).sum().backward()
+
+# 1. 检查数据流梯度 (由融合内核计算)
+check_close("Post-Op dl (layer_out grad)", l_cuda.grad, l_native.grad, atol=1e-3, rtol=1e-3)
+check_close("Post-Op dx (x_expanded grad)", x_cuda.grad, x_native.grad, atol=1e-3, rtol=1e-3)
+
+# 2. 检查权重梯度 (由复用的 stream_ops 内核计算)
+check_close("Post-Op dH_post", hp_cuda.grad, hp_native.grad, atol=1e-3, rtol=1e-3)
+check_close("Post-Op dH_res", hr_cuda.grad, hr_native.grad, atol=5e-3, rtol=5e-3)
+
+
 
 print("\n" + "=" * 15 + " 所有 MHC 算子测试完成 " + "=" * 15)
