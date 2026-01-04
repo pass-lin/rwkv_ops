@@ -163,4 +163,47 @@ check_close("Mix aggregate", cuda_out, native_out, atol=1e-3, rtol=1e-3)
 check_close("Mix dx", x_cuda.grad, x_native.grad, atol=1e-3, rtol=1e-3)
 check_close("Mix H_pre", H_pre_cuda.grad, H_pre_native.grad, atol=1e-3, rtol=1e-3)
 
+# =====================================================
+# 5. Stream Distribute 测试 (1 -> n)
+# =====================================================
+print("\n" + "=" * 20 + " Stream Distribute 测试 " + "=" * 20)
+# 导入新算子（确保你的 mhc_torch 已更新）
+try:
+    from rwkv_ops.mhc_kernel.torch_kernel.mhc_torch import stream_distribute as cuda_stream_distribute
+    from rwkv_ops.mhc_kernel.native_keras_op import stream_distribute as native_stream_distribute
+except ImportError:
+    print("⚠️ 请确保已经在 mhc_torch.py 和 native_keras_op.py 中实现了 stream_distribute")
+
+# 准备数据：Inp [B, T, C], H_post [B, T, n]
+B, T, n_stream, C = 4, 512, 4, 256
+dist_inp_raw = rand_bfp(B, T, C)
+H_post_raw = torch.randn(B, T, n_stream, device="cuda").float() # 权重通常用 FP32
+
+# 创建带梯度的副本
+x_cuda_dist = make_grad(dist_inp_raw)
+H_cuda_dist = make_grad(H_post_raw)
+
+x_native_dist = make_grad(dist_inp_raw)
+H_native_dist = make_grad(H_post_raw)
+
+# 前向测试
+cuda_dist_out = cuda_stream_distribute(x_cuda_dist, H_cuda_dist)
+native_dist_out = native_stream_distribute(x_native_dist, H_native_dist)
+
+# 检查前向精度 (1->n 扩展，主要是广播乘法)
+check_close("Distribute Forward", cuda_dist_out, native_dist_out, atol=1e-3, rtol=1e-3)
+
+# 反向测试
+# 构造 Loss：对 [B, T, n, C] 的输出进行规约
+(cuda_dist_out.float() ** 2).sum().backward()
+(native_dist_out.float() ** 2).sum().backward()
+
+# 检查输入梯度 dx [B, T, C]
+# 这里涉及多流梯度的求和规约
+check_close("Distribute dx", x_cuda_dist.grad, x_native_dist.grad, atol=1e-3, rtol=1e-3)
+
+# 检查权重梯度 dH [B, T, n]
+# 这里是精度的核心：通道 C 维度的规约
+check_close("Distribute dH_post", H_cuda_dist.grad, H_native_dist.grad, atol=1e-3, rtol=1e-3)
+
 print("\n" + "=" * 15 + " 所有 MHC 算子测试完成 " + "=" * 15)

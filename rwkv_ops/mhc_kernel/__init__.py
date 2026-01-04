@@ -18,7 +18,7 @@ def get_mhu_kernel(KERNEL_TYPE):
                 from .torch_kernel.mhc_torch import (
                     sinkhorn_knopp,
                     rmsnorm,
-                    # stream_aggregate,
+                    stream_aggregate,
                     # stream_distribute,
                     stream_mix,
                 )

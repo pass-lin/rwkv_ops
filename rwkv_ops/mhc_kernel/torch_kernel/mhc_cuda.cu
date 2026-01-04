@@ -5,6 +5,7 @@
 #include "../common_kernel/kernels/rmsnorm.cuh"
 #include "../common_kernel/kernels/stream_mix.cuh"
 #include "../common_kernel/kernels/stream_aggregate.cuh"
+#include "../common_kernel/kernels/stream_distribute.cuh"
 
 namespace mhc {
 
@@ -46,6 +47,59 @@ void cuda_stream_aggregate_fwd(nv_bfloat16* out, const nv_bfloat16* inp, const f
 
 void cuda_stream_aggregate_bwd(nv_bfloat16* d_inp, float* d_H_pre, const float* grad, const nv_bfloat16* inp, const float* H_pre, int64_t B, int64_t T, int n, int64_t C, bool per_token, cudaStream_t stream) {
     mhc::stream_aggregate_backward(reinterpret_cast<mhc::floatX*>(d_inp), d_H_pre, grad, reinterpret_cast<const mhc::floatX*>(inp), H_pre, B * T, n, C, per_token, stream);
+}
+
+void cuda_stream_distribute_fwd(
+    nv_bfloat16* out, 
+    const nv_bfloat16* inp, 
+    const float* H, 
+    int64_t B, int64_t T, int n, int64_t C, 
+    cudaStream_t stream) 
+{
+    // 计算总线程数（针对单流输入 B*T*C）
+    int64_t total_btc = B * T * C;
+    dim3 threads(256);
+    // x轴覆盖所有的元素，y轴覆盖流索引 n
+    dim3 blocks((total_btc + 255) / 256, (unsigned int)n);
+
+    mhc::stream_distribute_fwd_kernel<<<blocks, threads, 0, stream>>>(
+        reinterpret_cast<mhc::floatX*>(out),
+        reinterpret_cast<const mhc::floatX*>(inp),
+        H, B, T, n, C
+    );
+}
+
+void cuda_stream_distribute_bwd(
+    nv_bfloat16* d_inp, 
+    float* d_H, 
+    const nv_bfloat16* grad, 
+    const nv_bfloat16* inp, 
+    const float* H, 
+    int64_t B, int64_t T, int n, int64_t C, 
+    cudaStream_t stream) 
+{
+    // 1. 计算 dx [B, T, C]
+    int64_t total_btc = B * T * C;
+    dim3 threads_dx(256);
+    dim3 blocks_dx((total_btc + 255) / 256);
+    
+    mhc::stream_distribute_bwd_dx_kernel<<<blocks_dx, threads_dx, 0, stream>>>(
+        reinterpret_cast<mhc::floatX*>(d_inp),
+        reinterpret_cast<const mhc::floatX*>(grad),
+        H, B, T, n, C
+    );
+
+    // 2. 计算 dH [B, T, n]
+    // 每个 (bt, i) 分配一个 block 进行通道 C 维度的规约
+    dim3 threads_dh(256);
+    dim3 blocks_dh((unsigned int)(B * T), (unsigned int)n);
+
+    mhc::stream_distribute_bwd_dh_kernel<256><<<blocks_dh, threads_dh, 0, stream>>>(
+        d_H,
+        reinterpret_cast<const mhc::floatX*>(grad),
+        reinterpret_cast<const mhc::floatX*>(inp),
+        B, T, n, C
+    );
 }
 
 } // namespace mhc

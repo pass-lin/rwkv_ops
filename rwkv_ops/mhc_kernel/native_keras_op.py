@@ -63,11 +63,27 @@ def stream_aggregate(inp, H_pre):
 def stream_distribute(inp, H_post, n=0):
     """
     Distribute (1 -> n): 将单流输出分发回多流。
-    inp: [B, T, C]
-    H_post: [B, T, n] 或 [n] (权重)
+    对齐精度版：强制在 FP32 下进行广播乘法。
+    
+    inp: [B, T, C] (BF16)
+    H_post: [B, T, n] (FP32)
     """
-    # [B, T, 1, C] * [B, T, n, 1] -> [B, T, n, C]
-    return ops.expand_dims(inp, -2) * ops.expand_dims(H_post, -1)
+    # 1. 记录原始类型
+    original_dtype = inp.dtype
+    
+    # 2. 提升到 FP32 进行运算 (对齐 CUDA 内核内部的 to_float 逻辑)
+    # [B, T, 1, C]
+    x_fp32 = ops.cast(ops.expand_dims(inp, -2), "float32")
+    
+    # [B, T, n, 1]
+    w_fp32 = ops.cast(ops.expand_dims(H_post, -1), "float32")
+    
+    # 3. 执行广播乘法
+    # 结果为 [B, T, n, C]
+    res_fp32 = x_fp32 * w_fp32
+    
+    # 4. 转回原始类型 (对齐 CUDA 内核末尾的 to_bf 逻辑)
+    return ops.cast(res_fp32, original_dtype)
 
 
 def stream_mix(inp, M):

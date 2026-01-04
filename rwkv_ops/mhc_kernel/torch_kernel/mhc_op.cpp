@@ -17,8 +17,11 @@ namespace mhc {
     void cuda_stream_mix_bwd(nv_bfloat16* d_inp, float* d_M, const float* grad, const nv_bfloat16* inp, const float* M, int64_t B, int64_t T, int n, int64_t C, cudaStream_t stream);
 
     // 新增：Stream Aggregate 接口
-   void cuda_stream_aggregate_fwd(nv_bfloat16* out, const nv_bfloat16* inp, const float* H_pre, int64_t B, int64_t T, int n, int64_t C, bool per_token, cudaStream_t stream);
+    void cuda_stream_aggregate_fwd(nv_bfloat16* out, const nv_bfloat16* inp, const float* H_pre, int64_t B, int64_t T, int n, int64_t C, bool per_token, cudaStream_t stream);
     void cuda_stream_aggregate_bwd(nv_bfloat16* d_inp, float* d_H_pre, const float* grad, const nv_bfloat16* inp, const float* H_pre, int64_t B, int64_t T, int n, int64_t C, bool per_token, cudaStream_t stream);
+
+    void cuda_stream_distribute_fwd(nv_bfloat16* out, const nv_bfloat16* inp, const float* H, int64_t B, int64_t T, int n, int64_t C, cudaStream_t stream);
+    void cuda_stream_distribute_bwd(nv_bfloat16* d_inp, float* d_H, const nv_bfloat16* grad, const nv_bfloat16* inp, const float* H, int64_t B, int64_t T, int n, int64_t C, cudaStream_t stream);
 }
 
 // --- Sinkhorn 绑定 ---
@@ -84,7 +87,45 @@ std::vector<torch::Tensor> stream_aggregate_bwd(torch::Tensor grad, torch::Tenso
     mhc::cuda_stream_aggregate_bwd((nv_bfloat16*)d_inp.data_ptr<at::BFloat16>(), d_H_pre.data_ptr<float>(), grad.contiguous().data_ptr<float>(), (nv_bfloat16*)inp.contiguous().data_ptr<at::BFloat16>(), H_pre.contiguous().data_ptr<float>(), B, T, n, C, per_token, at::cuda::getCurrentCUDAStream());
     return {d_inp, d_H_pre};
 }
+torch::Tensor stream_distribute_fwd(torch::Tensor inp, torch::Tensor H) {
+    // inp: [B, T, C], H: [B, T, n]
+    int64_t B = inp.size(0);
+    int64_t T = inp.size(1);
+    int64_t C = inp.size(2);
+    int n = H.size(2);
 
+    auto out = torch::empty({B, T, n, C}, inp.options());
+
+    mhc::cuda_stream_distribute_fwd(
+        (nv_bfloat16*)out.data_ptr<at::BFloat16>(),
+        (nv_bfloat16*)inp.contiguous().data_ptr<at::BFloat16>(),
+        H.contiguous().data_ptr<float>(),
+        B, T, n, C, 
+        at::cuda::getCurrentCUDAStream()
+    );
+    return out;
+}
+
+std::vector<torch::Tensor> stream_distribute_backward(torch::Tensor grad, torch::Tensor inp, torch::Tensor H) {
+    int64_t B = inp.size(0);
+    int64_t T = inp.size(1);
+    int64_t C = inp.size(2);
+    int n = H.size(2);
+
+    auto d_inp = torch::empty_like(inp);
+    auto d_H = torch::empty_like(H);
+
+    mhc::cuda_stream_distribute_bwd(
+        (nv_bfloat16*)d_inp.data_ptr<at::BFloat16>(),
+        d_H.data_ptr<float>(),
+        (nv_bfloat16*)grad.contiguous().data_ptr<at::BFloat16>(),
+        (nv_bfloat16*)inp.contiguous().data_ptr<at::BFloat16>(),
+        H.contiguous().data_ptr<float>(),
+        B, T, n, C, 
+        at::cuda::getCurrentCUDAStream()
+    );
+    return {d_inp, d_H};
+}
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("sinkhorn_fwd", &sinkhorn_forward);
     m.def("sinkhorn_bwd", &sinkhorn_backward);
@@ -94,4 +135,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("stream_mix_backward", &stream_mix_backward);
     m.def("stream_aggregate_fwd", &stream_aggregate_fwd);
     m.def("stream_aggregate_bwd", &stream_aggregate_bwd);
+    m.def("stream_distribute_fwd", &stream_distribute_fwd, "Stream Distribute Forward");
+    m.def("stream_distribute_bwd", &stream_distribute_backward, "Stream Distribute Backward");
 }

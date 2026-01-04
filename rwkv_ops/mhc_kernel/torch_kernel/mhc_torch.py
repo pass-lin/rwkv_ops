@@ -87,7 +87,52 @@ class StreamAggregateFunction(torch.autograd.Function):
 
 def stream_aggregate(inp, H_pre):
     return StreamAggregateFunction.apply(inp, H_pre)
+class StreamDistributeFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, inp, H_post):
+        """
+        inp: [B, T, C] (通常为 bf16)
+        H_post: [B, T, n] (通常为 fp32)
+        返回: [B, T, n, C] (bf16)
+        """
+        # 1. 强制连续性以适配 CUDA 内核
+        ctx.inp_dtype = inp.dtype
+        ctx.H_post_dtype = H_post.dtype
+        inp = inp.bfloat16().contiguous()
+        H_post = H_post.float().contiguous()
+        
+        B, T, C = inp.shape
+        n = H_post.shape[-1]
 
+        out = mhc_lib.stream_distribute_fwd(inp, H_post)
+
+        ctx.save_for_backward(inp, H_post)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """
+        grad_output: [B, T, n, C] (反向传回的梯度)
+        返回: d_inp, d_H_post
+        """
+        inp, H_post = ctx.saved_tensors
+        grad_output = grad_output.contiguous()
+        
+        
+        # 调用 C++ 绑定的反向内核
+        # 内核内部会计算:
+        # d_inp = sum_i(grad_output[..., i, :] * H_post[..., i])
+        # d_H_post = sum_c(grad_output[..., :, c] * inp[..., c])
+        d_inp, d_H_post = mhc_lib.stream_distribute_bwd(grad_output, inp, H_post)
+        
+        # 对应 forward 的参数顺序：inp, H_post
+        return d_inp.to(ctx.inp_dtype), d_H_post.to(ctx.H_post_dtype)
+
+def stream_distribute(inp, H_post):
+    """
+    mHC 分发算子 (1 -> n): 将单流信号按照权重分发到 n 个并行流中。
+    """
+    return StreamDistributeFunction.apply(inp, H_post)
 # 辅助接口
 def sinkhorn_knopp(inp, num_iters=20, eps=1e-8): return SinkhornKnoppFunction.apply(inp, num_iters, eps)
 def rmsnorm(inp, eps=1e-5): return RMSNormFunction.apply(inp, eps)
