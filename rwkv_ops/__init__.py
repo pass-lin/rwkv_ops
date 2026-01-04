@@ -1,4 +1,4 @@
-__version__ = "0.5.5"
+__version__ = "0.6.0"
 import os
 
 KERNEL_TYPE = os.environ.get("KERNEL_TYPE", "cuda").lower()
@@ -20,7 +20,15 @@ assert KERNEL_TYPE in ["triton", "cuda", "native"]
 assert BACKEND in ["torch", "jax", "numpy", "tensorflow"]
 from .rwkv7_kernel import get_generalized_delta_rule, get_rnn_generalized_delta_rule
 from .rwkv6_kernel import get_rwkv6_kernel
+from .mhc_kernel import get_mhu_kernel
 
+(
+    mhc_sinkhorn_knopp,
+    mhc_rmsnorm,
+    mhc_stream_aggregate,
+    mhc_stream_distribute,
+    mhc_stream_mix,
+) = get_mhu_kernel(KERNEL_TYPE)
 
 generalized_delta_rule, generalized_delta_rule_inference, RWKV7_USE_TRITON_KERNEL = (
     get_generalized_delta_rule(KERNEL_TYPE=KERNEL_TYPE)
