@@ -425,3 +425,228 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Ret<ffi::Buffer<ffi::BF16>>() // d_inp
         .Ret<ffi::Buffer<ffi::F32>>()  // d_H_post
 );
+/* -------------------- MHC Post-Op FFI -------------------- */
+
+// 前向处理器
+static ffi::Error MhcPostOpFwdHost(
+    cudaStream_t stream,
+    ffi::Buffer<ffi::BF16> layer_out,  // [B, T, C]
+    ffi::Buffer<ffi::BF16> x_expanded, // [B, T, n, C]
+    ffi::Buffer<ffi::F32> H_post,      // [B, T, n]
+    ffi::Buffer<ffi::F32> H_res,       // [B, T, n, n]
+    ffi::ResultBuffer<ffi::BF16> out   // [B, T, n, C]
+) {
+    auto dims = x_expanded.dimensions();
+    int64_t B = dims[0], T = dims[1], n = dims[2], C = dims[3];
+
+    mhc::mhc_post_op_forward(
+        reinterpret_cast<mhc::floatX*>(out->typed_data()),
+        reinterpret_cast<const mhc::floatX*>(layer_out.typed_data()),
+        reinterpret_cast<const mhc::floatX*>(x_expanded.typed_data()),
+        H_post.typed_data(),
+        H_res.typed_data(),
+        B, T, static_cast<int>(n), C, stream
+    );
+    return ffi::Error::Success();
+}
+// 反向处理器
+static ffi::Error MhcPostOpBwdHost(
+    cudaStream_t stream,
+    ffi::Buffer<ffi::BF16> grad,       // [B, T, n, C]
+    ffi::Buffer<ffi::BF16> layer_out,
+    ffi::Buffer<ffi::BF16> x_expanded,
+    ffi::Buffer<ffi::F32> H_post,
+    ffi::Buffer<ffi::F32> H_res,
+    ffi::ResultBuffer<ffi::BF16> d_layer_out,
+    ffi::ResultBuffer<ffi::BF16> d_x_expanded,
+    ffi::ResultBuffer<ffi::F32> d_H_post, // <--- 需要清零
+    ffi::ResultBuffer<ffi::F32> d_H_res   // <--- 需要清零
+) {
+    auto dims = x_expanded.dimensions();
+    int64_t B = dims[0], T = dims[1], n = dims[2], C = dims[3];
+
+    // -----------------------------------------------------------------
+    // 【关键修复】: 显式清零 Accumulation Buffer
+    // 因为 Kernel 内部使用 atomicAdd，而 JAX 分配的显存包含垃圾数据
+    // -----------------------------------------------------------------
+    size_t size_h_post = B * T * n * sizeof(float);
+    size_t size_h_res = B * T * n * n * sizeof(float);
+
+    cudaMemsetAsync(d_H_post->typed_data(), 0, size_h_post, stream);
+    cudaMemsetAsync(d_H_res->typed_data(), 0, size_h_res, stream);
+
+    // 调用 Kernel
+    mhc::mhc_post_op_backward_full(
+        reinterpret_cast<mhc::floatX*>(d_layer_out->typed_data()),
+        reinterpret_cast<mhc::floatX*>(d_x_expanded->typed_data()),
+        d_H_post->typed_data(),
+        d_H_res->typed_data(),
+        reinterpret_cast<const mhc::floatX*>(grad.typed_data()),
+        reinterpret_cast<const mhc::floatX*>(layer_out.typed_data()),
+        reinterpret_cast<const mhc::floatX*>(x_expanded.typed_data()),
+        H_post.typed_data(),
+        H_res.typed_data(),
+        B, T, static_cast<int>(n), C, stream
+    );
+    
+    return ffi::Error::Success();
+}
+// --- 注册符号 ---
+XLA_FFI_DEFINE_HANDLER_SYMBOL(
+    MhcPostOpFwd, MhcPostOpFwdHost,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Arg<ffi::Buffer<ffi::BF16>>() 
+        .Arg<ffi::Buffer<ffi::BF16>>() 
+        .Arg<ffi::Buffer<ffi::F32>>()  
+        .Arg<ffi::Buffer<ffi::F32>>()  
+        .Ret<ffi::Buffer<ffi::BF16>>() 
+);
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(
+    MhcPostOpBwd, MhcPostOpBwdHost,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Arg<ffi::Buffer<ffi::BF16>>() // grad
+        .Arg<ffi::Buffer<ffi::BF16>>() // lo
+        .Arg<ffi::Buffer<ffi::BF16>>() // xe
+        .Arg<ffi::Buffer<ffi::F32>>()  // hp
+        .Arg<ffi::Buffer<ffi::F32>>()  // hr
+        .Ret<ffi::Buffer<ffi::BF16>>() // d_lo
+        .Ret<ffi::Buffer<ffi::BF16>>() // d_xe
+        .Ret<ffi::Buffer<ffi::F32>>()  // d_hp
+        .Ret<ffi::Buffer<ffi::F32>>()  // d_hr
+);
+
+/* -------------------- MHC Pre-Op FFI -------------------- */
+
+// 前向处理器：融合 Aggregate + Sigmoid + Sinkhorn 投影
+static ffi::Error MhcPreOpFwdHost(
+    cudaStream_t stream,
+    ffi::Buffer<ffi::BF16> x_expanded,  // [B, T, n, C]
+    ffi::Buffer<ffi::F32> h_pre_raw,    // [B, T, n]
+    ffi::Buffer<ffi::F32> h_post_raw,   // [B, T, n]
+    ffi::Buffer<ffi::F32> h_res_raw,    // [B, T, n, n]
+    ffi::ResultBuffer<ffi::BF16> x_layer_in, // [B, T, C]
+    ffi::ResultBuffer<ffi::F32> H_pre,       // [B, T, n] (sigmoid后)
+    ffi::ResultBuffer<ffi::F32> H_post,      // [B, T, n] (2*sigmoid后)
+    ffi::ResultBuffer<ffi::F32> H_res,       // [B, T, n, n] (Sinkhorn后)
+    std::int32_t sinkhorn_iters,
+    float eps
+) {
+    auto dims = x_expanded.dimensions();
+    int64_t B = dims[0];
+    int64_t T = dims[1];
+    int n = static_cast<int>(dims[2]);
+    int64_t C = dims[3];
+    
+    // 调用 .cuh 中的融合前向接口
+    mhc::mhc_pre_op_forward(
+        reinterpret_cast<mhc::floatX*>(x_layer_in->typed_data()),
+        H_pre->typed_data(),
+        H_post->typed_data(),
+        H_res->typed_data(),
+        reinterpret_cast<const mhc::floatX*>(x_expanded.typed_data()),
+        h_pre_raw.typed_data(),
+        h_post_raw.typed_data(),
+        h_res_raw.typed_data(),
+        B, T, n, C, sinkhorn_iters, eps, stream
+    );
+    
+    return ffi::Error::Success();
+}
+
+// 反向处理器：全量梯度回传（含 Sinkhorn 反向）
+static ffi::Error MhcPreOpBwdHost(
+    cudaStream_t stream,
+    ffi::Buffer<ffi::BF16> grad_layer_in,  // [B, T, C]
+    ffi::Buffer<ffi::F32> grad_H_post,     // [B, T, n]
+    ffi::Buffer<ffi::F32> grad_H_res,      // [B, T, n, n]
+    ffi::Buffer<ffi::BF16> x_expanded,     // [B, T, n, C] (前向输入)
+    ffi::Buffer<ffi::F32> H_pre,           // [B, T, n] (前向输出)
+    ffi::Buffer<ffi::F32> H_post,          // [B, T, n] (前向输出)
+    ffi::Buffer<ffi::F32> H_res_out,       // [B, T, n, n] (Sinkhorn后)
+    ffi::Buffer<ffi::F32> h_res_raw,       // [B, T, n, n] (原始输入)
+    ffi::ResultBuffer<ffi::BF16> d_x_expanded, // [B, T, n, C]
+    ffi::ResultBuffer<ffi::F32> d_h_pre_raw,   // [B, T, n]
+    ffi::ResultBuffer<ffi::F32> d_h_post_raw,  // [B, T, n]
+    ffi::ResultBuffer<ffi::F32> d_h_res_raw,   // [B, T, n, n]
+    std::int32_t sinkhorn_iters,
+    float eps
+) {
+    auto dims = x_expanded.dimensions();
+    int64_t B = dims[0];
+    int64_t T = dims[1];
+    int n = static_cast<int>(dims[2]);
+    int64_t C = dims[3];
+
+    // -----------------------------------------------------------------
+    // 【关键修复】: 显式清零所有输出梯度缓冲区
+    // PyTorch 版本使用 torch.zeros_like，FFI 侧需手动 Memset
+    // 原因：1) 对齐框架行为；2) 防止未初始化数据导致的数值误差
+    // -----------------------------------------------------------------
+    size_t size_h_pre = B * T * n * sizeof(float);
+    size_t size_h_post = B * T * n * sizeof(float);
+    size_t size_h_res = B * T * n * n * sizeof(float);
+    // d_x_expanded 由每个线程独占写入，无需清零
+
+    cudaMemsetAsync(d_h_pre_raw->typed_data(), 0, size_h_pre, stream);
+    cudaMemsetAsync(d_h_post_raw->typed_data(), 0, size_h_post, stream);
+    cudaMemsetAsync(d_h_res_raw->typed_data(), 0, size_h_res, stream);
+
+    // 调用 .cuh 中的融合反向接口
+    mhc::mhc_pre_op_backward(
+        reinterpret_cast<mhc::floatX*>(d_x_expanded->typed_data()),
+        d_h_pre_raw->typed_data(),
+        d_h_post_raw->typed_data(),
+        d_h_res_raw->typed_data(),
+        reinterpret_cast<const mhc::floatX*>(grad_layer_in.typed_data()),
+        grad_H_post.typed_data(),
+        grad_H_res.typed_data(),
+        reinterpret_cast<const mhc::floatX*>(x_expanded.typed_data()),
+        H_pre.typed_data(),
+        H_post.typed_data(),
+        H_res_out.typed_data(),
+        h_res_raw.typed_data(),
+        B, T, n, C, sinkhorn_iters, eps, stream
+    );
+    
+    return ffi::Error::Success();
+}
+
+// 注册 FFI 符号（追加到文件末尾）
+XLA_FFI_DEFINE_HANDLER_SYMBOL(
+    MhcPreOpFwd, MhcPreOpFwdHost,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Arg<ffi::Buffer<ffi::BF16>>()  // x_expanded
+        .Arg<ffi::Buffer<ffi::F32>>()  // h_pre_raw
+        .Arg<ffi::Buffer<ffi::F32>>()  // h_post_raw
+        .Arg<ffi::Buffer<ffi::F32>>()  // h_res_raw
+        .Ret<ffi::Buffer<ffi::BF16>>() // x_layer_in
+        .Ret<ffi::Buffer<ffi::F32>>()  // H_pre
+        .Ret<ffi::Buffer<ffi::F32>>()  // H_post
+        .Ret<ffi::Buffer<ffi::F32>>()  // H_res
+        .Attr<std::int32_t>("sinkhorn_iters")
+        .Attr<float>("eps")
+);
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(
+    MhcPreOpBwd, MhcPreOpBwdHost,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Arg<ffi::Buffer<ffi::BF16>>()  // grad_layer_in
+        .Arg<ffi::Buffer<ffi::F32>>()  // grad_H_post
+        .Arg<ffi::Buffer<ffi::F32>>()  // grad_H_res
+        .Arg<ffi::Buffer<ffi::BF16>>() // x_expanded
+        .Arg<ffi::Buffer<ffi::F32>>()  // H_pre
+        .Arg<ffi::Buffer<ffi::F32>>()  // H_post
+        .Arg<ffi::Buffer<ffi::F32>>()  // H_res_out
+        .Arg<ffi::Buffer<ffi::F32>>()  // h_res_raw
+        .Ret<ffi::Buffer<ffi::BF16>>() // d_x_expanded
+        .Ret<ffi::Buffer<ffi::F32>>()  // d_h_pre_raw
+        .Ret<ffi::Buffer<ffi::F32>>()  // d_h_post_raw
+        .Ret<ffi::Buffer<ffi::F32>>()  // d_h_res_raw
+        .Attr<std::int32_t>("sinkhorn_iters")
+        .Attr<float>("eps")
+);

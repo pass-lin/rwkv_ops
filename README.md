@@ -221,7 +221,7 @@ x_next = mhc_post_op(layer_out, x_expanded, H_post, H_res)
 | Framework | cuda | triton | native |
 | --- | --- | --- | --- |
 | **PyTorch** | ✅ | ❌ | ✅ |
-| **JAX** | ❌ | ❌ | ✅ |
+| **JAX** | ✅ | ❌ | ✅ |
 | **TensorFlow** | ❌ | ❌ | ✅ |
 | **NumPy** | ❌ | ❌ | ✅ |
 

@@ -105,6 +105,8 @@ class StreamAggregateFunction(torch.autograd.Function):
 
 
 def stream_aggregate(inp, H_pre):
+    inp = inp.to(torch.bfloat16)
+    H_pre =H_pre.to(torch.float32)
     return StreamAggregateFunction.apply(inp, H_pre)
 
 
@@ -187,6 +189,10 @@ def mhc_post_op(layer_out, x_expanded, H_post, H_res):
     H_post: [B, T, n]
     H_res: [B, T, n, n]
     """
+    layer_out = layer_out.to(torch.bfloat16)
+    x_expanded = x_expanded.to(torch.bfloat16)
+    H_post =H_post.to(torch.float32)
+    H_res = H_res.to(torch.float32)
     return MHCPostOpFunction.apply(layer_out, x_expanded, H_post, H_res)
 
 
@@ -194,19 +200,25 @@ def stream_distribute(inp, H_post):
     """
     mHC 分发算子 (1 -> n): 将单流信号按照权重分发到 n 个并行流中。
     """
+    inp = inp.to(torch.bfloat16)
+    H_post =H_post.to(torch.float32)
     return StreamDistributeFunction.apply(inp, H_post)
 
 
 # 辅助接口
 def sinkhorn_knopp(inp, num_iters=20, eps=1e-8):
+    inp = inp.to(torch.float32)
     return SinkhornKnoppFunction.apply(inp, num_iters, eps)
 
 
 def rmsnorm(inp, eps=1e-5):
+    inp = inp.to(torch.bfloat16)
     return RMSNormFunction.apply(inp, eps)
 
 
 def stream_mix(inp, M):
+    inp = inp.to(torch.bfloat16)
+    M =M.to(torch.float32)
     return StreamMixFunction.apply(inp, M)
 
 
@@ -279,6 +291,10 @@ def mhc_pre_op(x_expanded, h_pre_raw, h_post_raw, h_res_raw, num_iters=20, eps=1
     """
     mHC 前处理融合算子接口
     """
+    x_expanded = x_expanded.to(torch.bfloat16)
+    h_pre_raw =h_pre_raw.to(torch.float32)
+    h_post_raw =h_post_raw.to(torch.float32)
+    h_res_raw =h_res_raw.to(torch.float32)
     # 预处理：h_res_raw 可能是 [B, T, n, n] 或 [B, T, n*n]
     if h_res_raw.dim() == 4:
         h_res_raw_flat = h_res_raw.reshape(h_res_raw.shape[0], h_res_raw.shape[1], -1)

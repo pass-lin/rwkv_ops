@@ -16,6 +16,7 @@ import rwkv_ops.mhc_kernel.native_keras_op as native_mhc
 
 
 def check_close(name, x1, x2, atol=1e-4, rtol=1e-4):
+    print(f"Testing {name}")
     """精度对比辅助函数"""
     x1_val = np.array(x1.astype("float32"))
     x2_val = np.array(x2.astype("float32"))
@@ -166,55 +167,93 @@ def dist_loss(m, x, h):
 # 验证
 check_close("StreamDistribute Forward", out_jax, out_nat, atol=5e-3, rtol=5e-3)
 check_close(
-    "StreamDistribute Grad: dx", g_jax[0], g_nat[1], atol=5e-3, rtol=5e-3
+    "StreamDistribute Grad: dx", g_jax[0], g_nat[0], atol=5e-3, rtol=5e-3
 )  # 注意对应的argnums
 check_close("StreamDistribute Grad: dH", g_jax[1], g_nat[1], atol=5e-3, rtol=5e-3)
-raise (1)
-# =====================================================
-# 6. MHC Pre-Op (Fused) 测试
-# =====================================================
-print(f"\n{' mHC Pre-Op (Fused) 测试 ':=^50}")
-h_res_raw = rand_f32(key, (B, T, n * n))
-
-
-def pre_op_loss(m, x, h1, h2, hr):
-    # 返回 (x_layer_in, H_post, H_res)
-    x_in, hp, h_res = m.mhc_pre_op(x, h1, h2, hr, num_iters=20, eps=1e-8)
-    return jnp.sum(x_in.astype(jnp.float32)) + jnp.sum(hp) + jnp.sum(h_res), (
-        x_in,
-        hp,
-        h_res,
-    )
-
-
-(l1, out_jax), g_jax = jax.value_and_grad(
-    partial(pre_op_loss, jax_mhc), has_aux=True, argnums=(1, 2, 3, 4)
-)(x_mix, h_pre, h_post, h_res_raw)
-(l2, out_nat), g_nat = jax.value_and_grad(
-    partial(pre_op_loss, native_mhc), has_aux=True, argnums=(1, 2, 3, 4)
-)(x_mix, h_pre, h_post, h_res_raw)
-check_close("PreOp Fwd: x_layer_in", out_jax[0], out_nat[0])
-check_close("PreOp Grad: dx_exp", g_jax[0], g_nat[0])
 
 # =====================================================
-# 7. MHC Post-Op (Fused) 测试
+# 6. MHC Post-Op (Fused) 测试
 # =====================================================
-print(f"\n{' mHC Post-Op (Fused) 测试 ':=^50}")
-h_res_mat = rand_f32(key, (B, T, n, n))
+print(f"\n{' MHC Post-Op 融合测试 ':=^50}")
+# 输入形状: 
+# layer_out: [B, T, C]
+# x_expanded: [B, T, n, C]
+# H_post: [B, T, n]
+# H_res: [B, T, n, n]
+lo_val = rand_bfp(key, (B, T, C))
+xe_val = rand_bfp(key, (B, T, n, C))
+hp_val = rand_f32(key, (B, T, n))
+hr_val = rand_f32(key, (B, T, n, n))
 
-
-def post_op_loss(m, l, x, hp, hr):
-    out = m.mhc_post_op(l, x, hp, hr)
+def post_loss(m, lo, xe, hp, hr):
+    # 调用融合算子实现: (H_res @ x_expanded) + (layer_out * H_post)
+    out = m.mhc_post_op(lo, xe, hp, hr)
     return jnp.sum(out.astype(jnp.float32)), out
 
-
+# 计算 JAX FFI 版本的 Loss 和梯度 (针对全部 4 个输入参数)
 (l1, out_jax), g_jax = jax.value_and_grad(
-    partial(post_op_loss, jax_mhc), has_aux=True, argnums=(1, 2, 3, 4)
-)(l_out, x_mix, h_post, h_res_mat)
-(l2, out_nat), g_nat = jax.value_and_grad(
-    partial(post_op_loss, native_mhc), has_aux=True, argnums=(1, 2, 3, 4)
-)(l_out, x_mix, h_post, h_res_mat)
-check_close("PostOp Forward", out_jax, out_nat)
-check_close("PostOp Grad: dl_out", g_jax[0], g_nat[0])
+    partial(post_loss, jax_mhc), has_aux=True, argnums=(0, 1, 2, 3)
+)(lo_val, xe_val, hp_val, hr_val)
 
-print(f"\n{' JAX MHC 7个算子全部验证完成 ':=^50}")
+# 计算 Native (Keras/JAX) 版本的 Loss 和梯度
+(l2, out_nat), g_nat = jax.value_and_grad(
+    partial(post_loss, native_mhc), has_aux=True, argnums=(0, 1, 2, 3)
+)(lo_val, xe_val, hp_val, hr_val)
+
+# 验证前向和所有梯度
+check_close("PostOp Forward", out_jax, out_nat, atol=5e-3,rtol=7e-3)
+check_close("PostOp Grad: d_layer_out", g_jax[0], g_nat[0], atol=1e-3)
+check_close("PostOp Grad: d_x_expanded", g_jax[1], g_nat[1], atol=5e-3,rtol=5e-3)
+check_close("PostOp Grad: d_H_post", g_jax[2], g_nat[2], atol=1e-3)
+check_close("PostOp Grad: d_H_res", g_jax[3], g_nat[3], atol=1e-3)
+
+# =====================================================
+# 7. MHC Pre-Op (Fused) 测试
+# =====================================================
+print(f"\n{' MHC Pre-Op 融合测试 ':=^50}")
+
+# 输入形状：
+# x_expanded: [B, T, n, C]
+# h_pre_raw:  [B, T, n]
+# h_post_raw: [B, T, n]
+# h_res_raw:  [B, T, n, n] 或 [B, T, n*n]
+xe_pre = rand_bfp(key, (B, T, n, C))
+hpre_raw = rand_f32(key, (B, T, n))
+hpost_raw = rand_f32(key, (B, T, n))
+hres_raw = rand_f32(key, (B, T, n, n))   # 4D 原始输入
+
+
+def pre_loss(m, xe, hpre, hpost, hres):
+    # 返回融合算子输出 (x_layer_in, H_post, H_res) 与标量损失
+    x_layer_in, H_post, H_res = m.mhc_pre_op(xe, hpre, hpost, hres, num_iters=20, eps=1e-8)
+    # 简单标量损失：三项平方和
+    loss = (
+        jnp.sum(x_layer_in.astype(jnp.float32) ** 2)
+        + jnp.sum(H_post ** 2)
+        + jnp.sum(H_res ** 2)
+    )
+    return loss, (x_layer_in, H_post, H_res)
+
+
+# 计算 JAX FFI 版本
+(loss_jax, (xli_jax, hp_jax, hr_jax)), g_jax = jax.value_and_grad(
+    partial(pre_loss, jax_mhc), has_aux=True, argnums=(0, 1, 2, 3)
+)(xe_pre, hpre_raw, hpost_raw, hres_raw)
+
+# 计算 Native (Keras/JAX) 版本
+(loss_nat, (xli_nat, hp_nat, hr_nat)), g_nat = jax.value_and_grad(
+    partial(pre_loss, native_mhc), has_aux=True, argnums=(0, 1, 2, 3)
+)(xe_pre, hpre_raw, hpost_raw, hres_raw)
+
+# 验证前向
+check_close("PreOp Forward: x_layer_in", xli_jax, xli_nat, atol=5e-3, rtol=5e-3)
+check_close("PreOp Forward: H_post", hp_jax, hp_nat, atol=5e-3, rtol=5e-3)
+check_close("PreOp Forward: H_res", hr_jax, hr_nat, atol=5e-3, rtol=5e-3)
+
+# 验证梯度
+check_close("PreOp Grad: d_x_expanded", g_jax[0], g_nat[0], atol=5e-3, rtol=5e-3)
+check_close("PreOp Grad: d_h_pre_raw",  g_jax[1], g_nat[1], atol=5e-3, rtol=5e-3)
+check_close("PreOp Grad: d_h_post_raw", g_jax[2], g_nat[2], atol=5e-3, rtol=5e-3)
+check_close("PreOp Grad: d_h_res_raw",  g_jax[3], g_nat[3], atol=5e-3, rtol=5e-3)
+
+print("\n🎉 全部 MHC 算子通过数值对齐测试！")
