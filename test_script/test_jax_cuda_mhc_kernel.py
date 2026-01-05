@@ -175,7 +175,7 @@ check_close("StreamDistribute Grad: dH", g_jax[1], g_nat[1], atol=5e-3, rtol=5e-
 # 6. MHC Post-Op (Fused) 测试
 # =====================================================
 print(f"\n{' MHC Post-Op 融合测试 ':=^50}")
-# 输入形状: 
+# 输入形状:
 # layer_out: [B, T, C]
 # x_expanded: [B, T, n, C]
 # H_post: [B, T, n]
@@ -185,10 +185,12 @@ xe_val = rand_bfp(key, (B, T, n, C))
 hp_val = rand_f32(key, (B, T, n))
 hr_val = rand_f32(key, (B, T, n, n))
 
+
 def post_loss(m, lo, xe, hp, hr):
     # 调用融合算子实现: (H_res @ x_expanded) + (layer_out * H_post)
     out = m.mhc_post_op(lo, xe, hp, hr)
     return jnp.sum(out.astype(jnp.float32)), out
+
 
 # 计算 JAX FFI 版本的 Loss 和梯度 (针对全部 4 个输入参数)
 (l1, out_jax), g_jax = jax.value_and_grad(
@@ -201,9 +203,9 @@ def post_loss(m, lo, xe, hp, hr):
 )(lo_val, xe_val, hp_val, hr_val)
 
 # 验证前向和所有梯度
-check_close("PostOp Forward", out_jax, out_nat, atol=5e-3,rtol=7e-3)
+check_close("PostOp Forward", out_jax, out_nat, atol=5e-3, rtol=7e-3)
 check_close("PostOp Grad: d_layer_out", g_jax[0], g_nat[0], atol=1e-3)
-check_close("PostOp Grad: d_x_expanded", g_jax[1], g_nat[1], atol=5e-3,rtol=5e-3)
+check_close("PostOp Grad: d_x_expanded", g_jax[1], g_nat[1], atol=5e-3, rtol=5e-3)
 check_close("PostOp Grad: d_H_post", g_jax[2], g_nat[2], atol=1e-3)
 check_close("PostOp Grad: d_H_res", g_jax[3], g_nat[3], atol=1e-3)
 
@@ -220,17 +222,19 @@ print(f"\n{' MHC Pre-Op 融合测试 ':=^50}")
 xe_pre = rand_bfp(key, (B, T, n, C))
 hpre_raw = rand_f32(key, (B, T, n))
 hpost_raw = rand_f32(key, (B, T, n))
-hres_raw = rand_f32(key, (B, T, n, n))   # 4D 原始输入
+hres_raw = rand_f32(key, (B, T, n, n))  # 4D 原始输入
 
 
 def pre_loss(m, xe, hpre, hpost, hres):
     # 返回融合算子输出 (x_layer_in, H_post, H_res) 与标量损失
-    x_layer_in, H_post, H_res = m.mhc_pre_op(xe, hpre, hpost, hres, num_iters=20, eps=1e-8)
+    x_layer_in, H_post, H_res = m.mhc_pre_op(
+        xe, hpre, hpost, hres, num_iters=20, eps=1e-8
+    )
     # 简单标量损失：三项平方和
     loss = (
         jnp.sum(x_layer_in.astype(jnp.float32) ** 2)
-        + jnp.sum(H_post ** 2)
-        + jnp.sum(H_res ** 2)
+        + jnp.sum(H_post**2)
+        + jnp.sum(H_res**2)
     )
     return loss, (x_layer_in, H_post, H_res)
 
@@ -252,8 +256,8 @@ check_close("PreOp Forward: H_res", hr_jax, hr_nat, atol=5e-3, rtol=5e-3)
 
 # 验证梯度
 check_close("PreOp Grad: d_x_expanded", g_jax[0], g_nat[0], atol=5e-3, rtol=5e-3)
-check_close("PreOp Grad: d_h_pre_raw",  g_jax[1], g_nat[1], atol=5e-3, rtol=5e-3)
+check_close("PreOp Grad: d_h_pre_raw", g_jax[1], g_nat[1], atol=5e-3, rtol=5e-3)
 check_close("PreOp Grad: d_h_post_raw", g_jax[2], g_nat[2], atol=5e-3, rtol=5e-3)
-check_close("PreOp Grad: d_h_res_raw",  g_jax[3], g_nat[3], atol=5e-3, rtol=5e-3)
+check_close("PreOp Grad: d_h_res_raw", g_jax[3], g_nat[3], atol=5e-3, rtol=5e-3)
 
 print("\n🎉 全部 MHC 算子通过数值对齐测试！")

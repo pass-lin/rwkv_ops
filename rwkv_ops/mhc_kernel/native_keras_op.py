@@ -1,4 +1,3 @@
-import keras
 from keras import ops
 
 # --- 辅助函数：确保在 fp32 下计算以保证数值稳定性 ---

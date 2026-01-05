@@ -26,7 +26,7 @@ def _ensure_compiled() -> pathlib.Path:
     if _SO_PATH.exists():
         return _SO_PATH
 
-    print(f"[mhu_jax] 首次使用 - 正在编译CUDA内核...")
+    print("[mhu_jax] 首次使用 - 正在编译CUDA内核...")
 
     # 构建目录
     _BUILD_DIR = _CURRENT_DIR / "build"
@@ -675,6 +675,8 @@ def mhc_post_op(
 
     result = checkpointed_kernel(layer_out, x_expanded, H_post, H_res)
     return result.astype(original_dtype)
+
+
 # ---------- 在 register_ffi_target 部分追加 ----------
 jax.ffi.register_ffi_target(
     "mhc_pre_op_fwd", jax.ffi.pycapsule(_LIB.MhcPreOpFwd), platform="CUDA"
@@ -685,13 +687,15 @@ jax.ffi.register_ffi_target(
 
 
 # ---------- MHC Pre-Op 核心实现 ----------
-def _mhc_pre_op_ffi_fwd(x_expanded, h_pre_raw, h_post_raw, h_res_raw, sinkhorn_iters, eps):
+def _mhc_pre_op_ffi_fwd(
+    x_expanded, h_pre_raw, h_post_raw, h_res_raw, sinkhorn_iters, eps
+):
     """内部FFI前向调用"""
     # x_expanded: [B, T, n, C]
     # h_pre_raw: [B, T, n]
     # h_post_raw: [B, T, n]
     # h_res_raw: [B, T, n, n] 或 [B, T, n*n]
-    
+
     # 展平 h_res_raw 以匹配 C++ 接口 (期望 [B, T, n*n])
     if h_res_raw.ndim == 4:
         h_res_raw_flat = h_res_raw.reshape(h_res_raw.shape[0], h_res_raw.shape[1], -1)
@@ -699,7 +703,7 @@ def _mhc_pre_op_ffi_fwd(x_expanded, h_pre_raw, h_post_raw, h_res_raw, sinkhorn_i
         h_res_raw_flat = h_res_raw
 
     B, T, n, C = x_expanded.shape
-    
+
     # 定义输出形状 (H_res 由 C++ 返回展平格式)
     out_type_x_layer_in = jax.ShapeDtypeStruct((B, T, C), jnp.bfloat16)
     out_type_H = jax.ShapeDtypeStruct((B, T, n), jnp.float32)
@@ -718,18 +722,29 @@ def _mhc_pre_op_ffi_fwd(x_expanded, h_pre_raw, h_post_raw, h_res_raw, sinkhorn_i
         sinkhorn_iters=sinkhorn_iters,
         eps=eps,
     )
-    
+
     # 将 H_res 重塑回 4D
     H_res = H_res_flat.reshape(B, T, n, n)
     return x_layer_in, H_pre, H_post, H_res
 
 
-def _mhc_pre_op_ffi_bwd(grad_layer_in, grad_H_post, grad_H_res, x_expanded, H_pre, H_post, H_res_out, h_res_raw, sinkhorn_iters, eps):
+def _mhc_pre_op_ffi_bwd(
+    grad_layer_in,
+    grad_H_post,
+    grad_H_res,
+    x_expanded,
+    H_pre,
+    H_post,
+    H_res_out,
+    h_res_raw,
+    sinkhorn_iters,
+    eps,
+):
     """内部FFI反向调用"""
     # 展平梯度与残差以匹配 C++ 接口
     grad_H_res_flat = grad_H_res.reshape(grad_H_res.shape[0], grad_H_res.shape[1], -1)
     H_res_out_flat = H_res_out.reshape(H_res_out.shape[0], H_res_out.shape[1], -1)
-    
+
     # h_res_raw 是来自用户的原始输入，可能为 4D
     if h_res_raw.ndim == 4:
         h_res_raw_flat = h_res_raw.reshape(h_res_raw.shape[0], h_res_raw.shape[1], -1)
@@ -762,7 +777,7 @@ def _mhc_pre_op_ffi_bwd(grad_layer_in, grad_H_post, grad_H_res, x_expanded, H_pr
         sinkhorn_iters=sinkhorn_iters,
         eps=eps,
     )
-    
+
     # 将 d_h_res_raw 重塑回 4D (若原始输入是 4D)
     if h_res_raw.ndim == 4:
         d_h_res_raw = d_h_res_raw_flat.reshape(B, T, n, n)
@@ -782,7 +797,12 @@ def _create_mhc_pre_op_kernel(sinkhorn_iters: int, eps: float):
     def _kernel(x_expanded, h_pre_raw, h_post_raw, h_res_raw):
         # 调用 FFI 前向，返回 4 个张量
         x_layer_in, H_pre, H_post, H_res = _mhc_pre_op_ffi_fwd(
-            x_expanded, h_pre_raw, h_post_raw, h_res_raw, sinkhorn_iters_static, eps_static
+            x_expanded,
+            h_pre_raw,
+            h_post_raw,
+            h_res_raw,
+            sinkhorn_iters_static,
+            eps_static,
         )
         # 只返回 3 个张量给用户 (PyTorch 版本不返回 H_pre)
         return x_layer_in, H_post, H_res
@@ -790,10 +810,21 @@ def _create_mhc_pre_op_kernel(sinkhorn_iters: int, eps: float):
     def _fwd(x_expanded, h_pre_raw, h_post_raw, h_res_raw):
         # 调用前向并保存残差
         x_layer_in, H_pre, H_post, H_res = _mhc_pre_op_ffi_fwd(
-            x_expanded, h_pre_raw, h_post_raw, h_res_raw, sinkhorn_iters_static, eps_static
+            x_expanded,
+            h_pre_raw,
+            h_post_raw,
+            h_res_raw,
+            sinkhorn_iters_static,
+            eps_static,
         )
         # 残差包含反向所需的所有张量 (包括 H_pre, H_post, H_res)
-        return (x_layer_in, H_post, H_res), (x_expanded, H_pre, H_post, H_res, h_res_raw)
+        return (x_layer_in, H_post, H_res), (
+            x_expanded,
+            H_pre,
+            H_post,
+            H_res,
+            h_res_raw,
+        )
 
     def _bwd(residuals, grads):
         # 解包残差
@@ -833,7 +864,7 @@ def mhc_pre_op(
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     mHC 前处理融合算子 (Fused Aggregate + Sigmoid + Sinkhorn)
-    
+
     功能:
         1. H_pre = sigmoid(h_pre_raw)
         2. H_post = 2 * sigmoid(h_post_raw)
@@ -856,20 +887,28 @@ def mhc_pre_op(
     if x_expanded.ndim != 4:
         raise ValueError(f"x_expanded 需要 4 维，但得到 {x_expanded.ndim}")
     B, T, n, C = x_expanded.shape
-    
+
     expected_h_shape = (B, T, n)
     if h_pre_raw.shape != expected_h_shape:
-        raise ValueError(f"h_pre_raw 形状 {h_pre_raw.shape} 与期望 {expected_h_shape} 不匹配")
+        raise ValueError(
+            f"h_pre_raw 形状 {h_pre_raw.shape} 与期望 {expected_h_shape} 不匹配"
+        )
     if h_post_raw.shape != expected_h_shape:
-        raise ValueError(f"h_post_raw 形状 {h_post_raw.shape} 与期望 {expected_h_shape} 不匹配")
-    
+        raise ValueError(
+            f"h_post_raw 形状 {h_post_raw.shape} 与期望 {expected_h_shape} 不匹配"
+        )
+
     # h_res_raw 可以是 4D [B,T,n,n] 或 3D [B,T,n*n]
     if h_res_raw.ndim == 4:
         if h_res_raw.shape != (B, T, n, n):
-            raise ValueError(f"h_res_raw 4D 形状 {h_res_raw.shape} 与期望 {(B, T, n, n)} 不匹配")
+            raise ValueError(
+                f"h_res_raw 4D 形状 {h_res_raw.shape} 与期望 {(B, T, n, n)} 不匹配"
+            )
     elif h_res_raw.ndim == 3:
         if h_res_raw.shape != (B, T, n * n):
-            raise ValueError(f"h_res_raw 3D 形状 {h_res_raw.shape} 与期望 {(B, T, n * n)} 不匹配")
+            raise ValueError(
+                f"h_res_raw 3D 形状 {h_res_raw.shape} 与期望 {(B, T, n * n)} 不匹配"
+            )
     else:
         raise ValueError(f"h_res_raw 必须是 3 维或 4 维，但得到 {h_res_raw.ndim}")
 
@@ -888,7 +927,9 @@ def mhc_pre_op(
         kernel, policy=cp.save_anything_except_these_names(())
     )
 
-    x_layer_in, H_post, H_res = checkpointed_kernel(x_expanded, h_pre_raw, h_post_raw, h_res_raw)
+    x_layer_in, H_post, H_res = checkpointed_kernel(
+        x_expanded, h_pre_raw, h_post_raw, h_res_raw
+    )
 
     # 类型还原
     return (
