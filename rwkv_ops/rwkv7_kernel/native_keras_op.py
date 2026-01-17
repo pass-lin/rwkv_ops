@@ -89,7 +89,7 @@ def generalized_delta_rule(
         if keras_backend == "tensorflow":
             out = out.write(t, ops.reshape(o, (B, H, N)))
         elif keras_backend == "torch":
-            out[:, t:t+1] = ops.reshape(o, (B, 1, H, N))
+            out[:, t : t + 1] = ops.reshape(o, (B, 1, H, N))
         else:
             out = ops.slice_update(out, [0, t, 0, 0], ops.reshape(o, (B, 1, H, N)))
         return [state, out]
