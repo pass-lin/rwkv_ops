@@ -60,12 +60,6 @@ def mhc_fused_forward_kernel(
     h_post_values = tl.load(h_post_raw_base + index_n * stride_h_n_size).to(tl.float32)
     weight_values = tl.sigmoid(h_post_values) * 2.0
 
-    # 一次性读取整个 H_res 矩阵 [NSIZE, NSIZE]
-    # 使用 2D 索引一次性把小矩阵拉入寄存器a
-    offs_h_row = tl.arange(0, NSIZE)
-    offs_h_col = tl.arange(0, NSIZE)
-    # H_all shape: [NSIZE, NSIZE]
-
     layer_out_values = tl.load(
         layer_out_base + offset_channel * stride_layer_out_channel,
         mask=mask_channel,
@@ -107,17 +101,6 @@ def mhc_fused_forward_kernel(
     )
 
 
-@triton.autotune(
-    configs=[
-        triton.Config(
-            {"BLOCK_CHANNEL": block_c}, num_warps=num_warps, num_stages=num_stages
-        )
-        for block_c in [64, 128, 256, 512, 1024]
-        for num_warps in [4, 8]
-        for num_stages in [2, 3, 4]
-    ],
-    key=["CHANNEL_SIZE"],
-)
 @triton.jit
 def mhc_fused_backward_kernel(
     # --- Pointers ---
@@ -127,7 +110,7 @@ def mhc_fused_backward_kernel(
     layer_out_ptr,
     grad_output_ptr,
     grad_x_ptr,
-    grad_h_ptr,
+    grad_h_ptr, 
     grad_H_ptr,
     grad_layer_out_ptr,
     # --- Strides (tl.constexpr) ---
@@ -149,9 +132,13 @@ def mhc_fused_backward_kernel(
     stride_grad_x_c: tl.constexpr,
     stride_grad_l_bt: tl.constexpr,
     stride_grad_l_c: tl.constexpr,
+    # [新] Chunk Strides: 用于控制写入 Workspace 的偏移
+    # 如果 Grid_Y=1，这些 stride 为 0；如果 Grid_Y>1，这些 stride 为对应 Tensor 的大小
     stride_grad_h_bt: tl.constexpr,
+    stride_grad_h_chunk: tl.constexpr,
     stride_grad_h_n: tl.constexpr,
     stride_grad_H_bt: tl.constexpr,
+    stride_grad_H_chunk: tl.constexpr,
     stride_grad_H_n1: tl.constexpr,
     stride_grad_H_n2: tl.constexpr,
     # --- Constants ---
@@ -175,23 +162,35 @@ def mhc_fused_backward_kernel(
 
     g_x_base = grad_x_ptr + pid_batch_time * stride_grad_x_bt
     g_l_base = grad_layer_out_ptr + pid_batch_time * stride_grad_l_bt
-    g_h_post_base = grad_h_ptr + pid_batch_time * stride_grad_h_bt
-    g_H_res_base = grad_H_ptr + pid_batch_time * stride_grad_H_bt
+
+    # [关键] 归约梯度的地址计算
+    # 地址 = Base + (Time_Offset) + (Chunk_Offset) + (Elem_Offset)
+    # 如果只有1个块，Chunk_Offset 为 0，直接写回原位。
+    # 如果有多个块，每个块写入自己独立的 Workspace 区域。
+    g_h_post_base = (
+        grad_h_ptr
+        + pid_batch_time * stride_grad_h_bt
+        + pid_channel_block * stride_grad_h_chunk
+    )
+
+    g_H_res_base = (
+        grad_H_ptr
+        + pid_batch_time * stride_grad_H_bt
+        + pid_channel_block * stride_grad_H_chunk
+    )
 
     # -----------------------------------------------------------
     # Step 2: 预加载 Vector h
     # -----------------------------------------------------------
     index_n = tl.arange(0, NSIZE)
-
     h_vals = tl.load(h_post_base + index_n * stride_h_n).to(tl.float32)
     sig_h = tl.sigmoid(h_vals)
     weight_vals = sig_h * 2.0
     dsig_h = sig_h * (1.0 - sig_h) * 2.0
 
     # -----------------------------------------------------------
-    # Step 3: 加载流式数据块 (Grad Output & Layer Out)
+    # Step 3: 加载流式数据块
     # -----------------------------------------------------------
-    # 加载全量 grad_output (用于 grad_l, grad_h, grad_H)
     g_out_vals = tl.load(
         g_out_base
         + index_n[:, None] * stride_g_out_n
@@ -200,7 +199,6 @@ def mhc_fused_backward_kernel(
         other=0.0,
     ).to(tl.float32)
 
-    # 加载 layer_out
     l_vals = tl.load(
         l_base + offset_channel * stride_l_c, mask=mask_channel, other=0.0
     ).to(tl.float32)
@@ -209,21 +207,20 @@ def mhc_fused_backward_kernel(
     # Step 4: 计算并立即写回 Grad X
     # -----------------------------------------------------------
     grad_x_acc = tl.zeros([NSIZE, BLOCK_CHANNEL], dtype=tl.float32)
-
     for k in tl.static_range(NSIZE):
-        # 1. 加载 H 的第 k 行
+        # 1. 加载 H 行
         H_row_k_ptr = H_res_base + k * stride_H_n1 + index_n * stride_H_n2
         H_row_k_val = tl.load(H_row_k_ptr).to(tl.float32)
-        H_row_k_val = H_row_k_val[:, None]  # [N, 1]
+        H_row_k_val = H_row_k_val[:, None]
 
-        # 2. 加载 g_out 的第 k 行
+        # 2. 加载 g_out 行
         g_out_row_k_ptr = (
             g_out_base + k * stride_g_out_n + offset_channel * stride_g_out_c
         )
         g_out_row_k = tl.load(g_out_row_k_ptr, mask=mask_channel, other=0.0).to(
             tl.float32
         )
-        g_out_row_k = g_out_row_k[None, :]  # [1, BLOCK_C]
+        g_out_row_k = g_out_row_k[None, :]
 
         grad_x_acc += H_row_k_val * g_out_row_k
 
@@ -246,35 +243,15 @@ def mhc_fused_backward_kernel(
     )
 
     # -----------------------------------------------------------
-    # Step 6: 计算 Grad h (向量归约)
+    # Step 6: 计算 Grad h 并写入 (Store Only)
     # -----------------------------------------------------------
     grad_W_local = tl.sum(g_out_vals * l_vals[None, :], axis=1)
     grad_h_final = grad_W_local * dsig_h
 
-    if BLOCK_CHANNEL >= CHANNEL_SIZE:
-        tl.store(g_h_post_base + index_n * stride_grad_h_n, grad_h_final)
-    else:
-        tl.atomic_add(g_h_post_base + index_n * stride_grad_h_n, grad_h_final)
-
-    # -----------------------------------------------------------
-    # Step 7: 计算 Grad H (矩阵归约 - 按行向量化写入)
-    # -----------------------------------------------------------
-    # dH = g_out @ x^T
-    # 我们需要 x 全量数据 (N, BLOCK_C)
-    x_vals = tl.load(
-        x_base + index_n[:, None] * stride_x_n + offset_channel[None, :] * stride_x_c,
-        mask=mask_channel[None, :],
-        other=0.0,
-    ).to(tl.float32)
-
-    # 按行计算 Grad H
-    # dH 的第 i 行 = g_out[i, :] * x_vals.T
-    #              = sum(g_out[i, :][None, :] * x_vals, axis=1)  <-- Broadcasting Magic
+    # 直接写入 (地址已包含 Chunk Offset)
+    tl.store(g_h_post_base + index_n * stride_grad_h_n, grad_h_final)
 
     for i in tl.static_range(NSIZE):
-        # 1. 加载 g_out 的第 i 行: [1, BLOCK_C]
-        # 这里虽然在循环里，但重复利用了 g_out_base，L1 Cache 会极快
-        # (其实也可以直接用 g_out_vals[i][None, :] 但为了避开切片bug，我们重读)
         g_out_row_i_ptr = (
             g_out_base + i * stride_g_out_n + offset_channel * stride_g_out_c
         )
@@ -282,20 +259,11 @@ def mhc_fused_backward_kernel(
             tl.float32
         )
 
-        # 2. 计算第 i 行的所有 N 个元素
-        # g_out_row_i: [BLOCK_C]
-        # x_vals:      [N, BLOCK_C]
-        # 广播乘法: [1, BLOCK_C] * [N, BLOCK_C] -> [N, BLOCK_C]
-        # 然后沿着 Channel 维度求和 -> [N]
-        # 结果就是 dH[i, 0], dH[i, 1] ... dH[i, N-1]
-        grad_H_row_i = tl.sum(g_out_row_i[None, :] * x_vals, axis=1)  # Shape: [N]
+        for j in tl.static_range(NSIZE):
+            x_row_j_ptr = x_base + j * stride_x_n + offset_channel * stride_x_c
+            x_row_j = tl.load(x_row_j_ptr, mask=mask_channel, other=0.0).to(tl.float32)
 
-        # 3. 写入第 i 行
-        # 计算 dH 中第 i 行的起始地址
-        off_H_row_start = i * stride_grad_H_n1 + index_n * stride_grad_H_n2
-        target_ptrs = g_H_res_base + off_H_row_start
+            val = tl.sum(g_out_row_i * x_row_j)
 
-        if BLOCK_CHANNEL >= CHANNEL_SIZE:
-            tl.store(target_ptrs, grad_H_row_i)
-        else:
-            tl.atomic_add(target_ptrs, grad_H_row_i)
+            target_ptr = g_H_res_base + i * stride_grad_H_n1 + j * stride_grad_H_n2
+            tl.store(target_ptr, val)

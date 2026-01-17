@@ -49,14 +49,14 @@ def mhc_post_op_forward(
 
 
 def mhc_post_op_backward(
-    grad_output: torch.tensor,
-    layer_out: torch.tensor,
-    x_expanded: torch.tensor,
-    h_post_raw: torch.tensor,
-    H_res: torch.tensor,
+    grad_output: torch.Tensor,
+    layer_out: torch.Tensor,
+    x_expanded: torch.Tensor,
+    h_post_raw: torch.Tensor,
+    H_res: torch.Tensor,
 ):
     """
-    Fused Backward Wrapper.
+    Fused Backward Wrapper (With Workspace Reduction).
     """
     B, T, n, C = x_expanded.shape
     total_bt = B * T
@@ -68,20 +68,48 @@ def mhc_post_op_backward(
     l_v = layer_out.reshape(-1, C).contiguous()
     g_out_v = grad_output.reshape(-1, n, C).contiguous()
 
-    # 2. 准备输出
+    # 2. 准备输出梯度容器 (Element-wise 部分)
     grad_x = torch.empty_like(x_v)
     grad_l = torch.empty_like(l_v)
 
-    # 累加器初始化为 0, FP32
-    grad_h = torch.zeros((total_bt, n), device=x_expanded.device, dtype=torch.float32)
-    grad_H = torch.zeros(
-        (total_bt, n, n), device=x_expanded.device, dtype=torch.float32
-    )
+    # 3. 动态决定 Block Size 和 Reduction 策略
+    MAX_BLOCK_SIZE = 512
+    
+    if C <= MAX_BLOCK_SIZE:
+        BLOCK_CHANNEL = triton.next_power_of_2(C)
+        GRID_Y = 1
+        # 直接分配最终形状
+        grad_h = torch.empty((total_bt, n), device=x_v.device, dtype=torch.float32)
+        grad_H = torch.empty((total_bt, n, n), device=x_v.device, dtype=torch.float32)
+    else:
+        BLOCK_CHANNEL = MAX_BLOCK_SIZE  # 最大 Block
+        GRID_Y = triton.cdiv(C, BLOCK_CHANNEL)
+        # 分配 Workspace: [Total_BT, Grid_Y, ...]
+        grad_h = torch.empty(
+            (total_bt, GRID_Y, n), device=x_v.device, dtype=torch.float32
+        )
+        grad_H = torch.empty(
+            (total_bt, GRID_Y, n, n), device=x_v.device, dtype=torch.float32
+        )
 
-    grid = lambda META: (total_bt, triton.cdiv(C, META["BLOCK_CHANNEL"]))
+    # 4. 启动 Kernel
+    grid = (total_bt, GRID_Y)
+
+    # 计算 Stride
+    # 如果 GRID_Y > 1，我们需要传入 Workspace 的 stride 用于分块写入
+    # 如果 GRID_Y == 1，Chunk Stride 为 0 (其实传什么都行，因为 pid_channel_block 恒为 0)
+    stride_gh_chunk = grad_h.stride(1) if GRID_Y > 1 else 0
+    stride_gH_chunk = grad_H.stride(1) if GRID_Y > 1 else 0
+
+    # 注意：grad_h 和 grad_H 的维度可能变了，所以 stride 取最后一维和倒数第二维
+    stride_gh_n = grad_h.stride(-1)
+    stride_gH_n1 = grad_H.stride(-2)
+    stride_gH_n2 = grad_H.stride(-1)
+    # Batch Time Stride 总是第 0 维
+    stride_gh_bt = grad_h.stride(0)
+    stride_gH_bt = grad_H.stride(0)
 
     mhc_fused_backward_kernel[grid](
-        # Pointers
         x_v,
         h_v,
         H_v,
@@ -91,7 +119,7 @@ def mhc_post_op_backward(
         grad_h,
         grad_H,
         grad_l,
-        # Strides
+        # Input Strides
         stride_x_bt=x_v.stride(0),
         stride_x_n=x_v.stride(1),
         stride_x_c=x_v.stride(2),
@@ -105,20 +133,31 @@ def mhc_post_op_backward(
         stride_g_out_bt=g_out_v.stride(0),
         stride_g_out_n=g_out_v.stride(1),
         stride_g_out_c=g_out_v.stride(2),
+        # Output Strides
         stride_grad_x_bt=grad_x.stride(0),
         stride_grad_x_n=grad_x.stride(1),
         stride_grad_x_c=grad_x.stride(2),
         stride_grad_l_bt=grad_l.stride(0),
         stride_grad_l_c=grad_l.stride(1),
-        stride_grad_h_bt=grad_h.stride(0),
-        stride_grad_h_n=grad_h.stride(1),
-        stride_grad_H_bt=grad_H.stride(0),
-        stride_grad_H_n1=grad_H.stride(1),
-        stride_grad_H_n2=grad_H.stride(2),
+        # Reduction Strides (Adaptive)
+        stride_grad_h_bt=stride_gh_bt,
+        stride_grad_h_chunk=stride_gh_chunk,
+        stride_grad_h_n=stride_gh_n,
+        stride_grad_H_bt=stride_gH_bt,
+        stride_grad_H_chunk=stride_gH_chunk,
+        stride_grad_H_n1=stride_gH_n1,
+        stride_grad_H_n2=stride_gH_n2,
         # Constants
         CHANNEL_SIZE=C,
         NSIZE=n,
+        BLOCK_CHANNEL=BLOCK_CHANNEL,
     )
+
+    # 5. 后处理：如果使用了 Workspace，需要求和
+    if GRID_Y > 1:
+        # Sum over the chunk dimension (dim=1)
+        grad_h = grad_h.sum(dim=1)
+        grad_H = grad_H.sum(dim=1)
 
     return (
         grad_l.view(B, T, C),

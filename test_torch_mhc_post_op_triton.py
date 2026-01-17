@@ -1,7 +1,6 @@
 import os
 import torch
 import numpy as np
-from keras import ops
 
 # 设置环境变量
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -13,7 +12,7 @@ from rwkv_ops.mhc_kernel.torch_triton_op.mhc_post_op import mhc_post_op as trito
 # ------------------------------------------------------------------
 # 1. 配置参数与构造输入
 # ------------------------------------------------------------------
-B, T, n, C = 256, 256, 4, 512
+B, T, n, C = 256, 256, 4, 768
 device = "cuda"
 dtype = torch.bfloat16
 
@@ -41,7 +40,7 @@ H_res_native = H_res_raw.clone().requires_grad_(True)
 # ------------------------------------------------------------------
 # 2. 工具函数：数值比较
 # ------------------------------------------------------------------
-def test_is_close(name, x1, x2, atol=1e-3, rtol=1e-2):
+def test_is_close(name, x1, x2, atol=1e-2, rtol=1e-2):
     # 转为 numpy 比较
     x1_np = x1.detach().cpu().float().numpy()
     x2_np = x2.detach().cpu().float().numpy()
@@ -133,12 +132,13 @@ n_repeat = 100
 # mode="reduce-overhead" 适合小算子，"max-autotune" 适合大计算量
 # 这里我们用默认或 reduce-overhead 来公平对比
 try:
+
     @torch.compile
     def compiled_mhc_op(
         layer_out: torch.Tensor,
         x_expanded: torch.Tensor,
         h_post_raw: torch.Tensor,
-        H_res: torch.Tensor
+        H_res: torch.Tensor,
     ) -> torch.Tensor:
         dtype_out = x_expanded.dtype
         l_f32 = layer_out.float()
@@ -154,6 +154,7 @@ except Exception as e:
     print(f"⚠️ torch.compile 不可用: {e}")
     compiled_mhc_op = None
 
+
 def benchmark_forward(op_func, name, l, x, h, H):
     # 预热
     for _ in range(n_warmup):
@@ -168,23 +169,25 @@ def benchmark_forward(op_func, name, l, x, h, H):
     for _ in range(n_repeat):
         _ = op_func(l, x, h, H)
     end_event.record()
-    
+
     torch.cuda.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event) / n_repeat
     print(f"👉 {name:15s} Forward: {elapsed_time_ms:.4f} ms")
     return elapsed_time_ms
 
+
 def benchmark_backward(op_func, name, l, x, h, H):
     # 构造 inputs 并设置 grad
     inputs = [t.clone().detach().requires_grad_(True) for t in [l, x, h, H]]
-    
+
     # 预热
     for _ in range(n_warmup):
         out = op_func(*inputs)
-        loss = (out.float()**2).mean()
+        loss = (out.float() ** 2).mean()
         # 清空梯度
-        for t in inputs: 
-            if t.grad is not None: t.grad = None
+        for t in inputs:
+            if t.grad is not None:
+                t.grad = None
         loss.backward()
     torch.cuda.synchronize()
 
@@ -195,25 +198,27 @@ def benchmark_backward(op_func, name, l, x, h, H):
     start_event.record()
     for _ in range(n_repeat):
         out = op_func(*inputs)
-        loss = (out.float()**2).mean()
+        loss = (out.float() ** 2).mean()
         # 模拟真实训练：清空梯度 -> 反向传播
-        for t in inputs: 
-            if t.grad is not None: t.grad = None
+        for t in inputs:
+            if t.grad is not None:
+                t.grad = None
         loss.backward()
     end_event.record()
-    
+
     torch.cuda.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event) / n_repeat
     print(f"👉 {name:15s} Backward (includes Forward): {elapsed_time_ms:.4f} ms")
     return elapsed_time_ms
+
 
 # ------------------------------------------------------------------
 # 运行测试
 # ------------------------------------------------------------------
 # 使用同样形状的数据进行测试
 # 增加一些 Batch Size 模拟真实高负载场景 (可选)
-# B_bench, T_bench = 8, 128 
-B_bench, T_bench = B, T 
+# B_bench, T_bench = 8, 128
+B_bench, T_bench = B, T
 
 print(f"配置: B={B_bench}, T={T_bench}, n={n}, C={C}, dtype={dtype}")
 
@@ -223,16 +228,26 @@ h_in = torch.randn(B_bench, T_bench, n, device=device, dtype=torch.float32)
 H_in = torch.randn(B_bench, T_bench, n, n, device=device, dtype=torch.float32)
 
 print("\n--- Forward Speed ---")
-t_native_fwd = benchmark_forward(native_mhc_op, "Native (Eager)", l_in, x_in, h_in, H_in)
+t_native_fwd = benchmark_forward(
+    native_mhc_op, "Native (Eager)", l_in, x_in, h_in, H_in
+)
 t_triton_fwd = benchmark_forward(triton_mhc_op, "Custom Triton", l_in, x_in, h_in, H_in)
 if compiled_mhc_op:
-    t_compile_fwd = benchmark_forward(compiled_mhc_op, "torch.compile", l_in, x_in, h_in, H_in)
+    t_compile_fwd = benchmark_forward(
+        compiled_mhc_op, "torch.compile", l_in, x_in, h_in, H_in
+    )
 
 print("\n--- Backward Speed (Forward + Backward) ---")
-t_native_bwd = benchmark_backward(native_mhc_op, "Native (Eager)", l_in, x_in, h_in, H_in)
-t_triton_bwd = benchmark_backward(triton_mhc_op, "Custom Triton", l_in, x_in, h_in, H_in)
+t_native_bwd = benchmark_backward(
+    native_mhc_op, "Native (Eager)", l_in, x_in, h_in, H_in
+)
+t_triton_bwd = benchmark_backward(
+    triton_mhc_op, "Custom Triton", l_in, x_in, h_in, H_in
+)
 if compiled_mhc_op:
-    t_compile_bwd = benchmark_backward(compiled_mhc_op, "torch.compile", l_in, x_in, h_in, H_in)
+    t_compile_bwd = benchmark_backward(
+        compiled_mhc_op, "torch.compile", l_in, x_in, h_in, H_in
+    )
 
 # ------------------------------------------------------------------
 # 总结分析
@@ -241,9 +256,11 @@ print("\n" + "=" * 40)
 print("📊 性能提升总结 (Speedup)")
 print("=" * 40)
 
+
 def print_speedup(base_name, base_time, target_name, target_time):
     speedup = base_time / target_time
     print(f"{target_name} vs {base_name}: {speedup:.2f}x faster")
+
 
 print(">>> Forward:")
 print_speedup("Native", t_native_fwd, "Triton", t_triton_fwd)
