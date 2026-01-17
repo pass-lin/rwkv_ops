@@ -250,6 +250,11 @@ def mhc_fused_backward_kernel(
 
     # 直接写入 (地址已包含 Chunk Offset)
     tl.store(g_h_post_base + index_n * stride_grad_h_n, grad_h_final)
+    x_vals = tl.load(
+        x_base + index_n[:, None] * stride_x_n + offset_channel[None, :] * stride_x_c,
+        mask=mask_channel[None, :],
+        other=0.0,
+    ).to(tl.float32)
 
     for i in tl.static_range(NSIZE):
         g_out_row_i_ptr = (
@@ -259,11 +264,9 @@ def mhc_fused_backward_kernel(
             tl.float32
         )
 
-        for j in tl.static_range(NSIZE):
-            x_row_j_ptr = x_base + j * stride_x_n + offset_channel * stride_x_c
-            x_row_j = tl.load(x_row_j_ptr, mask=mask_channel, other=0.0).to(tl.float32)
+        grad_H_row_i = tl.sum(g_out_row_i[None, :] * x_vals, axis=1)  # Shape: [N]
+        off_H_row_start = i * stride_grad_H_n1 + index_n * stride_grad_H_n2
+        target_ptrs = g_H_res_base + off_H_row_start
 
-            val = tl.sum(g_out_row_i * x_row_j)
-
-            target_ptr = g_H_res_base + i * stride_grad_H_n1 + j * stride_grad_H_n2
-            tl.store(target_ptr, val)
+  
+        tl.store(target_ptrs, grad_H_row_i)
