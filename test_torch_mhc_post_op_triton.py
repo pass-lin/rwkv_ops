@@ -13,7 +13,7 @@ from rwkv_ops.mhc_kernel.torch_triton_op.mhc_post_op import mhc_post_op as trito
 # ------------------------------------------------------------------
 # 1. 配置参数与构造输入
 # ------------------------------------------------------------------
-B, T, n, C = 4, 64, 4, 512
+B, T, n, C = 256, 256, 4, 512
 device = "cuda"
 dtype = torch.bfloat16
 
@@ -117,7 +117,6 @@ for name, g_native, g_triton in zip(grad_names, native_grads, triton_grads):
 
 print("\n🎉🎉 MHC 全融合算子数值校验结束 🎉🎉")
 
-import time
 
 # ------------------------------------------------------------------
 # 5. 性能基准测试 (Benchmark)
@@ -134,7 +133,23 @@ n_repeat = 100
 # mode="reduce-overhead" 适合小算子，"max-autotune" 适合大计算量
 # 这里我们用默认或 reduce-overhead 来公平对比
 try:
-    compiled_mhc_op = torch.compile(native_mhc_op)
+    @torch.compile
+    def compiled_mhc_op(
+        layer_out: torch.Tensor,
+        x_expanded: torch.Tensor,
+        h_post_raw: torch.Tensor,
+        H_res: torch.Tensor
+    ) -> torch.Tensor:
+        dtype_out = x_expanded.dtype
+        l_f32 = layer_out.float()
+        x_f32 = x_expanded.float()
+        h_f32 = h_post_raw.float()
+        H_f32 = H_res.float()
+        w_f32 = torch.sigmoid(h_f32) * 2.0
+        x_mixed_f32 = torch.matmul(H_f32, x_f32)
+        x_delta_f32 = w_f32.unsqueeze(-1) * l_f32.unsqueeze(-2)
+        x_next_f32 = x_mixed_f32 + x_delta_f32
+        return x_next_f32.to(dtype_out)
 except Exception as e:
     print(f"⚠️ torch.compile 不可用: {e}")
     compiled_mhc_op = None
