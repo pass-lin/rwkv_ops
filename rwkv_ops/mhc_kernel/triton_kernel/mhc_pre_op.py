@@ -10,9 +10,9 @@ import triton.language as tl
             num_warps=num_warps,
             num_stages=num_stages,
         )
-        for bt_num in [32, 64, 128]
-        for csize in [64, 128, 256, 512]
-        for num_warps in [4, 8]
+        for bt_num in [32, 64]
+        for csize in [128, 256, 512, 1024]
+        for num_warps in [4, 8, 16]
         for num_stages in [2, 3, 4]
     ],
     key=["CSIZE", "Total_BT_CONST"],
@@ -157,7 +157,7 @@ def sinkhorn_aggregate_fused_kernel(
             num_stages=num_stages,
         )
         for bc in [128, 256, 512, 1024]
-        for num_warps in [4, 8]
+        for num_warps in [4, 8, 16]
         for num_stages in [2, 3, 4]
     ],
     key=["CHANNEL_SIZE", "TOTAL_BT_CONST"],

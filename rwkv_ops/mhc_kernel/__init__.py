@@ -1,6 +1,7 @@
 import keras
 from keras import ops
 
+
 def get_mhc_kernel(KERNEL_TYPE="native"):
     from .native_op import (
         linear_and_reshape,
