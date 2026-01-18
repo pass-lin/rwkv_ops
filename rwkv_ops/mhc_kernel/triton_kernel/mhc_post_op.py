@@ -100,173 +100,97 @@ def mhc_fused_forward_kernel(
         output_target_ptrs, accumulator.to(tl.bfloat16), mask=mask_channel[None, :]
     )
 
-
+@triton.autotune(
+    configs=[
+        triton.Config(
+            {"BLOCK_CHANNEL": block_c}, num_warps=num_warps, num_stages=num_stages
+        )
+        for block_c in [128, 256, 512, 1024, 2048]
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3, 4]
+    ],
+    key=["CHANNEL_SIZE"],
+)
 @triton.jit
-def mhc_fused_backward_kernel(
-    # --- Pointers ---
-    x_expanded_ptr,
-    h_post_raw_ptr,
-    H_res_ptr,
-    layer_out_ptr,
-    grad_output_ptr,
-    grad_x_ptr,
-    grad_h_ptr, 
-    grad_H_ptr,
-    grad_layer_out_ptr,
-    # --- Strides (tl.constexpr) ---
-    stride_x_bt: tl.constexpr,
-    stride_x_n: tl.constexpr,
-    stride_x_c: tl.constexpr,
-    stride_h_bt: tl.constexpr,
-    stride_h_n: tl.constexpr,
-    stride_H_bt: tl.constexpr,
-    stride_H_n1: tl.constexpr,
-    stride_H_n2: tl.constexpr,
-    stride_l_bt: tl.constexpr,
-    stride_l_c: tl.constexpr,
-    stride_g_out_bt: tl.constexpr,
-    stride_g_out_n: tl.constexpr,
-    stride_g_out_c: tl.constexpr,
-    stride_grad_x_bt: tl.constexpr,
-    stride_grad_x_n: tl.constexpr,
-    stride_grad_x_c: tl.constexpr,
-    stride_grad_l_bt: tl.constexpr,
-    stride_grad_l_c: tl.constexpr,
-    # [新] Chunk Strides: 用于控制写入 Workspace 的偏移
-    # 如果 Grid_Y=1，这些 stride 为 0；如果 Grid_Y>1，这些 stride 为对应 Tensor 的大小
-    stride_grad_h_bt: tl.constexpr,
-    stride_grad_h_chunk: tl.constexpr,
-    stride_grad_h_n: tl.constexpr,
-    stride_grad_H_bt: tl.constexpr,
-    stride_grad_H_chunk: tl.constexpr,
-    stride_grad_H_n1: tl.constexpr,
-    stride_grad_H_n2: tl.constexpr,
-    # --- Constants ---
+def mhc_fused_backward_kernel_workspace(
+    # --- 指针 ---
+    x_ptr, h_ptr, H_ptr, l_ptr, g_ptr,
+    gx_ptr, gh_ws_ptr, gH_ws_ptr, gl_ptr,
+    # --- 步幅 ---
+    stride_x_bt, stride_x_n, stride_x_c,
+    stride_h_bt, stride_h_n,
+    stride_H_bt, stride_H_n1, stride_H_n2,
+    stride_l_bt, stride_l_c,
+    stride_g_bt, stride_g_n, stride_g_c,
+    stride_gx_bt, stride_gx_n, stride_gx_c,
+    stride_gl_bt, stride_gl_c,
+    stride_gh_bt, stride_gh_chunk, stride_gh_n,
+    stride_gH_bt, stride_gH_chunk, stride_gH_n1, stride_gH_n2,
+    # --- 常量 ---
     CHANNEL_SIZE: tl.constexpr,
     NSIZE: tl.constexpr,
     BLOCK_CHANNEL: tl.constexpr,
 ):
-    # 网格索引
-    pid_batch_time = tl.program_id(0)
-    pid_channel_block = tl.program_id(1)
+    pid_bt = tl.program_id(0)
+    pid_c = tl.program_id(1)
 
-    offset_channel = pid_channel_block * BLOCK_CHANNEL + tl.arange(0, BLOCK_CHANNEL)
-    mask_channel = offset_channel < CHANNEL_SIZE
+    # 1. 构造索引
+    off_n = tl.arange(0, NSIZE)
+    off_c = pid_c * BLOCK_CHANNEL + tl.arange(0, BLOCK_CHANNEL)
+    
+    # Mask
+    mask_c = off_c < CHANNEL_SIZE
+    mask_2d = (off_n[:, None] < NSIZE) & (off_c[None, :] < CHANNEL_SIZE)
+    mask_H = (off_n[:, None] < NSIZE) & (off_n[None, :] < NSIZE)
 
-    # 1. 基础指针计算
-    x_base = x_expanded_ptr + pid_batch_time * stride_x_bt
-    h_post_base = h_post_raw_ptr + pid_batch_time * stride_h_bt
-    H_res_base = H_res_ptr + pid_batch_time * stride_H_bt
-    l_base = layer_out_ptr + pid_batch_time * stride_l_bt
-    g_out_base = grad_output_ptr + pid_batch_time * stride_g_out_bt
+    # 2. 指针计算 (与输入 Tensor 对应)
+    # 输入
+    p_h = h_ptr + pid_bt * stride_h_bt + off_n * stride_h_n
+    p_H = H_ptr + pid_bt * stride_H_bt + (off_n[:, None] * stride_H_n1 + off_n[None, :] * stride_H_n2)
+    p_l = l_ptr + pid_bt * stride_l_bt + off_c * stride_l_c
+    p_x = x_ptr + pid_bt * stride_x_bt + (off_n[:, None] * stride_x_n + off_c[None, :] * stride_x_c)
+    p_g = g_ptr + pid_bt * stride_g_bt + (off_n[:, None] * stride_g_n + off_c[None, :] * stride_g_c)
 
-    g_x_base = grad_x_ptr + pid_batch_time * stride_grad_x_bt
-    g_l_base = grad_layer_out_ptr + pid_batch_time * stride_grad_l_bt
+    # 输出 (Workspace)
+    p_gh_ws = gh_ws_ptr + pid_bt * stride_gh_bt + pid_c * stride_gh_chunk + off_n * stride_gh_n
+    p_gH_ws = gH_ws_ptr + pid_bt * stride_gH_bt + pid_c * stride_gH_chunk + \
+              (off_n[:, None] * stride_gH_n1 + off_n[None, :] * stride_gH_n2)
 
-    # [关键] 归约梯度的地址计算
-    # 地址 = Base + (Time_Offset) + (Chunk_Offset) + (Elem_Offset)
-    # 如果只有1个块，Chunk_Offset 为 0，直接写回原位。
-    # 如果有多个块，每个块写入自己独立的 Workspace 区域。
-    g_h_post_base = (
-        grad_h_ptr
-        + pid_batch_time * stride_grad_h_bt
-        + pid_channel_block * stride_grad_h_chunk
-    )
-
-    g_H_res_base = (
-        grad_H_ptr
-        + pid_batch_time * stride_grad_H_bt
-        + pid_channel_block * stride_grad_H_chunk
-    )
-
-    # -----------------------------------------------------------
-    # Step 2: 预加载 Vector h
-    # -----------------------------------------------------------
-    index_n = tl.arange(0, NSIZE)
-    h_vals = tl.load(h_post_base + index_n * stride_h_n).to(tl.float32)
+    # 3. 加载到寄存器 (Load once)
+    h_vals = tl.load(p_h).to(tl.float32)  # [N]
     sig_h = tl.sigmoid(h_vals)
-    weight_vals = sig_h * 2.0
-    dsig_h = sig_h * (1.0 - sig_h) * 2.0
+    w_vals = sig_h * 2.0
+    dw_vals = sig_h * (1.0 - sig_h) * 2.0
+
+    H_vals = tl.load(p_H, mask=mask_H, other=0.0).to(tl.float32)  # [N, N]
+    l_chunk = tl.load(p_l, mask=mask_c, other=0.0).to(tl.float32) # [C]
+    x_chunk = tl.load(p_x, mask=mask_2d, other=0.0).to(tl.float32) # [N, C]
+    g_chunk = tl.load(p_g, mask=mask_2d, other=0.0).to(tl.float32) # [N, C]
 
     # -----------------------------------------------------------
-    # Step 3: 加载流式数据块
+    # 4. 计算逻辑 (无循环，全广播)
     # -----------------------------------------------------------
-    g_out_vals = tl.load(
-        g_out_base
-        + index_n[:, None] * stride_g_out_n
-        + offset_channel[None, :] * stride_g_out_c,
-        mask=mask_channel[None, :],
-        other=0.0,
-    ).to(tl.float32)
 
-    l_vals = tl.load(
-        l_base + offset_channel * stride_l_c, mask=mask_channel, other=0.0
-    ).to(tl.float32)
+    # Task A: grad_layer_out [C]
+    # gl = sum_n (g_out[n, c] * w[n])
+    gl_acc = tl.sum(g_chunk * w_vals[:, None], axis=0)
+    p_gl = gl_ptr + pid_bt * stride_gl_bt + off_c * stride_gl_c
+    tl.store(p_gl, gl_acc.to(tl.bfloat16), mask=mask_c)
 
-    # -----------------------------------------------------------
-    # Step 4: 计算并立即写回 Grad X
-    # -----------------------------------------------------------
-    grad_x_acc = tl.zeros([NSIZE, BLOCK_CHANNEL], dtype=tl.float32)
-    for k in tl.static_range(NSIZE):
-        # 1. 加载 H 行
-        H_row_k_ptr = H_res_base + k * stride_H_n1 + index_n * stride_H_n2
-        H_row_k_val = tl.load(H_row_k_ptr).to(tl.float32)
-        H_row_k_val = H_row_k_val[:, None]
+    # Task B: grad_x [N, C]
+    # dx = H^T @ g_out -> dx[j, c] = sum_i (H[i, j] * g_out[i, c])
+    # H[i, j, 1] * g[i, 1, c] -> [i, j, c] -> sum over i (axis 0)
+    gx_acc = tl.sum(H_vals[:, :, None] * g_chunk[:, None, :], axis=0)
+    p_gx = gx_ptr + pid_bt * stride_gx_bt + (off_n[:, None] * stride_gx_n + off_c[None, :] * stride_gx_c)
+    tl.store(p_gx, gx_acc.to(tl.bfloat16), mask=mask_2d)
 
-        # 2. 加载 g_out 行
-        g_out_row_k_ptr = (
-            g_out_base + k * stride_g_out_n + offset_channel * stride_g_out_c
-        )
-        g_out_row_k = tl.load(g_out_row_k_ptr, mask=mask_channel, other=0.0).to(
-            tl.float32
-        )
-        g_out_row_k = g_out_row_k[None, :]
+    # Task C: grad_h [N] (写入 Workspace)
+    # dh = sum_c (g[n, c] * l[c]) * dw[n]
+    gh_acc = tl.sum(g_chunk * l_chunk[None, :], axis=1) * dw_vals
+    tl.store(p_gh_ws, gh_acc.to(tl.float32))
 
-        grad_x_acc += H_row_k_val * g_out_row_k
-
-    tl.store(
-        g_x_base
-        + index_n[:, None] * stride_grad_x_n
-        + offset_channel[None, :] * stride_grad_x_c,
-        grad_x_acc.to(tl.bfloat16),
-        mask=mask_channel[None, :],
-    )
-
-    # -----------------------------------------------------------
-    # Step 5: 计算并立即写回 Grad Layer Out
-    # -----------------------------------------------------------
-    grad_l_vals = tl.sum(g_out_vals * weight_vals[:, None], axis=0)
-    tl.store(
-        g_l_base + offset_channel * stride_grad_l_c,
-        grad_l_vals.to(tl.bfloat16),
-        mask=mask_channel,
-    )
-
-    # -----------------------------------------------------------
-    # Step 6: 计算 Grad h 并写入 (Store Only)
-    # -----------------------------------------------------------
-    grad_W_local = tl.sum(g_out_vals * l_vals[None, :], axis=1)
-    grad_h_final = grad_W_local * dsig_h
-
-    # 直接写入 (地址已包含 Chunk Offset)
-    tl.store(g_h_post_base + index_n * stride_grad_h_n, grad_h_final)
-    x_vals = tl.load(
-        x_base + index_n[:, None] * stride_x_n + offset_channel[None, :] * stride_x_c,
-        mask=mask_channel[None, :],
-        other=0.0,
-    ).to(tl.float32)
-
-    for i in tl.static_range(NSIZE):
-        g_out_row_i_ptr = (
-            g_out_base + i * stride_g_out_n + offset_channel * stride_g_out_c
-        )
-        g_out_row_i = tl.load(g_out_row_i_ptr, mask=mask_channel, other=0.0).to(
-            tl.float32
-        )
-
-        grad_H_row_i = tl.sum(g_out_row_i[None, :] * x_vals, axis=1)  # Shape: [N]
-        off_H_row_start = i * stride_grad_H_n1 + index_n * stride_grad_H_n2
-        target_ptrs = g_H_res_base + off_H_row_start
-
-  
-        tl.store(target_ptrs, grad_H_row_i)
+    # Task D: grad_H [N, N] (写入 Workspace)
+    # dH[i, j] = sum_c (g[i, c] * x[j, c])
+    # g[i, 1, c] * x[1, j, c] -> [i, j, c] -> sum over c (axis 2)
+    gH_acc = tl.sum(g_chunk[:, None, :] * x_chunk[None, :, :], axis=2)
+    tl.store(p_gH_ws, gH_acc.to(tl.float32), mask=mask_H)
