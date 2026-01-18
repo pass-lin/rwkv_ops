@@ -1,7 +1,0 @@
-/home/amax/rwkv_ops/rwkv_ops/rwkv7_kernel/jax_cuda_kernel_single/build_single_step_64/CMakeFiles/wkv7_single_step.dir
-/home/amax/rwkv_ops/rwkv_ops/rwkv7_kernel/jax_cuda_kernel_single/build_single_step_64/CMakeFiles/edit_cache.dir
-/home/amax/rwkv_ops/rwkv_ops/rwkv7_kernel/jax_cuda_kernel_single/build_single_step_64/CMakeFiles/rebuild_cache.dir
-/home/amax/rwkv_ops/rwkv_ops/rwkv7_kernel/jax_cuda_kernel_single/build_single_step_64/CMakeFiles/list_install_components.dir
-/home/amax/rwkv_ops/rwkv_ops/rwkv7_kernel/jax_cuda_kernel_single/build_single_step_64/CMakeFiles/install.dir
-/home/amax/rwkv_ops/rwkv_ops/rwkv7_kernel/jax_cuda_kernel_single/build_single_step_64/CMakeFiles/install/local.dir
-/home/amax/rwkv_ops/rwkv_ops/rwkv7_kernel/jax_cuda_kernel_single/build_single_step_64/CMakeFiles/install/strip.dir

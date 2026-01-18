@@ -3,6 +3,7 @@ import os
 # 设置环境变量
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 os.environ["KERAS_BACKEND"] = "jax"
+os.environ["KERNEL_TYPE"] = "triton"
 import time
 import jax
 import jax.numpy as jnp

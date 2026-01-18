@@ -1,1 +1,0 @@
-  -lpthread -ldl -lcudadevrt -lcudart_static -lrt 
