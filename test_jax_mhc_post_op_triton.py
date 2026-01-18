@@ -39,7 +39,8 @@ def test_is_close(name, x1, x2, atol=1e-2, rtol=1e-2):
     print(
         f"平均绝对误差是{error.mean()},平均相对误差是{error.mean() / np.abs(x1_np).mean()}"
     )
-    print(f"{np.sum(error < 1e-8) / np.cumprod(x1_np.shape)[-1] * 100}%的数据完全一样")
+    equal_rate = np.sum(error < 1e-8) / np.cumprod(x1_np.shape)[-1] * 100
+    print(f"{equal_rate:.2f}%的数据完全一样")
     if np.isnan(x1_np).any() or np.isnan(x2_np).any():
         print(f"❌❌ {name} 存在 NaN ❌❌")
         return
@@ -59,7 +60,6 @@ print("--- 开始前向测试 ---")
 output_triton = triton_mhc_op(layer_out_raw, x_expanded_raw, h_post_raw_raw, H_res_raw)
 output_native = native_mhc_op(layer_out_raw, x_expanded_raw, h_post_raw_raw, H_res_raw)
 
-test_is_close("Forward Output", output_native, output_triton)
 
 print("\n--- 开始反向测试 ---")
 
@@ -85,9 +85,10 @@ loss_triton, grads_triton = grad_triton_fn(
     layer_out_raw, x_expanded_raw, h_post_raw_raw, H_res_raw
 )
 
+test_is_close("前向测试结果:Output", output_native, output_triton)
 grad_names = ["layer_out", "x_expanded", "h_post_raw", "H_res"]
 for i, name in enumerate(grad_names):
-    test_is_close(f"Gradient: {name}", grads_native[i], grads_triton[i])
+    test_is_close(f"反向测试结果:Gradient: {name}", grads_native[i], grads_triton[i])
 
 # ------------------------------------------------------------------
 # 4. 性能基准测试 (Benchmark)
