@@ -106,8 +106,8 @@ def mhc_fused_forward_kernel(
         triton.Config(
             {"BLOCK_CHANNEL": block_c}, num_warps=num_warps, num_stages=num_stages
         )
-        for block_c in [64,128, 256, 512, 1024, 2048]
-        for num_warps in [2, 4, 8]
+        for block_c in [64,128, 256, 512, 1024]
+        for num_warps in [2, 4, 8, 16, 32]
         for num_stages in [2, 3, 4]
     ],
     key=["CHANNEL_SIZE"],
