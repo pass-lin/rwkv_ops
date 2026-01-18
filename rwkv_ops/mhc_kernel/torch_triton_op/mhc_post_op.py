@@ -66,49 +66,62 @@ def mhc_post_op_backward(
     l_v = layer_out.reshape(-1, C).contiguous()
     g_out_v = grad_output.reshape(-1, n, C).contiguous()
 
-    # 2. 准备输出
+    # 2. 准备输出 (不使用 Workspace)
     grad_x = torch.empty_like(x_v)
     grad_l = torch.empty_like(l_v)
+    # 规约结果使用 FP32 保证精度，最后再转
+    grad_h = torch.empty_like(h_v, dtype=torch.float32)
+    grad_H = torch.empty_like(H_v, dtype=torch.float32)
 
-    # 3. Workspace 策略 (按最小 Block 128 分配)
-    MIN_BLOCK = 128
-    GRID_Y_MAX = (C + MIN_BLOCK - 1) // MIN_BLOCK
-    
-    # 必须用 zeros，防止大 block 时部分 slot 未触及
-    grad_h_ws = torch.zeros((total_bt, GRID_Y_MAX, n), device=device, dtype=torch.float32)
-    grad_H_ws = torch.zeros((total_bt, GRID_Y_MAX, n, n), device=device, dtype=torch.float32)
+    # 3. 启动 Kernel: Grid Y 设为 1，强迫单个 Program 处理整行
+    grid = (total_bt, 1)
 
-    # 4. Grid
-    grid = lambda META: (total_bt, triton.cdiv(C, META["BLOCK_CHANNEL"]))
-
-    mhc_fused_backward_kernel_workspace[grid](
-        x_v, h_v, H_v, l_v, g_out_v,
-        grad_x, grad_h_ws, grad_H_ws, grad_l,
+    mhc_fused_backward_kernel_persistent[grid](
+        x_v,
+        h_v,
+        H_v,
+        l_v,
+        g_out_v,
+        grad_x,
+        grad_h,
+        grad_H,
+        grad_l,
         # Strides
-        x_v.stride(0), x_v.stride(1), x_v.stride(2),
-        h_v.stride(0), h_v.stride(1),
-        H_v.stride(0), H_v.stride(1), H_v.stride(2),
-        l_v.stride(0), l_v.stride(1),
-        g_out_v.stride(0), g_out_v.stride(1), g_out_v.stride(2),
-        grad_x.stride(0), grad_x.stride(1), grad_x.stride(2),
-        grad_l.stride(0), grad_l.stride(1),
-        grad_h_ws.stride(0), grad_h_ws.stride(1), grad_h_ws.stride(2),
-        grad_H_ws.stride(0), grad_H_ws.stride(1), grad_H_ws.stride(2), grad_H_ws.stride(3),
+        x_v.stride(0),
+        x_v.stride(1),
+        x_v.stride(2),
+        h_v.stride(0),
+        h_v.stride(1),
+        H_v.stride(0),
+        H_v.stride(1),
+        H_v.stride(2),
+        l_v.stride(0),
+        l_v.stride(1),
+        g_out_v.stride(0),
+        g_out_v.stride(1),
+        g_out_v.stride(2),
+        grad_x.stride(0),
+        grad_x.stride(1),
+        grad_x.stride(2),
+        grad_l.stride(0),
+        grad_l.stride(1),
+        grad_h.stride(0),
+        grad_h.stride(1),
+        grad_H.stride(0),
+        grad_H.stride(1),
+        grad_H.stride(2),
         # Constants
         CHANNEL_SIZE=C,
         NSIZE=n,
     )
 
-    # 5. 最后归约
-    grad_h = grad_h_ws.sum(dim=1).to(h_post_raw.dtype)
-    grad_H = grad_H_ws.sum(dim=1).to(H_res.dtype)
-
     return (
         grad_l.view(B, T, C),
         grad_x.view(B, T, n, C),
-        grad_h.view(B, T, n),
-        grad_H.view(B, T, n, n),
+        grad_h.view(B, T, n).to(h_post_raw.dtype),
+        grad_H.view(B, T, n, n).to(H_res.dtype),
     )
+
 
 class MHCPostOpFunction(torch.autograd.Function):
     @staticmethod

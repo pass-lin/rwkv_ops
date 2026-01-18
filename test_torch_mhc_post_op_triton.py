@@ -12,7 +12,7 @@ from rwkv_ops.mhc_kernel.torch_triton_op.mhc_post_op import mhc_post_op as trito
 # ------------------------------------------------------------------
 # 1. 配置参数与构造输入
 # ------------------------------------------------------------------
-B, T, n, C = 16, 256, 4, 4096
+B, T, n, C = 32, 256, 4, 4096
 device = "cuda"
 dtype = torch.bfloat16
 
