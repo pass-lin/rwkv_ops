@@ -1,5 +1,5 @@
 import keras
-
+from keras import ops
 
 def get_mhc_kernel(KERNEL_TYPE="native"):
     from .native_op import (
@@ -14,12 +14,14 @@ def get_mhc_kernel(KERNEL_TYPE="native"):
             import jax
 
             if jax.devices()[0].platform == "gpu":
+                from .jax_triton_op.mhc_pre_op import mhc_pre_op_fused
                 from .jax_triton_op.mhc_post_op import mhc_post_op
         elif keras.config.backend() == "torch":
             import torch
 
             if torch.cuda.is_available():
-                from .torch_triton_op.mhc_post_op import mhc_post_op, mhc_pre_op_fused
+                from .torch_triton_op.mhc_pre_op import mhc_pre_op_fused
+                from .torch_triton_op.mhc_post_op import mhc_post_op
 
     def mhc_pre_op(
         x,
@@ -77,7 +79,7 @@ def get_mhc_kernel(KERNEL_TYPE="native"):
         original_dtype = x.dtype
         B, T = ops.shape(x)[:2]
         x_flat = ops.reshape(x, [B, T, -1])
-        x_norm = mhc_rmsnorm(x, eps)
+        x_norm = mhc_rmsnorm(x_flat, eps)
         h_pre_raw, h_post_raw, h_res_reshaped = linear_and_reshape(
             x_norm,
             alpha_pre,
@@ -93,8 +95,8 @@ def get_mhc_kernel(KERNEL_TYPE="native"):
 
         x_layer_in, H_res = mhc_pre_op_fused(
             x,
-            h_pre_raw,
             h_res_reshaped,
+            h_pre_raw,
             num_iters,
             eps,
         )

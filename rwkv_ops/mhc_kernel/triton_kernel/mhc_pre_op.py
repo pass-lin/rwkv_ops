@@ -160,7 +160,7 @@ def sinkhorn_aggregate_fused_kernel(
         for num_warps in [4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=["CSIZE", "Total_BT_CONST"],
+    key=["CHANNEL_SIZE", "TOTAL_BT_CONST"],
 )
 @triton.jit
 def sinkhorn_aggregate_bwd_kernel(
@@ -239,7 +239,7 @@ def sinkhorn_aggregate_bwd_kernel(
     )
     dP = tl.load(gH_ptr).to(tl.float32)
 
-    for _ in tl.range(NUM_ITERS):
+    for _ in tl.static_range(NUM_ITERS):
         # 逆向列归一化: dX = dY - Y * sum(dY * Y)
         dP = dP - P * tl.sum(dP * P, axis=0)[None, :]
         # 逆向行归一化

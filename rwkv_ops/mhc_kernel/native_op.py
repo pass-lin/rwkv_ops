@@ -196,10 +196,10 @@ def linear_and_reshape(
 
 def mhc_pre_op_fused(
     x,
-    h_pre_raw,
     h_res_reshaped,
-    num_iters,
-    eps,
+    h_pre_raw,
+    num_iters=20,
+    eps=1e-8,
 ):
     H_res = sinkhorn_knopp(h_res_reshaped, num_iters, eps)
     x_layer_in = stream_aggregate(x, h_pre_raw)
