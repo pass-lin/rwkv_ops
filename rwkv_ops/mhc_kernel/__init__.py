@@ -2,7 +2,12 @@ import keras
 
 
 def get_mhc_kernel(KERNEL_TYPE="native"):
-    from .native_op import linear_and_reshape, mhc_post_op,mhc_pre_op_fused
+    from .native_op import (
+        linear_and_reshape,
+        mhc_post_op,
+        mhc_pre_op_fused,
+        mhc_rmsnorm,
+    )
 
     if KERNEL_TYPE == "triton":
         if keras.config.backend() == "jax":
@@ -14,9 +19,8 @@ def get_mhc_kernel(KERNEL_TYPE="native"):
             import torch
 
             if torch.cuda.is_available():
-                from .torch_triton_op.mhc_post_op import mhc_post_op,mhc_pre_op_fused
+                from .torch_triton_op.mhc_post_op import mhc_post_op, mhc_pre_op_fused
 
-        
     def mhc_pre_op(
         x,
         alpha_pre,
@@ -73,8 +77,9 @@ def get_mhc_kernel(KERNEL_TYPE="native"):
         original_dtype = x.dtype
         B, T = ops.shape(x)[:2]
         x_flat = ops.reshape(x, [B, T, -1])
+        x_norm = mhc_rmsnorm(x, eps)
         h_pre_raw, h_post_raw, h_res_reshaped = linear_and_reshape(
-            x_flat,
+            x_norm,
             alpha_pre,
             alpha_post,
             alpha_res,

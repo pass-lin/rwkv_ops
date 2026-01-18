@@ -128,7 +128,7 @@ def stream_aggregate(inp, H_pre):
 
 
 def linear_and_reshape(
-    x,
+    x_norm,
     alpha_pre,
     alpha_post,
     alpha_res,
@@ -177,7 +177,7 @@ def linear_and_reshape(
     """
     M = phi.shape[-1]
     assert M % 32 == 0, "输入的 M 必须是 32 的倍数"
-    x_norm = mhc_rmsnorm(x, eps)
+
     shape = ops.shape(x_norm)
     B, T = shape[0], shape[1]
     h_native = ops.cast(ops.matmul(x_norm, phi), "float32")
@@ -204,4 +204,3 @@ def mhc_pre_op_fused(
     H_res = sinkhorn_knopp(h_res_reshaped, num_iters, eps)
     x_layer_in = stream_aggregate(x, h_pre_raw)
     return x_layer_in, H_res
-
