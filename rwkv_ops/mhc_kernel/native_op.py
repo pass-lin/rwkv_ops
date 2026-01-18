@@ -244,6 +244,8 @@ def mhc_pre_op(
     H_res: [batch_size, seq_len, n, n], 与 x.dtype 相同
         双随机残差矩阵，实现 n 个流之间的可逆混合
     """
+    M = phi.shape[-1]
+    assert M % 32 == 0 ,"输入的 M 必须是 32 的倍数"
     original_dtype = x.dtype
     B, T = ops.shape(x)[:2]
     x_flat = ops.reshape(x, [B, T, -1])
