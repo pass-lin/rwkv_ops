@@ -113,7 +113,7 @@ def mhc_fused_forward_kernel(
     key=["CHANNEL_SIZE"],
 )
 @triton.jit
-def mhc_fused_backward_kernel_persistent(
+def mhc_fused_backward_kernel(
     # --- 指针 ---
     x_ptr,
     h_ptr,

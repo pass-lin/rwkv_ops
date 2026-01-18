@@ -76,7 +76,7 @@ def mhc_post_op_backward(
     # 3. 启动 Kernel: Grid Y 设为 1，强迫单个 Program 处理整行
     grid = (total_bt, 1)
 
-    mhc_fused_backward_kernel_persistent[grid](
+    mhc_fused_backward_kernel[grid](
         x_v,
         h_v,
         H_v,
