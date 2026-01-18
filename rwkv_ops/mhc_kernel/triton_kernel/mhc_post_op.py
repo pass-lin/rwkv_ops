@@ -106,7 +106,7 @@ def mhc_fused_forward_kernel(
         triton.Config(
             {"BLOCK_CHANNEL": block_c}, num_warps=num_warps, num_stages=num_stages
         )
-        for block_c in [128, 256, 512, 1024, 2048]
+        for block_c in [64,128, 256, 512, 1024, 2048]
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
@@ -184,7 +184,7 @@ def mhc_fused_backward_kernel(
     # -----------------------------------------------------------
     # 6. 主循环：跨步遍历 Channel 维度
     # -----------------------------------------------------------
-    for start_c in range(0, CHANNEL_SIZE, BLOCK_CHANNEL):
+    for start_c in tl.static_range(0, CHANNEL_SIZE, BLOCK_CHANNEL):
         off_c = start_c + tl.arange(0, BLOCK_CHANNEL)
         mask_c = off_c < CHANNEL_SIZE
         mask_2d = (off_n[:, None] < NSIZE) & (off_c[None, :] < CHANNEL_SIZE)
