@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/amax/rwkv_ops/rwkv_ops/rwkv7_kernel/jax_cuda_kernel_single/build_single_step_64/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

@@ -1,0 +1,1 @@
+ -Wl,-rpath,/home/amax/miniconda3/envs/lqw/lib:/home/amax/miniconda3/envs/lqw/x86_64-conda-linux-gnu/sysroot/usr/lib: /home/amax/miniconda3/envs/lqw/lib/libcudart.so -lpthread -ldl "/home/amax/miniconda3/envs/lqw/x86_64-conda-linux-gnu/sysroot/usr/lib/librt.so" -lcudadevrt -lcudart_static -lrt -lpthread -ldl 

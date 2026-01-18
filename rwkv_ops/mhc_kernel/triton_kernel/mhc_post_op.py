@@ -7,7 +7,7 @@ import triton.language as tl
         triton.Config(
             {"BLOCK_CHANNEL": block_c}, num_warps=num_warps, num_stages=num_stages
         )
-        for block_c in [64, 128, 256, 512, 1024, 2048]
+        for block_c in [64, 128, 256, 512, 1024]
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
@@ -106,8 +106,8 @@ def mhc_fused_forward_kernel(
         triton.Config(
             {"BLOCK_CHANNEL": block_c}, num_warps=num_warps, num_stages=num_stages
         )
-        for block_c in [64,128, 256, 512, 1024]
-        for num_warps in [2, 4, 8, 16, 32]
+        for block_c in [64, 128, 256, 512, 1024, 2048]
+        for num_warps in [2, 4, 8, 16]
         for num_stages in [2, 3, 4]
     ],
     key=["CHANNEL_SIZE"],
@@ -125,29 +125,29 @@ def mhc_fused_backward_kernel(
     gH_ptr,
     gl_ptr,
     # --- 步幅 ---
-    stride_x_bt,
-    stride_x_n,
-    stride_x_c,
-    stride_h_bt,
-    stride_h_n,
-    stride_H_bt,
-    stride_H_n1,
-    stride_H_n2,
-    stride_l_bt,
-    stride_l_c,
-    stride_g_bt,
-    stride_g_n,
-    stride_g_c,
-    stride_gx_bt,
-    stride_gx_n,
-    stride_gx_c,
-    stride_gl_bt,
-    stride_gl_c,
-    stride_gh_bt,
-    stride_gh_n,
-    stride_gH_bt,
-    stride_gH_n1,
-    stride_gH_n2,
+    stride_x_bt: tl.constexpr,
+    stride_x_n: tl.constexpr,
+    stride_x_c: tl.constexpr,
+    stride_h_bt: tl.constexpr,
+    stride_h_n: tl.constexpr,
+    stride_H_bt: tl.constexpr,
+    stride_H_n1: tl.constexpr,
+    stride_H_n2: tl.constexpr,
+    stride_l_bt: tl.constexpr,
+    stride_l_c: tl.constexpr,
+    stride_g_bt: tl.constexpr,
+    stride_g_n: tl.constexpr,
+    stride_g_c: tl.constexpr,
+    stride_gx_bt: tl.constexpr,
+    stride_gx_n: tl.constexpr,
+    stride_gx_c: tl.constexpr,
+    stride_gl_bt: tl.constexpr,
+    stride_gl_c: tl.constexpr,
+    stride_gh_bt: tl.constexpr,
+    stride_gh_n: tl.constexpr,
+    stride_gH_bt: tl.constexpr,
+    stride_gH_n1: tl.constexpr,
+    stride_gH_n2: tl.constexpr,
     # --- 常量 ---
     CHANNEL_SIZE: tl.constexpr,
     NSIZE: tl.constexpr,
