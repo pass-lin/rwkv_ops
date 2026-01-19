@@ -154,5 +154,4 @@ t_triton_jit = benchmark_all(
 print(f"Triton vs JIT Native: {t_native_jit / t_triton_jit:.2f}x faster")
 # if 't_native_eager' in locals():
 #     print(f"Triton vs Eager:      {t_native_eager / t_triton_jit:.2f}x faster")
-
 print("\n🎉🎉 MHC Pre-Op 全校验结束 🎉🎉")

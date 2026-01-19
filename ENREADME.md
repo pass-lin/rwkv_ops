@@ -42,6 +42,94 @@ bash install.sh
 
 ---
 
+---
+
+## mHC Operations Usage
+
+[mHC (Multi-Head Control)](https://arxiv.org/pdf/2512.24880) is a new residual interaction mechanism introduced by DeepSeek as an evolution/replacement for standard ResNet. It extends the traditional single-stream residual connection into a parallel multi-stream architecture, introducing dynamic aggregation and distribution.
+
+This repository provides Keras-compatible kernels implemented in **Triton**. As this is a practice project for the author to learn Triton, performance optimization has not reached the theoretical limit:
+* **JAX Backend**: XLA's fusion capabilities are formidable, making the Triton speedup less significant (Native latency is ~1.5x ResNet, Triton is ~1.27x, while DeepSeek's expert-optimized version is ~1.06x). However, in terms of **VRAM usage**, the Triton operator uses a custom VJP to force recomputation, saving **3~4GB VRAM** for a full model (tested at `128x1024x4x768`) compared to JAX Native.
+* **Torch Backend**: Since `torch.compile` is currently less efficient at fusing such complex logic than XLA, the Triton operator shows significant advantages (**Pre-Op is ~8x faster, Post-Op is ~3x faster** in single-op benchmarks). **It is highly recommended for Torch users to enable Triton by default.** (Note: These benchmarks refer to individual operators).
+
+### Quick Start
+
+```python
+from rwkv_ops import mhc_pre_op, mhc_post_op
+
+# Alternatively, explicitly get the kernel (default is "triton")
+# mhc_pre_op, mhc_post_op = get_mhc_kernel("triton")
+
+# Example usage within a layer (e.g., Attention/FFN):
+# 1. Pre-Op: Aggregate multi-stream into a single stream
+x_layer_in, h_post, h_res = mhc_pre_op(
+    x, alpha_pre, alpha_post, alpha_res, phi, 
+    bias_pre, bias_post, bias_res, n=4
+)
+
+# 2. Core Layer Computation
+x_layer_out = attention(x_layer_in)
+
+# 3. Post-Op: Distribute back to multi-stream and perform stream mixing
+x_next = mhc_post_op(x_layer_out, x, h_post, h_res)
+```
+
+---
+
+### API Reference
+
+#### `mhc_pre_op`
+Aggregates multi-stream features into the core layer input and generates coefficients for subsequent stages.
+
+| Parameter | Shape | Description |
+|---|---|---|
+| x | (B, T, n, C) | Multi-stream input features |
+| alpha_pre/post/res | (1,) | Scaling scalars for Aggregate, Distribute, and Residual branches |
+| phi | (n*C, n*(n+2)) | Dynamic projection matrix |
+| bias_pre/post/res | (M,) | Bias terms for each branch |
+| n | int | Expansion rate (number of streams) |
+| num_iters | int | Sinkhorn-Knopp iteration count (default: 20) |
+
+| Return Value | Shape | Description |
+|---|---|---|
+| x_layer_in | (B, T, C) | Aggregated single-stream feature for Attention/FFN |
+| h_post_raw | (B, T, n) | Distribution weights (unactivated) for Post-Op |
+| H_res | (B, T, n, n) | Doubly stochastic residual mixing matrix for Post-Op |
+
+---
+
+#### `mhc_post_op`
+Distributes the core layer output back to multiple streams using gated weights and updates the stream states via the mixing matrix.
+
+| Parameter | Shape | Description |
+|---|---|---|
+| layer_out | (B, T, C) | Output from the core layer (Attention/FFN) |
+| x_expanded | (B, T, n, C) | Multi-stream state before Pre-Op (residual path data) |
+| h_post_raw | (B, T, n) | Distribution weights from Pre-Op |
+| H_res | (B, T, n, n) | Residual mixing matrix from Pre-Op |
+
+| Return Value | Shape | Description |
+|---|---|---|
+| x_next | (B, T, n, C) | Updated multi-stream features for the next layer |
+
+---
+**Constraint: The channel dimension `C` must be divisible by 128.**
+
+### mHC Implementation Status
+
+| Framework | cuda | triton | native |
+|-----------|------|--------|--------|
+| PyTorch   | ❌   | ✅     | ✅      |
+| JAX       | ❌   | ✅     | ✅      |
+| TensorFlow| ❌   | ❌     | ✅      |
+| NumPy     | ❌   | ❌     | ✅      |
+
+> **Implementation Notes:**
+> 1. **Recommended for Torch**: On A100, `mhc_post_op` is ~3x faster than `torch.compile`, and `mhc_pre_op` is ~8x faster.
+> 2. **Choice for JAX Users**: XLA's native performance is strong. For pure inference throughput, using Native `mhc_pre_op` paired with Triton `mhc_post_op` is suggested. While Triton `mhc_pre_op` is ~2x faster and `mhc_post_op` is ~1.1x faster in single-op tests, XLA can perform deeper fusion across the entire graph. However, the **Triton version is significantly more VRAM-efficient**, making it the preferred choice for training BERT-like or GPT-like deep models.
+> 3. **Consistency**: JAX and Torch share the same Triton logic; performance differences arise from how each backend schedules external kernels (XLA has superior graph-packing, while Torch is currently weaker in this regard).
+
+---
 ## rwkv7op Usage Guide
 
 ```python

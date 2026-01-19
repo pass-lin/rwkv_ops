@@ -39,6 +39,91 @@ bash install.sh
 | `KERNEL_TYPE` | 实现类型 | `triton` / `cuda` / `native` | `cuda` | — |
 
 > 若 `KERNEL_BACKEND` 有值，直接采用；若为空，则用 `KERAS_BACKEND`；两者皆空则默认 `torch`。  
+---
+## mhcop 使用方法
+
+[mHC (Multi-Head Control)](https://arxiv.org/pdf/2512.24880) 是 DeepSeek 实现的一种取代 ResNet 的新残差交互机制。它将传统的单流残差扩展为多流并行，并引入动态聚合与分发。
+
+本仓提供了基于 **Triton** 实现的 Keras 算子。由于这是作者的一个 Triton 练手项目，性能优化尚未达到极限：
+* **JAX 端**：XLA 的融合能力极其恐怖，导致 Triton 的提速并不明显（Native 耗时约 ResNet 的 1.5x，Triton 约 1.27x，DeepSeek 原版约 1.06x）。但在 **显存** 方面，Triton 算子通过手写 VJP 强制重计算，在 `128x1024x4x768` 规模下可比 JAX Native 节省 **3~4GB** 显存。注意这里说的是模型整体。  
+* **Torch 端**：由于 `torch.compile` 对此类复杂逻辑的融合效率远不如 XLA，Triton 算子表现出巨大的优势（Pre-Op 提速可达 8 倍，Post-Op 约 3 倍）。**建议 Torch 用户默认开启。** 注意这里说的是单算子，我懒得测torch的模型整体情况了。  
+
+### 快速开始
+
+```python
+from rwkv_ops import mhc_pre_op, mhc_post_op
+
+# 也可以显式获取指定后端（默认为 triton）
+# mhc_pre_op, mhc_post_op = get_mhc_kernel("triton")
+
+# 在每一层核心逻辑（Attention/FFN）前后的调用示例：
+# 1. 预处理：多流聚合为单流
+x_layer_in, h_post, h_res = mhc_pre_op(
+    x, alpha_pre, alpha_post, alpha_res, phi, 
+    bias_pre, bias_post, bias_res, n=4
+)
+
+# 2. 核心层计算
+x_layer_out = attention(x_layer_in)
+
+# 3. 后处理：分发回多流并进行流混合
+x_next = mhc_post_op(x_layer_out, x, h_post, h_res)
+```
+
+---
+
+### 函数接口说明
+
+#### `mhc_pre_op`
+将多流特征聚合为核心层输入，并生成后续所需的投影系数。
+
+| 参数 | 形状 | 说明 |
+|---|---|---|
+| x | (B, T, n, C) | 多流输入特征 |
+| alpha_pre/post/res | (1,) | 聚合、分发、残差三个分支的缩放标量系数 |
+| phi | (n*C, n*(n+2)) | 动态投影矩阵 |
+| bias_pre/post/res | (M,) | 各分支对应的偏置项 |
+| n | int | 扩展流的数量（Head 数量） |
+| num_iters | int | Sinkhorn-Knopp 迭代次数（默认 20） |
+
+| 返回值 | 形状 | 说明 |
+|---|---|---|
+| x_layer_in | (B, T, C) | 聚合后的单流特征，喂给 Attention/FFN |
+| h_post_raw | (B, T, n) | 分发权重（未激活），用于 Post-Op |
+| H_res | (B, T, n, n) | 双随机残差混合矩阵，用于 Post-Op |
+
+---
+
+#### `mhc_post_op`
+将核心层输出通过门控权重分发回多流，并利用混合矩阵更新流状态。
+
+| 参数 | 形状 | 说明 |
+|---|---|---|
+| layer_out | (B, T, C) | 核心层（Attention/FFN）的输出 |
+| x_expanded | (B, T, n, C) | Pre-Op 之前的多流状态（残差路径数据） |
+| h_post_raw | (B, T, n) | 来自 Pre-Op 的分发权重 |
+| H_res | (B, T, n, n) | 来自 Pre-Op 的残差混合矩阵 |
+
+| 返回值 | 形状 | 说明 |
+|---|---|---|
+| x_next | (B, T, n, C) | 更新后的多流特征，作为下一层的输入 |
+
+---
+**C必须能被128整除**  
+
+### mhcop 实现状态
+
+| Framework | cuda | triton | native |
+|-----------|------|--------|--------|
+| PyTorch   | ❌   | ✅     | ✅      |
+| JAX       | ❌   | ✅     | ✅      |
+| TensorFlow| ❌   | ❌     | ✅      |
+| NumPy     | ❌   | ❌     | ✅      |
+
+> **实现备注：**
+> 1. **Torch 用户建议必开**：在 A100 上，`mhc_post_op` 相比 `torch.compile` 有约 3 倍提速，`mhc_pre_op` 约 8 倍。
+> 2. **JAX 用户按需选择**：XLA 的原生性能很强，如果追求纯推理吞吐量，建议使用native模式的`mhc_pre_op`搭配triton的`mhc_post_op`。因为单算子测试中，`mhc_post_op` 相比 `torch.compile` 有约 1.1 倍提速，`mhc_pre_op` 约 2 倍，但是XLA可以在整个图上做更深度的融合。但 **Triton 版非常省显存**，在 BERT-like 或 GPT-like 深度模型中，所以我们训练建议使用完全的triton实现。 
+> 3. **算子一致性**：JAX 和 Torch 共享同一套 Triton 逻辑，性能差异源于各后端对外部算子的调度开销不同（XLA 打包能力强，Torch 相对较弱）。
 
 ---
 
