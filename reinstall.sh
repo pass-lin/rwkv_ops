@@ -51,7 +51,8 @@ if [[ -d $TORCH_EXT_DIR ]]; then
     echo "==> 删掉 torch 编译缓存：$TORCH_EXT_DIR"
     rm -rf "$TORCH_EXT_DIR"
 fi
-
+#删除cache缓存
+rm -rf ~/.triton/cache/
 ############################
 # 7. 再装一次（真正干净）
 ############################

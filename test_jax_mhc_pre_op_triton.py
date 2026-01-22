@@ -6,7 +6,7 @@ import numpy as np
 from functools import partial
 
 os.environ["KERNEL_TYPE"] = "triton"
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 os.environ["KERAS_BACKEND"] = "jax"
 # 1. 导入你的 JAX-Triton 算子
 # 假设已经按照之前的指南定义并导出
@@ -15,7 +15,7 @@ from rwkv_ops.mhc_kernel.jax_triton_op.mhc_pre_op import (
 )
 from rwkv_ops.mhc_kernel.native_op import mhc_pre_op_fused as native_mhc_pre_op
 
-B, T, n, C = 256, 512, 4, 512
+B, T, n, C = 128, 1024, 4, 512
 dtype = jnp.bfloat16
 
 # JAX 随机数管理

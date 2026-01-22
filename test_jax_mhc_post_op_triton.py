@@ -1,7 +1,7 @@
 import os
 
 # 设置环境变量
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 os.environ["KERAS_BACKEND"] = "jax"
 os.environ["KERNEL_TYPE"] = "triton"
 import time
@@ -15,7 +15,7 @@ from rwkv_ops.mhc_kernel.native_op import mhc_post_op as native_mhc_op
 # ------------------------------------------------------------------
 # 1. 配置参数与构造输入
 # ------------------------------------------------------------------
-B, T, n, C = 256, 256, 4, 512
+B, T, n, C = 128, 1024, 4, 512
 dtype = jnp.bfloat16
 
 # JAX 使用 PRNGKey 管理随机性
