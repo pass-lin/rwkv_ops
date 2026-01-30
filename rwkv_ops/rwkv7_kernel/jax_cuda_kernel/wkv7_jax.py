@@ -79,8 +79,10 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         print("[rwkv7_jax] Compilation finished – output at", _SO_PATH)
         return _SO_PATH
 
-    # 注册 FFI 符号
+    # 注册 FFI 符号（原版 + Mask 版）
     _lib = ctypes.CDLL(_ensure_compiled())
+
+    # 原版
     jax.ffi.register_ffi_target(
         "wkv7_fwd", jax.ffi.pycapsule(_lib.Wkv7Fwd), platform="CUDA"
     )
@@ -91,6 +93,19 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         "wkv7_inference", jax.ffi.pycapsule(_lib.Wkv7Inference), platform="CUDA"
     )
 
+    # Mask 版（新增）
+    jax.ffi.register_ffi_target(
+        "wkv7_fwd_with_mask", jax.ffi.pycapsule(_lib.Wkv7FwdWithMask), platform="CUDA"
+    )
+    jax.ffi.register_ffi_target(
+        "wkv7_bwd_with_mask", jax.ffi.pycapsule(_lib.Wkv7BwdWithMask), platform="CUDA"
+    )
+    jax.ffi.register_ffi_target(
+        "wkv7_inference_with_mask",
+        jax.ffi.pycapsule(_lib.Wkv7InferenceWithMask),
+        platform="CUDA",
+    )
+
     # ---------- 工具 ----------
     def _transpose_head(x: jnp.ndarray, head_first: bool) -> jnp.ndarray:
         """(B, T, H, K) <-> (B, H, T, K)"""
@@ -99,8 +114,7 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
             return jnp.transpose(x, (0, 2, 1, 3))
         return x
 
-    # ---------- 前向 + 反向 kernel ----------
-
+    # ---------- 前向 + 反向 kernel (无 Mask) ----------
     def _wkv7_kernel(
         w: jnp.ndarray,
         q: jnp.ndarray,
@@ -110,11 +124,6 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         b: jnp.ndarray,
         h0: jnp.ndarray,
     ):
-        """
-        内部 kernel 接口
-        参数顺序与 wkv7_ffi.cc 声明完全一致：
-        w,q,k,v,z,a,b  -> y,s,sa
-        """
         B, T, H, K = q.shape
         dtype = q.dtype
         chunk_num = int(T // CHUNK_LEN)
@@ -142,7 +151,6 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         finnal_state = s[:, :, -1]
         return (y, jnp.transpose(finnal_state, [0, 1, 3, 2]))
 
-    # 前向定义
     def _fwd(
         w: jnp.ndarray,
         q: jnp.ndarray,
@@ -173,16 +181,110 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
 
         return dw, dq, dk, dv, da, db, dh0
 
-    # 反向定义
     def _bwd(res, grads):
         w, q, k, v, a, b, s, sa = res
         dy, dht = grads
         dy = jnp.asarray(dy, jnp.bfloat16)
-        # 调用反向 kernel
         return _wkv7_bwd_kernel(w, q, k, v, a, b, dy, s, sa, dht)
 
     wk7_kernel.defvjp(_fwd, _bwd)
 
+    # ---------- 前向 + 反向 kernel (带 Mask，新增) ----------
+    def _wkv7_kernel_with_mask(
+        w: jnp.ndarray,
+        q: jnp.ndarray,
+        k: jnp.ndarray,
+        v: jnp.ndarray,
+        a: jnp.ndarray,
+        b: jnp.ndarray,
+        h0: jnp.ndarray,
+        mask: jnp.ndarray,  # (B, T) float32
+    ):
+        B, T, H, K = q.shape
+        dtype = q.dtype
+        chunk_num = int(T // CHUNK_LEN)
+        out_type = jax.ShapeDtypeStruct((B, T, H, K), dtype)
+        s_type = jax.ShapeDtypeStruct((B, H, chunk_num, K, K), jnp.float32)
+        sa_type = jax.ShapeDtypeStruct((B, T, H, K), jnp.float32)
+
+        y, s, sa = jax.ffi.ffi_call(
+            "wkv7_fwd_with_mask",
+            (out_type, s_type, sa_type),
+            vmap_method="broadcast_all",
+        )(w, q, k, v, a, b, mask, h0)
+
+        return y, s, sa
+
+    @jax.custom_vjp
+    def wk7_kernel_with_mask(
+        w: jnp.ndarray,
+        q: jnp.ndarray,
+        k: jnp.ndarray,
+        v: jnp.ndarray,
+        a: jnp.ndarray,
+        b: jnp.ndarray,
+        h0: jnp.ndarray,
+        mask: jnp.ndarray,
+    ):
+        y, s, sa = _wkv7_kernel_with_mask(w, q, k, v, a, b, h0, mask)
+        finnal_state = s[:, :, -1]
+        return (y, jnp.transpose(finnal_state, [0, 1, 3, 2]))
+
+    def _fwd_with_mask(
+        w: jnp.ndarray,
+        q: jnp.ndarray,
+        k: jnp.ndarray,
+        v: jnp.ndarray,
+        a: jnp.ndarray,
+        b: jnp.ndarray,
+        h0: jnp.ndarray,
+        mask: jnp.ndarray,
+    ):
+        y, s, sa = _wkv7_kernel_with_mask(w, q, k, v, a, b, h0, mask)
+        finnal_state = s[:, :, -1]
+        # 注意：保存 mask 以便反向传播使用
+        return (y, jnp.transpose(finnal_state, [0, 1, 3, 2])), (
+            w,
+            q,
+            k,
+            v,
+            a,
+            b,
+            s,
+            sa,
+            mask,
+        )
+
+    def _wkv7_bwd_kernel_with_mask(w, q, k, v, a, b, mask, dy, s, sa, dht):
+        dh0_type = jax.ShapeDtypeStruct(dht.shape, dht.dtype)
+        dw_type = jax.ShapeDtypeStruct(w.shape, w.dtype)
+        dq_type = jax.ShapeDtypeStruct(q.shape, q.dtype)
+        dk_type = jax.ShapeDtypeStruct(k.shape, k.dtype)
+        dv_type = jax.ShapeDtypeStruct(v.shape, v.dtype)
+        da_type = jax.ShapeDtypeStruct(a.shape, a.dtype)
+        db_type = jax.ShapeDtypeStruct(b.shape, b.dtype)
+
+        dh0, dw, dq, dk, dv, da, db = jax.ffi.ffi_call(
+            "wkv7_bwd_with_mask",
+            (dh0_type, dw_type, dq_type, dk_type, dv_type, da_type, db_type),
+            vmap_method="broadcast_all",
+        )(w, q, k, v, a, b, mask, dy, s, sa, dht)
+
+        return dw, dq, dk, dv, da, db, dh0
+
+    def _bwd_with_mask(res, grads):
+        w, q, k, v, a, b, s, sa, mask = res
+        dy, dht = grads
+        dy = jnp.asarray(dy, jnp.bfloat16)
+        # 返回梯度，mask 不需要梯度（None）
+        dw, dq, dk, dv, da, db, dh0 = _wkv7_bwd_kernel_with_mask(
+            w, q, k, v, a, b, mask, dy, s, sa, dht
+        )
+        return dw, dq, dk, dv, da, db, dh0, None  # 最后一个 None 对应 mask
+
+    wk7_kernel_with_mask.defvjp(_fwd_with_mask, _bwd_with_mask)
+
+    # ---------- 公共 API ----------
     def generalized_delta_rule(
         r: jnp.ndarray,
         w: jnp.ndarray,
@@ -193,6 +295,7 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         initial_state: Optional[jnp.ndarray] = None,
         output_final_state: bool = True,
         head_first: bool = False,
+        mask: Optional[jnp.ndarray] = None,
     ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
         """
         广义 delta 规则，接口与 Torch 实现完全一致
@@ -201,7 +304,7 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
             initial_state: 可选 (B, H, K, K) 初始状态，None 则零初始化
             output_final_state: 是否同时返回最后状态
             head_first: 是否将 head 维提前
-            chunk_len: 必须整除 T，默认 16
+            mask: 可选 (B, T) float32，0 表示冻结状态，1 表示更新状态。None 则使用无 Mask 版本
         返回:
             out: (B, T, H, K)  与输入 dtype 一致
             last_state: (B, H, K, K) 当 output_final_state=True
@@ -227,17 +330,26 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         else:
             h0 = jnp.asarray(initial_state, jnp.float32)
 
-        # 调用 kernel
+        # 根据是否有 Mask 选择 kernel
+        if mask is None:
+            # 无 Mask 版本
+            out, last_state = wk7_kernel(w, r, k, v, a, b, h0)
+        else:
+            # 有 Mask 版本
+            if mask.shape != (B, T):
+                raise ValueError(
+                    f"mask shape must be (B, T) = ({B}, {T}), got {mask.shape}"
+                )
+            mask = jnp.asarray(mask, jnp.float32)
+            out, last_state = wk7_kernel_with_mask(w, r, k, v, a, b, h0, mask)
 
-        out, last_state = jax.checkpoint(
-            wk7_kernel, policy=cp.save_anything_except_these_names(())
-        )(w, r, k, v, a, b, h0)
         out = jnp.asarray(out, dtype)  # 保证输出 dtype 与输入一致
 
         if output_final_state:
             return out, last_state
         return out
 
+    # ---------- 推理 Kernel (无 Mask) ----------
     def _wkv7_inference_kernel(
         w: jnp.ndarray,
         q: jnp.ndarray,
@@ -247,23 +359,40 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         b: jnp.ndarray,
         h0: jnp.ndarray,
     ):
-        """
-        推理专用 kernel，不保存 sa 和中间 s
-        返回: y (B, T, H, K), final_state (B, H, K, K)
-        """
         B, T, H, K = q.shape
         dtype = q.dtype
         out_type = jax.ShapeDtypeStruct((B, T, H, K), dtype)
-        # **关键：仅返回最终状态，非 chunk 历史**
         s_type = jax.ShapeDtypeStruct((B, H, K, K), jnp.float32)
 
         y, s = jax.ffi.ffi_call(
             "wkv7_inference", (out_type, s_type), vmap_method="broadcast_all"
-        )(w, q, k, v, a, b, h0)  # z 参数自动忽略
+        )(w, q, k, v, a, b, h0)
 
         return y, s
 
-    # -------------------- 公共推理 API --------------------
+    # ---------- 推理 Kernel (带 Mask，新增) ----------
+    def _wkv7_inference_kernel_with_mask(
+        w: jnp.ndarray,
+        q: jnp.ndarray,
+        k: jnp.ndarray,
+        v: jnp.ndarray,
+        a: jnp.ndarray,
+        b: jnp.ndarray,
+        h0: jnp.ndarray,
+        mask: jnp.ndarray,
+    ):
+        B, T, H, K = q.shape
+        dtype = q.dtype
+        out_type = jax.ShapeDtypeStruct((B, T, H, K), dtype)
+        s_type = jax.ShapeDtypeStruct((B, H, K, K), jnp.float32)
+
+        y, s = jax.ffi.ffi_call(
+            "wkv7_inference_with_mask", (out_type, s_type), vmap_method="broadcast_all"
+        )(w, q, k, v, a, b, mask, h0)
+
+        return y, s
+
+    # ---------- 公共推理 API ----------
     def generalized_delta_rule_inference(
         r: jnp.ndarray,
         w: jnp.ndarray,
@@ -274,17 +403,12 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         output_final_state: bool = True,
         initial_state: Optional[jnp.ndarray] = None,
         head_first: bool = False,
-    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        mask: Optional[jnp.ndarray] = None,
+    ):
         """
         纯推理版本的广义 delta 规则
-
         参数:
-            r,w,k,v,a,b: 输入张量，形状 (B, T, H, K) 或 (B, H, T, K)
-            initial_state: (B, H, K, K) 初始状态，None 则零初始化
-            head_first: 是否将 head 维提前
-        返回:
-            out: (B, T, H, K) 输出，dtype 与输入一致
-            final_state: (B, H, K, K) 仅最终状态
+            mask: 可选 (B, T) float32，0 冻结状态，1 正常更新。None 使用无 Mask 版本
         """
         dtype = r.dtype
         r = _transpose_head(r, head_first)
@@ -296,16 +420,24 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
 
         B, T, H, K = r.shape
 
-        # 处理初始状态
         if initial_state is None:
             h0 = jnp.zeros((B, H, K, K), jnp.float32)
         else:
             h0 = jnp.asarray(initial_state, jnp.float32)
 
-        # **无需 checkpoint，推理不保存中间值**
-        out, final_state = _wkv7_inference_kernel(w, r, k, v, a, b, h0)
-        out = jnp.asarray(out, dtype)
-        return out, final_state if output_final_state else out
+        if mask is None:
+            out, final_state = _wkv7_inference_kernel(w, r, k, v, a, b, h0)
+        else:
+            if mask.shape != (B, T):
+                raise ValueError(
+                    f"mask shape must be (B, T) = ({B}, {T}), got {mask.shape}"
+                )
+            mask = jnp.asarray(mask, jnp.float32)
+            out, final_state = _wkv7_inference_kernel_with_mask(
+                w, r, k, v, a, b, h0, mask
+            )
 
-    # 返回两个函数，用户按需选择
+        out = jnp.asarray(out, dtype)
+        return (out, final_state) if output_final_state else out
+
     return [generalized_delta_rule, generalized_delta_rule_inference]

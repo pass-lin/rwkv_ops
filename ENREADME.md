@@ -146,6 +146,7 @@ def generalized_delta_rule(
     initial_state=None,
     output_final_state: bool = True,
     head_first: bool = False,
+    mask=None,
 ):
     """
     Chunked Delta-Rule attention interface.
@@ -157,6 +158,7 @@ def generalized_delta_rule(
         a:  [B, T, H, K]
         b:  [B, T, H, K]
         gk: [B, T, H, K]  # decay term in log-space!
+        mask [B,T] decide state update
         initial_state: initial state [N, H, K, V], N = number of sequences
         output_final_state: whether to return the final state
         head_first: whether to use head-first layout (variable length not supported)
@@ -198,20 +200,16 @@ if padding_mask is not None:
 
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
-| PyTorch     | ✅   | ✅     | ✅     |
-| JAX         | ✅   | ✅     | ✅     |
-| TensorFlow  | ⚠️    | ❌     | ✅     |
+| PyTorch     | ✅   | ❌     | ✅     |
+| JAX         | ✅   | ❌     | ✅     |
+| TensorFlow  | ❌    | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
-| MLX         | ⚠️   | ❌     | ❌     |
+| MLX         | ❌   | ❌     | ❌     |
 
 ---
 
 1. `native` = pure-Python / pure-JAX implementation, no chunking, slow and memory-hungry.  
-2. `triton` = chunkwise Triton implementation, fast and highly parallel, but **numerical accuracy is poor—use only if you can tolerate the loss of precision**.  
-3. `cuda` = hand-written CUDA kernel, very fast and internally uses FP32, so accuracy is high. Its weakness is throughput on very long sequences.  
-4. TensorFlow’s CUDA support is forward-only (no gradients). It is actually a thin wrapper around JAX’s CUDA kernel; you must be able to run JAX’s CUDA kernel.  
-5. The TensorFlow kernel works only in eager mode.  
-6. MLX has not yet been merged into Keras, so the native kernel is currently unavailable. A forward-only operator is provided as a stop-gap.
+2. `cuda` = hand-written CUDA kernel, very fast and internally uses FP32, so accuracy is high. Its weakness is throughput on very long sequences.  
 ---
 
 ## Usage of `rwkv7_op_rnn`
@@ -256,13 +254,11 @@ def rwkv7_op_rnn(
 |-------------|------|--------|--------|
 | PyTorch     | ✅   | ❌     | ✅     |
 | JAX         | ✅   | ❌     | ✅     |
-| TensorFlow  | ⚠️    | ❌     | ✅     |
+| TensorFlow  | ❌    | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 
-1. TensorFlow CUDA relies on JAX’s CUDA implementation.
-2. Native implementation reuses `rwkv7_op`’s native code.
-3. **This operator has no gradient support**.
-4. tensorflow kernel only support eager mode
+1. Native implementation reuses `rwkv7_op`’s native code.
+2. **This operator has no gradient support**.
 ---
 
 ## Usage of `rwkv6op`

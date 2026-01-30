@@ -30,6 +30,7 @@ def generalized_delta_rule(
     initial_state=None,
     output_final_state: bool = True,
     head_first: bool = False,
+    mask=None,
 ):
     """
     实现广义delta规则的函数。
@@ -38,6 +39,7 @@ def generalized_delta_rule(
     r: 输入张量。
     w: 权重张量。
     k, v, a, b: 其他输入张量。
+    mask:[B,T],决定这个状态是否被更新,1更新0不更新
     initial_state: 初始状态张量。
     output_final_state: 是否输出最终状态。
     head_first: 是否在计算中将head维度放在第一位。
@@ -67,7 +69,37 @@ def generalized_delta_rule(
 
     keras_backend = keras.config.backend()
 
-    def step(t, inputs):
+    def step_with_mask(t, inputs):
+        """
+        执行单个时间步的计算。
+
+        参数:
+        t: 当前时间步。
+        inputs: 包含当前状态和输出的列表。
+
+        返回:
+        更新后的状态和输出。
+        """
+        state, out = inputs
+        old_state = state
+        kk = ops.reshape(k[:, t, :], (B, H, 1, N))
+        rr = ops.reshape(r[:, t, :], (B, H, N, 1))
+        vv = ops.reshape(v[:, t, :], (B, H, N, 1))
+        aa = ops.reshape(a[:, t, :], (B, H, N, 1))
+        bb = ops.reshape(b[:, t, :], (B, H, 1, N))
+        state = state * w[:, t, :, None, :] + state @ aa @ bb + vv @ kk
+        o = ops.cast((state @ rr), out.dtype)
+        if keras_backend == "tensorflow":
+            out = out.write(t, ops.reshape(o, (B, H, N)))
+        elif keras_backend == "torch":
+            out[:, t : t + 1] = ops.reshape(o, (B, 1, H, N))
+        else:
+            out = ops.slice_update(out, [0, t, 0, 0], ops.reshape(o, (B, 1, H, N)))
+        mask_t = ops.reshape(mask[:, t], [-1, 1, 1, 1])
+        state = state * mask_t + old_state * (1 - mask_t)
+        return [state, out]
+
+    def step_wo_mask(t, inputs):
         """
         执行单个时间步的计算。
 
@@ -94,6 +126,11 @@ def generalized_delta_rule(
             out = ops.slice_update(out, [0, t, 0, 0], ops.reshape(o, (B, 1, H, N)))
         return [state, out]
 
+    if mask is not None:
+        mask = ops.cast(mask, "float32")
+        step = step_with_mask
+    else:
+        step = step_wo_mask
     if keras_backend == "tensorflow":
         import tensorflow as tf
 

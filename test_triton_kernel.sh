@@ -1,4 +1,4 @@
-
-python test_script/test_rwkv7_kernel.py --backend jax --kernel-type triton
-python test_script/test_rwkv7_kernel.py --backend torch --kernel-type triton
-python test_script/test_rwkv7_value.py
+python test_script/test_jax_mhc_post_op_triton.py
+python test_script/test_jax_mhc_pre_op_triton.py
+python test_script/test_torch_mhc_post_op_triton.py
+python test_script/test_torch_mhc_pre_op_triton.py

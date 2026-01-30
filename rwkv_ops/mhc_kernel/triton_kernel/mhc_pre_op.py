@@ -10,10 +10,10 @@ import triton.language as tl
             num_warps=num_warps,
             num_stages=num_stages,
         )
-        for bt_num in [16,32]
+        for bt_num in [16, 32]
         for csize in [128, 256, 512]
         for num_warps in [4, 8]
-        for num_stages in [2, 3,4]
+        for num_stages in [2, 3, 4]
     ],
     key=["CSIZE", "Total_BT_CONST"],
 )

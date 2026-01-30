@@ -143,6 +143,7 @@ def generalized_delta_rule(
     initial_state=None,
     output_final_state: bool = True,
     head_first: bool = False,
+    mask=None,
 ):
     """
     分块 Delta Rule 注意力接口。
@@ -154,6 +155,7 @@ def generalized_delta_rule(
         a:  [B, T, H, K]
         b:  [B, T, H, K]
         gk: [B, T, H, K]  # decay term in log space!
+        mask:[B,T],决定这个状态是否被更新,1更新0不更新
         initial_state: 初始状态 [N, H, K, V]，N 为序列数
         output_final_state: 是否返回最终状态
         head_first: 是否 head-first 格式，不支持变长
@@ -193,19 +195,16 @@ if padding_mask is not None:
 
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
-| PyTorch     | ✅   | ✅     | ✅     |
-| JAX         | ✅   | ✅     | ✅     |
-| TensorFlow  | ⚠️    | ❌     | ✅     |
+| PyTorch     | ✅   | ❌     | ✅     |
+| JAX         | ✅   | ❌     | ✅     |
+| TensorFlow  | ❌    | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
-| MLX       | ⚠️   | ❌     | ❌     |
+
 
 ---
 1. `native` 为原生算子，无 chunkwise，速度慢且显存高。
-2. `triton` 使用的是chunkwise算法实现，速度快，并行度高，缺点是精度很差，介意勿用
-3. `cuda` 为基于 CUDA 的原生算子，速度很快，并且kernel内部使用fp32实现，所以精度也很高。缺点就是长序列的时候比较吃亏跑不满。
-4. tensorflow的CUDA实现只支持前向计算，是没有梯度的。并且这个是使用jax的cuda实现实现的，你需要保证你能够成功运行jax的cuda kernel。
-5. tensorflow kernel只支持eager
-6. 因为MLX还没合并到keras，所以原生算子暂不支持。但是我们提供了一个前向的算子。
+2. `cuda` 为基于 CUDA 的原生算子，速度很快，并且kernel内部使用fp32实现，所以精度也很高。缺点就是长序列的时候比较吃亏跑不满。
+
 ## rwkv7_op_rnn 使用方法
 
 ### 背景
@@ -244,7 +243,7 @@ def rwkv7_op_rnn(
 |-------------|------|--------|--------|
 | PyTorch     | ✅   | ❌     | ✅     |
 | JAX         | ✅   | ❌     | ✅     |
-| TensorFlow  | ⚠️    | ❌     | ✅     |
+| TensorFlow  | ❌    | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 
 1. tf的cuda实现依赖于jax的cuda实现，所以需要安装jax
