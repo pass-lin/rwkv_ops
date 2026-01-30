@@ -197,7 +197,9 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
 
         B, T, H, N = w.shape
         if initial_state is None:
-            initial_state = torch.zeros(B, H, N, N, dtype="float32", device=w.device)
+            initial_state = torch.zeros(
+                B, H, N, N, dtype=torch.float32, device=r.device
+            )
         else:
             initial_state = cast(initial_state, "float32")
 
@@ -283,7 +285,9 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
 
         B, T, H, N = w.shape
         if initial_state is None:
-            initial_state = torch.zeros(B, H, N, N, dtype="float32", device=w.device)
+            initial_state = torch.zeros(
+                B, H, N, N, dtype=torch.float32, device=r.device
+            )
         else:
             initial_state = cast(initial_state, "float32")
 
