@@ -155,7 +155,8 @@ def generalized_delta_rule(
         a:  [B, T, H, K]
         b:  [B, T, H, K]
         gk: [B, T, H, K]  # decay term in log space!
-        mask:[B,T],决定这个状态是否被更新,1更新0不更新
+        mask:[B,T] 决定这个状态是否被更新,1更新0不更新.注意开启这个你的训练速度会慢一倍。
+                   因此我更推荐v*= mask a*=mask ops.where(mask,w,-1e9)的方式来做mask
         initial_state: 初始状态 [N, H, K, V]，N 为序列数
         output_final_state: 是否返回最终状态
         head_first: 是否 head-first 格式，不支持变长
@@ -246,10 +247,8 @@ def rwkv7_op_rnn(
 | TensorFlow  | ❌    | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 
-1. tf的cuda实现依赖于jax的cuda实现，所以需要安装jax
-2. native实现我们直接复用了rwkv7_op的native实现
-3. **这个算子没有梯度**
-4.  tensorflow kernel只支持eager
+1. native实现我们直接复用了rwkv7_op的native实现
+2. **这个算子没有梯度**
 
 ## rwkv6op 使用方法
 
