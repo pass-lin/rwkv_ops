@@ -3,7 +3,7 @@
 #include <xla/ffi/api/ffi.h>
 #include <vector>
 #include <cstdint>
-// ref link:https://github.com/BlinkDL/RWKV-CUDA/tree/main/rwkv7_fast_fused
+// ref link:https://github.com/BlinkDL/RWKV-CUDA/tree/main/rwkv7_fast_fused 
 namespace ffi = xla::ffi;
 
 /* -------------------- 类型别名 -------------------- */
@@ -402,7 +402,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_kernel_with_mask(int T, int H,
                                          F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
-                                         const float* __restrict__ mask_,
+                                         const bf* __restrict__ mask_,  // 【修改】改为 bf16 指针
                                          bf *y_, float *s_, float *sa_, float *h0_) {
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
     float state[C] = {0};
@@ -415,7 +415,7 @@ __global__ void forward_kernel_with_mask(int T, int H,
 
     for (int t = 0; t < T; ++t) {
         int64_t ind = (int64_t)bb * T * H * C + (int64_t)t * H * C + hh * C + i;
-        float m = mask_[bb * T + t];  // 加载 mask
+        float m = to_float(mask_[bb * T + t]);  // 【修改】BF16 加载 + 转换
         float one_minus_m = 1.0f - m;
         
         __syncthreads();
@@ -458,7 +458,7 @@ __global__ void forward_kernel_with_mask(int T, int H,
 template<int C> __launch_bounds__(C, 2)
 __global__ void backward_kernel_with_mask(int T, int H,
                                           F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
-                                          const float* __restrict__ mask_,
+                                          const bf* __restrict__ mask_,  // 【修改】改为 bf16 指针
                                           F_ dy_,
                                           float *s_, float *sa_, float *dht_, float *dh0_,
                                           bf *dw_, bf *dq_, bf *dk_, bf *dv_, bf *da_, bf *db_) {
@@ -477,7 +477,7 @@ __global__ void backward_kernel_with_mask(int T, int H,
 
     for (int t = T - 1; t >= 0; --t) {
         int64_t ind = (int64_t)bb * T * H * C + (int64_t)t * H * C + hh * C + i;
-        float m = mask_[bb * T + t];
+        float m = to_float(mask_[bb * T + t]);  // 【修改】BF16 加载 + 转换
         float one_minus_m = 1.0f - m;
         
         __syncthreads();
@@ -596,7 +596,7 @@ __global__ void backward_kernel_with_mask(int T, int H,
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_inference_kernel_with_mask(int T, int H,
                                                    F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
-                                                   const float* __restrict__ mask_,
+                                                   const bf* __restrict__ mask_,  // 【修改】改为 bf16 指针
                                                    bf *y_, float *s_, float *h0_) {
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
     float state[C] = {0};
@@ -609,7 +609,7 @@ __global__ void forward_inference_kernel_with_mask(int T, int H,
 
     for (int t = 0; t < T; ++t) {
         int64_t ind = (int64_t)bb * T * H * C + (int64_t)t * H * C + hh * C + i;
-        float m = mask_[bb * T + t];
+        float m = to_float(mask_[bb * T + t]);  // 【修改】BF16 加载 + 转换
         float one_minus_m = 1.0f - m;
         
         __syncthreads();
@@ -651,7 +651,7 @@ static ffi::Error WKV7FwdWithMaskHost(
     ffi::Buffer<ffi::BF16> v,
     ffi::Buffer<ffi::BF16> a,
     ffi::Buffer<ffi::BF16> b,
-    ffi::Buffer<ffi::F32>  mask,
+    ffi::Buffer<ffi::BF16> mask,  // 【修改】F32 -> BF16
     ffi::Buffer<ffi::F32>  h0,
     ffi::ResultBuffer<ffi::BF16> y,
     ffi::ResultBuffer<ffi::F32>  s,
@@ -671,7 +671,7 @@ static ffi::Error WKV7FwdWithMaskHost(
         reinterpret_cast<bf *>(v.typed_data()),
         reinterpret_cast<bf *>(a.typed_data()),
         reinterpret_cast<bf *>(b.typed_data()),
-        mask.typed_data(),  // mask 指针
+        reinterpret_cast<bf *>(mask.typed_data()),  // 【修改】类型转换
         reinterpret_cast<bf *>(y->typed_data()),
         s->typed_data(),
         sa->typed_data(),
@@ -692,7 +692,7 @@ static ffi::Error WKV7BwdWithMaskHost(
     ffi::Buffer<ffi::BF16> v,
     ffi::Buffer<ffi::BF16> a,
     ffi::Buffer<ffi::BF16> b,
-    ffi::Buffer<ffi::F32>  mask,
+    ffi::Buffer<ffi::BF16> mask,  // 【修改】F32 -> BF16
     ffi::Buffer<ffi::BF16> dy,
     ffi::Buffer<ffi::F32>  s,
     ffi::Buffer<ffi::F32>  sa,
@@ -719,7 +719,7 @@ static ffi::Error WKV7BwdWithMaskHost(
         reinterpret_cast<bf *>(v.typed_data()),
         reinterpret_cast<bf *>(a.typed_data()),
         reinterpret_cast<bf *>(b.typed_data()),
-        mask.typed_data(),
+        reinterpret_cast<bf *>(mask.typed_data()),  // 【修改】类型转换
         reinterpret_cast<bf *>(dy.typed_data()),
         s.typed_data(),
         sa.typed_data(),
@@ -747,7 +747,7 @@ static ffi::Error WKV7InferenceWithMaskHost(
     ffi::Buffer<ffi::BF16> v,
     ffi::Buffer<ffi::BF16> a,
     ffi::Buffer<ffi::BF16> b,
-    ffi::Buffer<ffi::F32>  mask,
+    ffi::Buffer<ffi::BF16> mask,  // 【修改】F32 -> BF16
     ffi::Buffer<ffi::F32>  h0,
     ffi::ResultBuffer<ffi::BF16> y,
     ffi::ResultBuffer<ffi::F32>  s)
@@ -766,7 +766,7 @@ static ffi::Error WKV7InferenceWithMaskHost(
         reinterpret_cast<bf *>(v.typed_data()),
         reinterpret_cast<bf *>(a.typed_data()),
         reinterpret_cast<bf *>(b.typed_data()),
-        mask.typed_data(),
+        reinterpret_cast<bf *>(mask.typed_data()),  // 【修改】类型转换
         reinterpret_cast<bf *>(y->typed_data()),
         s->typed_data(),
         h0.typed_data());
@@ -789,7 +789,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::BF16>>()   // v
         .Arg<ffi::Buffer<ffi::BF16>>()   // a
         .Arg<ffi::Buffer<ffi::BF16>>()   // b
-        .Arg<ffi::Buffer<ffi::F32>>()    // mask [B,T]
+        .Arg<ffi::Buffer<ffi::BF16>>()   // mask [B,T]  【修改】F32 -> BF16
         .Arg<ffi::Buffer<ffi::F32>>()    // h0
         .Ret<ffi::Buffer<ffi::BF16>>()   // y
         .Ret<ffi::Buffer<ffi::F32>>()    // s
@@ -806,7 +806,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::BF16>>()   // v
         .Arg<ffi::Buffer<ffi::BF16>>()   // a
         .Arg<ffi::Buffer<ffi::BF16>>()   // b
-        .Arg<ffi::Buffer<ffi::F32>>()    // mask
+        .Arg<ffi::Buffer<ffi::BF16>>()   // mask  【修改】F32 -> BF16
         .Arg<ffi::Buffer<ffi::BF16>>()   // dy
         .Arg<ffi::Buffer<ffi::F32>>()    // s
         .Arg<ffi::Buffer<ffi::F32>>()    // sa
@@ -830,7 +830,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::BF16>>()   // v
         .Arg<ffi::Buffer<ffi::BF16>>()   // a
         .Arg<ffi::Buffer<ffi::BF16>>()   // b
-        .Arg<ffi::Buffer<ffi::F32>>()    // mask
+        .Arg<ffi::Buffer<ffi::BF16>>()   // mask  【修改】F32 -> BF16
         .Arg<ffi::Buffer<ffi::F32>>()    // h0
         .Ret<ffi::Buffer<ffi::BF16>>()   // y
         .Ret<ffi::Buffer<ffi::F32>>()    // s

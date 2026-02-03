@@ -186,8 +186,8 @@ __global__ void forward_inference_kernel(int T, int H,
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_kernel_with_mask(int T, int H,
      F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
-     bf* y_, float* s_, float* sa_, float* h0_,
-     const float* __restrict__ mask_) {
+      bf* y_, float* s_, float* sa_, float* h0_,
+      const bf* __restrict__ mask_) {  // 【修改】改为 bf16 指针
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
     float state[C] = {0};
     __shared__ float q[C], k[C], w[C], a[C], b[C];
@@ -198,7 +198,7 @@ __global__ void forward_kernel_with_mask(int T, int H,
     
     for (int t = 0; t < T; t++) {
         int64_t ind = (int64_t)bb*T*H*C + (int64_t)t*H*C + hh * C + i;
-        float m = mask_[bb * T + t];
+        float m = to_float(mask_[bb * T + t]);  // 【修改】BF16 加载 + 转换
 
         __syncthreads();
         q[i] = to_float(q_[ind]);
@@ -235,7 +235,7 @@ __global__ void forward_kernel_with_mask(int T, int H,
 template<int C> __launch_bounds__(C, 2)
 __global__ void backward_kernel_with_mask(int T, int H, 
     F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_, 
-    const float* __restrict__ mask_,
+    const bf* __restrict__ mask_,  // 【修改】改为 bf16 指针
     F_ dy_,
     float * __restrict__ s_, float * __restrict__ sa_,
     float * __restrict__ dht_, float * __restrict__ dh0_,
@@ -258,7 +258,7 @@ __global__ void backward_kernel_with_mask(int T, int H,
     for (int t = T-1; t >= 0; t--) {
         int64_t ind = (int64_t)bb*T*H*C + (int64_t)t*H*C + hh * C + i;
         
-        float m = mask_[bb * T + t];
+        float m = to_float(mask_[bb * T + t]);  // 【修改】BF16 加载 + 转换
         float one_minus_m = 1.0f - m;
         
         __syncthreads();
@@ -314,7 +314,7 @@ __global__ void backward_kernel_with_mask(int T, int H,
             dstateT_old[j] = dstateT[j];
         }
         
-        // 【修复4】逆推S_{t-1}（仅当m=1时需要，m=0时保持现状）
+        // 【修复4】逆推S_{t-1}（仅当m=1时需要，m=0时保持）
         float iwi = 1.0f/(wi + 0.000001f);
         #pragma unroll
         for (int j = 0; j < C; j++) {
@@ -393,7 +393,7 @@ template<int C> __launch_bounds__(C, 2)
 __global__ void forward_inference_kernel_with_mask(int T, int H,
                                          F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
                                          bf *y_, float *s_, float *h0_,
-                                         const float* __restrict__ mask_) {
+                                         const bf* __restrict__ mask_) {  // 【修改】改为 bf16 指针
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
     float state[C] = {0};
     __shared__ float q[C], k[C], w[C], a[C], b[C];
@@ -402,7 +402,7 @@ __global__ void forward_inference_kernel_with_mask(int T, int H,
     for (int j = 0; j < C; ++j) state[j] = h0_[h0_base + j];
     for (int t = 0; t < T; ++t) {
         int64_t ind = (int64_t)bb * T * H * C + (int64_t)t * H * C + hh * C + i;
-        float m = mask_[bb * T + t];
+        float m = to_float(mask_[bb * T + t]);  // 【修改】BF16 加载 + 转换
         __syncthreads();
         q[i] = to_float(q_[ind]);
         w[i] = __expf(-__expf(to_float(w_[ind])));
@@ -448,12 +448,12 @@ void cuda_forward_inference(int B, int T, int H,
 
 // 带 Mask 版本接口（新增）
 void cuda_forward_with_mask(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, bf* a, bf* b,
-                            bf* y, float* s, float* sa, float* h0, float* mask) {
+                            bf* y, float* s, float* sa, float* h0, bf* mask) {  // 【修改】float* -> bf*
     forward_kernel_with_mask<_C_><<<dim3(H,B), dim3(_C_)>>>(T,H,w,q,k,v,a,b,y,s,sa,h0,mask);
 }
 void cuda_backward_with_mask(int B, int T, int H,
                              bf* w, bf* q, bf* k, bf* v, bf* a, bf* b,
-                             float* mask, bf* dy,
+                             bf* mask, bf* dy,  // 【修改】float* -> bf*
                              float* s, float* sa, float* dht, float* dh0,
                              bf* dw, bf* dq, bf* dk, bf* dv, bf* da, bf* db) {
     assert(T%_CHUNK_LEN_ == 0);
@@ -461,6 +461,6 @@ void cuda_backward_with_mask(int B, int T, int H,
 }
 void cuda_forward_inference_with_mask(int B, int T, int H, 
                                       bf* w, bf* q, bf* k, bf* v, bf* a, bf* b, 
-                                      bf* y, float* s, float* h0, float* mask) {
+                                      bf* y, float* s, float* h0, bf* mask) {  // 【修改】float* -> bf*
     forward_inference_kernel_with_mask<_C_><<<dim3(H, B), dim3(_C_)>>>(T, H, w, q, k, v, a, b, y, s, h0, mask);
 }

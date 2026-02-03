@@ -340,7 +340,7 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
                 raise ValueError(
                     f"mask shape must be (B, T) = ({B}, {T}), got {mask.shape}"
                 )
-            mask = jnp.asarray(mask, jnp.float32)
+            mask = jnp.asarray(mask, jnp.bfloat16)
             out, last_state = wk7_kernel_with_mask(w, r, k, v, a, b, h0, mask)
 
         out = jnp.asarray(out, dtype)  # 保证输出 dtype 与输入一致
@@ -432,7 +432,7 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
                 raise ValueError(
                     f"mask shape must be (B, T) = ({B}, {T}), got {mask.shape}"
                 )
-            mask = jnp.asarray(mask, jnp.float32)
+            mask = jnp.asarray(mask, jnp.bfloat16)
             out, final_state = _wkv7_inference_kernel_with_mask(
                 w, r, k, v, a, b, h0, mask
             )

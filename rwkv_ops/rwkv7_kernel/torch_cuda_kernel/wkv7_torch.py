@@ -104,7 +104,7 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
             q, k, v, a, b, w = [
                 cast(x, "bfloat16").contiguous() for x in [q, k, v, a, b, w]
             ]
-            mask = cast(mask, "float32").contiguous()  # mask转fp32
+            mask = cast(mask, "bfloat16").contiguous()  
 
             if T % CHUNK_LEN != 0:
                 raise ValueError("RWKV inputs sequence length must be divisible by 16")
@@ -211,7 +211,7 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
         else:
             # 带mask版本：需要确保mask是float32且在cuda上
             if not mask.is_cuda:
-                mask = mask.to(torch.float32)
+                mask = mask.to(torch.bfloat16)
             out, state = WindBacksteppingWithMask.apply(
                 w, r, k, v, a, b, mask, initial_state
             )
@@ -249,7 +249,7 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
             q, k, v, a, b, w = [
                 cast(x, "bfloat16").contiguous() for x in [q, k, v, a, b, w]
             ]
-            mask = cast(mask, "float32").contiguous()
+            mask = cast(mask, "bfloat16").contiguous()
             y = torch.empty_like(v)
             s = torch.empty(B, H, N, N, dtype=torch.float32, device=w.device)
             torch.ops.wind_backstepping.forward_inference_with_mask(
@@ -295,7 +295,7 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
             out, final_state = Wkv7Inference.apply(w, r, k, v, a, b, initial_state)
         else:
             if not mask.is_cuda:
-                mask = mask.to(torch.float32)
+                mask = mask.to(torch.bfloat16)
             out, final_state = Wkv7InferenceWithMask.apply(
                 w, r, k, v, a, b, mask, initial_state
             )

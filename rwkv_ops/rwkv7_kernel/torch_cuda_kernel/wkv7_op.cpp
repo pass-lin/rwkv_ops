@@ -11,12 +11,12 @@ void cuda_forward_inference(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, bf*
 
 /* ----------- 带 Mask 版本函数声明（新增）----------- */
 void cuda_forward_with_mask(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, bf* a, bf* b,
-                            bf* y, float* s, float* sa, float* h0, float* mask);
+                            bf* y, float* s, float* sa, float* h0, bf* mask);  // 【修改】float* -> bf*
 void cuda_backward_with_mask(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, bf* a, bf* b,
-                             float* mask, bf* dy, float* s, float* sa, float* dht, float* dh0,
+                             bf* mask, bf* dy, float* s, float* sa, float* dht, float* dh0,  // 【修改】float* -> bf*
                              bf* dw, bf* dq, bf* dk, bf* dv, bf* da, bf* db);
 void cuda_forward_inference_with_mask(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, bf* a, bf* b, 
-                                      bf* y, float* s, float* h0, float* mask);
+                                      bf* y, float* s, float* h0, bf* mask);  // 【修改】float* -> bf*
 
 /* ----------- 原版 Wrapper（保持不变）----------- */
 void forward(torch::Tensor &w, torch::Tensor &q, torch::Tensor &k, torch::Tensor &v, 
@@ -59,7 +59,7 @@ void forward_with_mask(torch::Tensor &w, torch::Tensor &q, torch::Tensor &k, tor
         (bf*)w.data_ptr(), (bf*)q.data_ptr(), (bf*)k.data_ptr(), (bf*)v.data_ptr(), 
         (bf*)a.data_ptr(), (bf*)b.data_ptr(), (bf*)y.data_ptr(), 
         (float*)s.data_ptr(), (float*)sa.data_ptr(), (float*)h0.data_ptr(),
-        (float*)mask.data_ptr());
+        (bf*)mask.data_ptr());  // 【修改】float* -> bf*
 }
 
 void backward_with_mask(torch::Tensor &w, torch::Tensor &q, torch::Tensor &k, torch::Tensor &v, 
@@ -72,7 +72,7 @@ void backward_with_mask(torch::Tensor &w, torch::Tensor &q, torch::Tensor &k, to
     cuda_backward_with_mask(B, T, H, 
         (bf*)w.data_ptr(), (bf*)q.data_ptr(), (bf*)k.data_ptr(), (bf*)v.data_ptr(), 
         (bf*)a.data_ptr(), (bf*)b.data_ptr(),
-        (float*)mask.data_ptr(),
+        (bf*)mask.data_ptr(),  // 【修改】float* -> bf*
         (bf*)dy.data_ptr(),
         (float*)s.data_ptr(), (float*)sa.data_ptr(), (float*)dht.data_ptr(), (float*)dh0.data_ptr(),
         (bf*)dw.data_ptr(), (bf*)dq.data_ptr(), (bf*)dk.data_ptr(), 
@@ -88,7 +88,7 @@ void forward_inference_with_mask(torch::Tensor &w, torch::Tensor &q, torch::Tens
         (bf*)a.data_ptr(), (bf*)b.data_ptr(),
         (bf*)y.data_ptr(), 
         (float*)s.data_ptr(), (float*)h0.data_ptr(),
-        (float*)mask.data_ptr());
+        (bf*)mask.data_ptr());  // 【修改】float* -> bf*
 }
 
 /* ----------- 算子注册 ----------- */
