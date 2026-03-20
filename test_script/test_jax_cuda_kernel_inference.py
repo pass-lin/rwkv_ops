@@ -1,11 +1,10 @@
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.environ["KERAS_BACKEND"] = "jax"
 os.environ["KERNEL_TYPE"] = "cuda"
 
 import numpy as np
-import jax
 import jax.numpy as jnp
 from keras import ops
 
@@ -65,7 +64,7 @@ def test_is_close(name, x1, x2, atol=5e-3, rtol=1e-3):
         max_diff = np.abs(x1 - x2).max()
         print(f"✅ {name} 一致 (Max Diff: {max_diff:.6e})")
         return True
-    except AssertionError as e:
+    except AssertionError:
         max_diff = np.abs(x1 - x2).max()
         print(f"❌ {name} 不一致! Max Diff: {max_diff:.6e}")
         return False
@@ -209,7 +208,7 @@ pred_diff = jnp.abs(out_one_mask - cuda_out).max()
 state_diff = jnp.abs(state_one_mask - cuda_state).max()
 
 if pred_diff < 1e-5 and state_diff < 1e-5:
-    print(f"✅ 全 1 Mask 与无 Mask 等价")
+    print("✅ 全 1 Mask 与无 Mask 等价")
 
 else:
     print(f"⚠️ 存在微小差异 (输出: {pred_diff:.2e}, 状态: {state_diff:.2e})")
@@ -229,7 +228,7 @@ state_change = jnp.abs(state_last - h0_m).mean()
 if state_change > 0:
     print(f"✅ 最后一帧更新验证通过 (状态平均变化: {state_change:.4f})")
 else:
-    print(f"⚠️ 状态未变化，可能存在问题")
+    print("⚠️ 状态未变化，可能存在问题")
 
 print("\n" + "=" * 60)
 print("🎉🎉🎉 全部 JAX 推理测试完成 🎉🎉🎉")

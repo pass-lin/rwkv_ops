@@ -9,8 +9,11 @@ import subprocess
 import ctypes
 import jax
 import jax.numpy as jnp
+import jax.tree_util as jtu
 from typing import Optional, Tuple, Union
-from jax.ad_checkpoint import checkpoint_policies as cp
+
+# 引入自定义分区器 (适配 JAX 新版 Shardy 引擎)
+from jax.experimental.custom_partitioning import custom_partitioning
 
 CHUNK_LEN = 16  # 这是一个常数
 # ---------- 延迟编译（改到当前目录） ----------
@@ -18,13 +21,60 @@ _CURRENT_DIR = pathlib.Path(
     __file__
 ).parent.absolute()  # rwkv_ops/rwkv7_kernel/jax_cuda_kernel
 
+# =========================================================================
+# 【核心修复】：为 Shardy 引擎定义的静态 Einsum 切分映射字符串
+# 字母含义: b=Batch, t=Time, h=Head, k=HeadDim1, v=HeadDim2, c=Chunk
+# =========================================================================
+FWD_RULE = "b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b h k v -> b t h k, b h c k v, b t h k"
+BWD_RULE = "b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b h c k v, b t h k, b h k v -> b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b h k v"
+FWD_MASK_RULE = "b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b h k v, b t -> b t h k, b h c k v, b t h k"
+BWD_MASK_RULE = "b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b t, b t h k, b h c k v, b t h k, b h k v -> b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b h k v"
+INF_RULE = (
+    "b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b h k v -> b t h k, b h k v"
+)
+INF_MASK_RULE = "b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b h k v, b t -> b t h k, b h k v"
+
+
+# 保留给老版本 JAX 兼容使用的回调函数
+def _fwd_infer_sharding(arg_shapes, arg_shardings):
+    qs = arg_shardings[1]
+    return (qs, qs, qs)
+
+
+def _bwd_infer_sharding(arg_shapes, arg_shardings):
+    qs = arg_shardings[1]
+    return (qs, qs, qs, qs, qs, qs, qs)
+
+
+def _inf_infer_sharding(arg_shapes, arg_shardings):
+    qs = arg_shardings[1]
+    return (qs, qs)
+
+
+# =========================================================================
+# 【关键修复】：根据 JAX 官方文档提供的标准 Partition 样板函数
+# =========================================================================
+def _create_partition(impl_fn):
+    def partition(mesh, arg_shapes, result_shape):
+        def lower_fn(*args):
+            return impl_fn(*args)
+
+        # 获取最终分配给该算子的 sharding 信息
+        result_shardings = jtu.tree_map(lambda x: x.sharding, result_shape)
+        arg_shardings = jtu.tree_map(lambda x: x.sharding, arg_shapes)
+        return mesh, lower_fn, result_shardings, arg_shardings
+
+    return partition
+
+
+# =========================================================================
+
 
 def get_jax_generalized_delta_rule(HEAD_SIZE=64):
     _BUILD_DIR = _CURRENT_DIR / f"build_{HEAD_SIZE}"
     _SO_PATH = _CURRENT_DIR / f"build_{HEAD_SIZE}/wkv7.so"
 
     def _ensure_compiled() -> pathlib.Path:
-        """首次调用时编译 CUDA 扩展，产出放在当前源码目录"""
         if _SO_PATH.exists():
             return _SO_PATH
 
@@ -33,17 +83,15 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         build_dir = _BUILD_DIR
         build_dir.mkdir(exist_ok=True)
 
-        # ---------- 关键：拿到 JAX 的 XLA 头文件路径 ----------
-        xla_include_dir = jax.ffi.include_dir()  # 方案 3 核心 API
+        xla_include_dir = jax.ffi.include_dir()
         if not xla_include_dir:
             raise RuntimeError("jax.ffi.include_dir() 返回空，请检查 JAX >= 0.4.31")
 
-        # ---------- 关键：把数值稳定性 flag 写死 ----------
         cuda_flags = [
-            "-ftz=true",  # flush sub-normal to zero
-            "-prec-div=false",  # 更快除法，避免特殊路径
-            "-prec-sqrt=false",  # 更快开方
-            "--use_fast_math",  # 统一 fast math
+            "-ftz=true",
+            "-prec-div=false",
+            "-prec-sqrt=false",
+            "--use_fast_math",
             "-O3",
             "-Xptxas=-O3",
             "-res-usage",
@@ -53,7 +101,6 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
             f"-D_CHUNK_LEN_={CHUNK_LEN}",
         ]
 
-        # 1. 配置
         cmake_args = [
             "cmake",
             "-S",
@@ -62,15 +109,11 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
             str(build_dir),
             "-DCMAKE_BUILD_TYPE=Release",
             f"-DCMAKE_INSTALL_PREFIX={_CURRENT_DIR}",
-            f"-DXLA_INCLUDE_DIR={xla_include_dir}",  # 传给 CMake
+            f"-DXLA_INCLUDE_DIR={xla_include_dir}",
             f"-DCMAKE_CUDA_FLAGS={' '.join(cuda_flags)}",
         ]
         subprocess.check_call(cmake_args)
-
-        # 2. 构建
         subprocess.check_call(["cmake", "--build", str(build_dir), "-j"])
-
-        # 3. 安装（把 .so 拷贝到当前目录）
         subprocess.check_call(["cmake", "--install", str(build_dir)])
 
         if not _SO_PATH.exists():
@@ -79,10 +122,8 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         print("[rwkv7_jax] Compilation finished – output at", _SO_PATH)
         return _SO_PATH
 
-    # 注册 FFI 符号（原版 + Mask 版）
     _lib = ctypes.CDLL(_ensure_compiled())
 
-    # 原版
     jax.ffi.register_ffi_target(
         "wkv7_fwd", jax.ffi.pycapsule(_lib.Wkv7Fwd), platform="CUDA"
     )
@@ -93,7 +134,6 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         "wkv7_inference", jax.ffi.pycapsule(_lib.Wkv7Inference), platform="CUDA"
     )
 
-    # Mask 版（新增）
     jax.ffi.register_ffi_target(
         "wkv7_fwd_with_mask", jax.ffi.pycapsule(_lib.Wkv7FwdWithMask), platform="CUDA"
     )
@@ -106,24 +146,16 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         platform="CUDA",
     )
 
-    # ---------- 工具 ----------
     def _transpose_head(x: jnp.ndarray, head_first: bool) -> jnp.ndarray:
-        """(B, T, H, K) <-> (B, H, T, K)"""
         x = jnp.asarray(x, dtype=jnp.bfloat16)
         if head_first:
             return jnp.transpose(x, (0, 2, 1, 3))
         return x
 
-    # ---------- 前向 + 反向 kernel (无 Mask) ----------
-    def _wkv7_kernel(
-        w: jnp.ndarray,
-        q: jnp.ndarray,
-        k: jnp.ndarray,
-        v: jnp.ndarray,
-        a: jnp.ndarray,
-        b: jnp.ndarray,
-        h0: jnp.ndarray,
-    ):
+    # =========================================================================
+    # 前向 + 反向 kernel (无 Mask)
+    # =========================================================================
+    def _wkv7_kernel_impl(w, q, k, v, a, b, h0):
         B, T, H, K = q.shape
         dtype = q.dtype
         chunk_num = int(T // CHUNK_LEN)
@@ -131,11 +163,19 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         s_type = jax.ShapeDtypeStruct((B, H, chunk_num, K, K), jnp.float32)
         sa_type = jax.ShapeDtypeStruct((B, T, H, K), jnp.float32)
 
-        y, s, sa = jax.ffi.ffi_call(
+        return jax.ffi.ffi_call(
             "wkv7_fwd", (out_type, s_type, sa_type), vmap_method="broadcast_all"
         )(w, q, k, v, a, b, h0)
 
-        return y, s, sa
+    @custom_partitioning
+    def _wkv7_kernel(w, q, k, v, a, b, h0):
+        return _wkv7_kernel_impl(w, q, k, v, a, b, h0)
+
+    _wkv7_kernel.def_partition(
+        infer_sharding_from_operands=_fwd_infer_sharding,
+        sharding_rule=FWD_RULE,
+        partition=_create_partition(_wkv7_kernel_impl),
+    )
 
     @jax.custom_vjp
     def wk7_kernel(
@@ -164,7 +204,7 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         finnal_state = s[:, :, -1]
         return (y, jnp.transpose(finnal_state, [0, 1, 3, 2])), (w, q, k, v, a, b, s, sa)
 
-    def _wkv7_bwd_kernel(w, q, k, v, a, b, dy, s, sa, dht):
+    def _wkv7_bwd_kernel_impl(w, q, k, v, a, b, dy, s, sa, dht):
         dh0_type = jax.ShapeDtypeStruct(dht.shape, dht.dtype)
         dw_type = jax.ShapeDtypeStruct(w.shape, w.dtype)
         dq_type = jax.ShapeDtypeStruct(q.shape, q.dtype)
@@ -178,8 +218,17 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
             (dh0_type, dw_type, dq_type, dk_type, dv_type, da_type, db_type),
             vmap_method="broadcast_all",
         )(w, q, k, v, a, b, dy, s, sa, dht)
-
         return dw, dq, dk, dv, da, db, dh0
+
+    @custom_partitioning
+    def _wkv7_bwd_kernel(w, q, k, v, a, b, dy, s, sa, dht):
+        return _wkv7_bwd_kernel_impl(w, q, k, v, a, b, dy, s, sa, dht)
+
+    _wkv7_bwd_kernel.def_partition(
+        infer_sharding_from_operands=_bwd_infer_sharding,
+        sharding_rule=BWD_RULE,
+        partition=_create_partition(_wkv7_bwd_kernel_impl),
+    )
 
     def _bwd(res, grads):
         w, q, k, v, a, b, s, sa = res
@@ -189,17 +238,10 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
 
     wk7_kernel.defvjp(_fwd, _bwd)
 
-    # ---------- 前向 + 反向 kernel (带 Mask，新增) ----------
-    def _wkv7_kernel_with_mask(
-        w: jnp.ndarray,
-        q: jnp.ndarray,
-        k: jnp.ndarray,
-        v: jnp.ndarray,
-        a: jnp.ndarray,
-        b: jnp.ndarray,
-        h0: jnp.ndarray,
-        mask: jnp.ndarray,  # (B, T) float32
-    ):
+    # =========================================================================
+    # 前向 + 反向 kernel (带 Mask)
+    # =========================================================================
+    def _wkv7_kernel_with_mask_impl(w, q, k, v, a, b, h0, mask):
         B, T, H, K = q.shape
         dtype = q.dtype
         chunk_num = int(T // CHUNK_LEN)
@@ -207,13 +249,21 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         s_type = jax.ShapeDtypeStruct((B, H, chunk_num, K, K), jnp.float32)
         sa_type = jax.ShapeDtypeStruct((B, T, H, K), jnp.float32)
 
-        y, s, sa = jax.ffi.ffi_call(
+        return jax.ffi.ffi_call(
             "wkv7_fwd_with_mask",
             (out_type, s_type, sa_type),
             vmap_method="broadcast_all",
         )(w, q, k, v, a, b, mask, h0)
 
-        return y, s, sa
+    @custom_partitioning
+    def _wkv7_kernel_with_mask(w, q, k, v, a, b, h0, mask):
+        return _wkv7_kernel_with_mask_impl(w, q, k, v, a, b, h0, mask)
+
+    _wkv7_kernel_with_mask.def_partition(
+        infer_sharding_from_operands=_fwd_infer_sharding,
+        sharding_rule=FWD_MASK_RULE,
+        partition=_create_partition(_wkv7_kernel_with_mask_impl),
+    )
 
     @jax.custom_vjp
     def wk7_kernel_with_mask(
@@ -242,7 +292,6 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
     ):
         y, s, sa = _wkv7_kernel_with_mask(w, q, k, v, a, b, h0, mask)
         finnal_state = s[:, :, -1]
-        # 注意：保存 mask 以便反向传播使用
         return (y, jnp.transpose(finnal_state, [0, 1, 3, 2])), (
             w,
             q,
@@ -255,7 +304,7 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
             mask,
         )
 
-    def _wkv7_bwd_kernel_with_mask(w, q, k, v, a, b, mask, dy, s, sa, dht):
+    def _wkv7_bwd_kernel_with_mask_impl(w, q, k, v, a, b, mask, dy, s, sa, dht):
         dh0_type = jax.ShapeDtypeStruct(dht.shape, dht.dtype)
         dw_type = jax.ShapeDtypeStruct(w.shape, w.dtype)
         dq_type = jax.ShapeDtypeStruct(q.shape, q.dtype)
@@ -269,18 +318,26 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
             (dh0_type, dw_type, dq_type, dk_type, dv_type, da_type, db_type),
             vmap_method="broadcast_all",
         )(w, q, k, v, a, b, mask, dy, s, sa, dht)
-
         return dw, dq, dk, dv, da, db, dh0
+
+    @custom_partitioning
+    def _wkv7_bwd_kernel_with_mask(w, q, k, v, a, b, mask, dy, s, sa, dht):
+        return _wkv7_bwd_kernel_with_mask_impl(w, q, k, v, a, b, mask, dy, s, sa, dht)
+
+    _wkv7_bwd_kernel_with_mask.def_partition(
+        infer_sharding_from_operands=_bwd_infer_sharding,
+        sharding_rule=BWD_MASK_RULE,
+        partition=_create_partition(_wkv7_bwd_kernel_with_mask_impl),
+    )
 
     def _bwd_with_mask(res, grads):
         w, q, k, v, a, b, s, sa, mask = res
         dy, dht = grads
         dy = jnp.asarray(dy, jnp.bfloat16)
-        # 返回梯度，mask 不需要梯度（None）
         dw, dq, dk, dv, da, db, dh0 = _wkv7_bwd_kernel_with_mask(
             w, q, k, v, a, b, mask, dy, s, sa, dht
         )
-        return dw, dq, dk, dv, da, db, dh0, None  # 最后一个 None 对应 mask
+        return dw, dq, dk, dv, da, db, dh0, None
 
     wk7_kernel_with_mask.defvjp(_fwd_with_mask, _bwd_with_mask)
 
@@ -297,19 +354,7 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         head_first: bool = False,
         mask: Optional[jnp.ndarray] = None,
     ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
-        """
-        广义 delta 规则，接口与 Torch 实现完全一致
-        参数:
-            r,w,k,v,a,b: 输入张量，形状 (B, T, H, K) 或 (B, H, T, K) 当 head_first=True
-            initial_state: 可选 (B, H, K, K) 初始状态，None 则零初始化
-            output_final_state: 是否同时返回最后状态
-            head_first: 是否将 head 维提前
-            mask: 可选 (B, T) float32，0 表示冻结状态，1 表示更新状态。None 则使用无 Mask 版本
-        返回:
-            out: (B, T, H, K)  与输入 dtype 一致
-            last_state: (B, H, K, K) 当 output_final_state=True
-        """
-        # 统一转 (B, T, H, K)
+
         dtype = r.dtype
         r = _transpose_head(r, head_first)
         w = _transpose_head(w, head_first)
@@ -324,18 +369,14 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
                 f"Sequence length T={T} must be divisible by chunk_len={CHUNK_LEN}"
             )
 
-        # 处理初始状态
         if initial_state is None:
             h0 = jnp.zeros((B, H, K, K), jnp.float32)
         else:
             h0 = jnp.asarray(initial_state, jnp.float32)
 
-        # 根据是否有 Mask 选择 kernel
         if mask is None:
-            # 无 Mask 版本
             out, last_state = wk7_kernel(w, r, k, v, a, b, h0)
         else:
-            # 有 Mask 版本
             if mask.shape != (B, T):
                 raise ValueError(
                     f"mask shape must be (B, T) = ({B}, {T}), got {mask.shape}"
@@ -343,22 +384,16 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
             mask = jnp.asarray(mask, jnp.bfloat16)
             out, last_state = wk7_kernel_with_mask(w, r, k, v, a, b, h0, mask)
 
-        out = jnp.asarray(out, dtype)  # 保证输出 dtype 与输入一致
+        out = jnp.asarray(out, dtype)
 
         if output_final_state:
             return out, last_state
         return out
 
-    # ---------- 推理 Kernel (无 Mask) ----------
-    def _wkv7_inference_kernel(
-        w: jnp.ndarray,
-        q: jnp.ndarray,
-        k: jnp.ndarray,
-        v: jnp.ndarray,
-        a: jnp.ndarray,
-        b: jnp.ndarray,
-        h0: jnp.ndarray,
-    ):
+    # =========================================================================
+    # 推理 Kernel (无 Mask)
+    # =========================================================================
+    def _wkv7_inference_kernel_impl(w, q, k, v, a, b, h0):
         B, T, H, K = q.shape
         dtype = q.dtype
         out_type = jax.ShapeDtypeStruct((B, T, H, K), dtype)
@@ -367,20 +402,22 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         y, s = jax.ffi.ffi_call(
             "wkv7_inference", (out_type, s_type), vmap_method="broadcast_all"
         )(w, q, k, v, a, b, h0)
-
         return y, s
 
-    # ---------- 推理 Kernel (带 Mask，新增) ----------
-    def _wkv7_inference_kernel_with_mask(
-        w: jnp.ndarray,
-        q: jnp.ndarray,
-        k: jnp.ndarray,
-        v: jnp.ndarray,
-        a: jnp.ndarray,
-        b: jnp.ndarray,
-        h0: jnp.ndarray,
-        mask: jnp.ndarray,
-    ):
+    @custom_partitioning
+    def _wkv7_inference_kernel(w, q, k, v, a, b, h0):
+        return _wkv7_inference_kernel_impl(w, q, k, v, a, b, h0)
+
+    _wkv7_inference_kernel.def_partition(
+        infer_sharding_from_operands=_inf_infer_sharding,
+        sharding_rule=INF_RULE,
+        partition=_create_partition(_wkv7_inference_kernel_impl),
+    )
+
+    # =========================================================================
+    # 推理 Kernel (带 Mask)
+    # =========================================================================
+    def _wkv7_inference_kernel_with_mask_impl(w, q, k, v, a, b, h0, mask):
         B, T, H, K = q.shape
         dtype = q.dtype
         out_type = jax.ShapeDtypeStruct((B, T, H, K), dtype)
@@ -389,8 +426,17 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         y, s = jax.ffi.ffi_call(
             "wkv7_inference_with_mask", (out_type, s_type), vmap_method="broadcast_all"
         )(w, q, k, v, a, b, mask, h0)
-
         return y, s
+
+    @custom_partitioning
+    def _wkv7_inference_kernel_with_mask(w, q, k, v, a, b, h0, mask):
+        return _wkv7_inference_kernel_with_mask_impl(w, q, k, v, a, b, h0, mask)
+
+    _wkv7_inference_kernel_with_mask.def_partition(
+        infer_sharding_from_operands=_inf_infer_sharding,
+        sharding_rule=INF_MASK_RULE,
+        partition=_create_partition(_wkv7_inference_kernel_with_mask_impl),
+    )
 
     # ---------- 公共推理 API ----------
     def generalized_delta_rule_inference(
@@ -405,11 +451,6 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         head_first: bool = False,
         mask: Optional[jnp.ndarray] = None,
     ):
-        """
-        纯推理版本的广义 delta 规则
-        参数:
-            mask: 可选 (B, T) float32，0 冻结状态，1 正常更新。None 使用无 Mask 版本
-        """
         dtype = r.dtype
         r = _transpose_head(r, head_first)
         w = _transpose_head(w, head_first)

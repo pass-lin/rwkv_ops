@@ -187,7 +187,7 @@ pred_diff = (out_one - cuda_out).abs().max().item()
 state_diff = (state_one - cuda_state).abs().max().item()
 
 if pred_diff < 1e-5 and state_diff < 1e-5:
-    print(f"✅ 全 1 Mask 与无 Mask 等价")
+    print("✅ 全 1 Mask 与无 Mask 等价")
     print(f"   输出差异: {pred_diff:.2e}, 状态差异: {state_diff:.2e}")
 else:
     print(f"⚠️ 存在微小差异 (输出: {pred_diff:.2e}, 状态: {state_diff:.2e})")

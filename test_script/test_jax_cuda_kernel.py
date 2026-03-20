@@ -1,14 +1,154 @@
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.environ["KERAS_BACKEND"] = "jax"
 os.environ["KERNEL_TYPE"] = "cuda"
 
 import numpy as np
-import jax
 import jax.numpy as jnp
 from keras import ops
 from jax import grad
+
+# ------------------------------------------------------------------
+# 1. 构造输入
+# ------------------------------------------------------------------
+T = 128  # 减小 T 以便更快测试，如需大 T 可改回 512
+B = 5
+H = 6
+K = 64
+inputs = [np.random.randn(B, H, T, K) for _ in range(30)]
+jax_inputs = [jnp.asarray(t, "bfloat16") for t in inputs]
+
+
+def normalize(z, p=2, dim=-1, eps: float = 1e-12):
+    # F.normalize like api
+    denom = ops.norm(z, ord=p, axis=dim, keepdims=True)
+    denom = ops.maximum(denom, eps)
+    return z / denom
+
+
+a = -normalize(jax_inputs[3], dim=-1, p=2.0)
+b = normalize(jax_inputs[3], dim=-1, p=2.0)
+
+w = jax_inputs[4]  # decay / gate
+r = jax_inputs[0]  # receptance
+k = jax_inputs[1]
+v = jax_inputs[2]
+w = -ops.softplus(w) - 0.5
+h0 = jnp.asarray(np.random.randn(B, H, K, K), "float32")
+
+
+# ------------------------------------------------------------------
+# 2. 辅助函数
+# ------------------------------------------------------------------
+def test_is_close(name, x1, x2, atol=1e-2, rtol=1e-3):
+    x1 = ops.convert_to_numpy(ops.cast(x1, "float32"))
+    x2 = ops.convert_to_numpy(ops.cast(x2, "float32"))
+
+    # NaN 检查
+    if np.sum(np.isnan(x1)) == 0 and np.sum(np.isnan(x2)) == 0:
+        print(f"✅ {name} 无 NaN")
+    else:
+        print(f"❌ {name} 存在 NaN!")
+        print(f"   x1 NaN 数量: {np.sum(np.isnan(x1))}")
+        print(f"   x2 NaN 数量: {np.sum(np.isnan(x2))}")
+        return False
+
+    # 完全一致检查（快速路径）
+    if np.allclose(x1, x2, atol=1e-6):
+        print(f"✅ {name} 数值完全一致")
+        return True
+
+    # 阈值检查
+    try:
+        np.testing.assert_allclose(x1, x2, atol=atol, rtol=rtol)
+        max_diff = np.abs(x1 - x2).max()
+        print(f"✅ {name} 一致 (Max Diff: {max_diff:.6e})")
+        return True
+    except AssertionError:
+        max_diff = np.abs(x1 - x2).max()
+        print(f"❌ {name} 不一致! Max Diff: {max_diff:.6e}")
+        return False
+
+
+# 定义损失函数
+def loss_fn(y, state):
+    return jnp.abs((y**2).mean().astype("float32") - (state**2).mean())
+
+
+# ------------------------------------------------------------------
+# 3. 导入模块
+# ------------------------------------------------------------------
+from rwkv_ops import rwkv7_op
+from rwkv_ops.rwkv7_kernel.native_keras_op import generalized_delta_rule
+
+print("=" * 60)
+print("无 Mask 版本测试")
+print("=" * 60)
+
+# ------------------------------------------------------------------
+# 3.1 无 Mask 前向测试
+# ------------------------------------------------------------------
+cuda_out, cuda_state = rwkv7_op(
+    r=r, k=k, v=v, a=a, b=b, w=w, initial_state=h0, head_first=True
+)
+
+# Native 版本（detach 副本）
+r_n = ops.copy(r)
+k_n = ops.copy(k)
+v_n = ops.copy(v)
+a_n = ops.copy(a)
+b_n = ops.copy(b)
+w_n = ops.copy(w)
+h0_n = ops.copy(h0)
+
+native_out, native_state = generalized_delta_rule(
+    r=r_n, k=k_n, v=v_n, a=a_n, b=b_n, w=w_n, initial_state=h0_n, head_first=True
+)
+
+test_is_close("fwd_pred", native_out, cuda_out, atol=1e-5, rtol=1e-2)
+test_is_close("fwd_state", native_state, cuda_state, atol=1e-5, rtol=1e-3)
+print("前向测试完毕")
+
+# ------------------------------------------------------------------
+# 3.2 无 Mask 反向测试
+# ------------------------------------------------------------------
+print("\n--- 无 Mask 反向传播测试 ---")
+
+
+def cuda_loss_fn(w, r, k, v, a, b, h0):
+    y, state = rwkv7_op(
+        r=r,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        w=w,
+        initial_state=h0,
+        output_final_state=True,
+        head_first=True,
+    )
+    return loss_fn(y, state)
+
+
+def native_loss_fn(w, r, k, v, a, b, h0):
+    y, state = generalized_delta_rule(
+        r=r, k=k, v=v, a=a, b=b, w=w, initial_state=h0, head_first=True
+    )
+    return loss_fn(y, state)
+
+
+cuda_grad_fn = grad(cuda_loss_fn, argnums=range(7))
+native_grad_fn = grad(native_loss_fn, argnums=range(7))
+
+cuda_grads = cuda_grad_fn(w, r, k, v, a, b, h0)
+native_grads = native_grad_fn(w_n, r_n, k_n, v_n, a_n, b_n, h0_n)
+
+grad_names = ["w", "r", "k", "v", "a", "b", "h0"]
+print("\n梯度比较结果:")
+for i, name in enumerate(grad_names):
+    test_is_close(f"grad_{name}", native_grads[i], cuda_grads[i], atol=7e-3)
+print("测试非连续和head_frist的情况完成")
 
 # ------------------------------------------------------------------
 # 1. 构造输入
@@ -66,7 +206,7 @@ def test_is_close(name, x1, x2, atol=1e-2, rtol=1e-3):
         max_diff = np.abs(x1 - x2).max()
         print(f"✅ {name} 一致 (Max Diff: {max_diff:.6e})")
         return True
-    except AssertionError as e:
+    except AssertionError:
         max_diff = np.abs(x1 - x2).max()
         print(f"❌ {name} 不一致! Max Diff: {max_diff:.6e}")
         return False
@@ -288,7 +428,7 @@ pred_diff = jnp.abs(out_one_mask - cuda_out).max()
 state_diff = jnp.abs(state_one_mask - cuda_state).max()
 
 if pred_diff < 1e-5 and state_diff < 1e-5:
-    print(f"✅ 全 1 Mask 与无 Mask 等价")
+    print("✅ 全 1 Mask 与无 Mask 等价")
 else:
     print(f"⚠️ 存在微小差异 (输出: {pred_diff:.2e}, 状态: {state_diff:.2e})")
 

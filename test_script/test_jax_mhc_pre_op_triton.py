@@ -6,7 +6,7 @@ import numpy as np
 from functools import partial
 
 os.environ["KERNEL_TYPE"] = "triton"
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.environ["KERAS_BACKEND"] = "jax"
 # 1. 导入你的 JAX-Triton 算子
 # 假设已经按照之前的指南定义并导出
@@ -51,14 +51,14 @@ def test_is_close(name, x1, x2, atol=1e-2, rtol=1e-2):
     print(f"  {equal_rate:.2f}% 的数据在 1e-6 误差内一致")
 
     if np.isnan(x1_np).any() or np.isnan(x2_np).any():
-        print(f"  ❌❌ 存在 NaN ❌❌")
+        print("  ❌❌ 存在 NaN ❌❌")
         return
 
     try:
         np.testing.assert_allclose(x1_np, x2_np, atol=atol, rtol=rtol)
         print(f"  ✅ 数值一致 (max_diff: {error.max():.6e})")
-    except AssertionError as e:
-        print(f"  ❌ 数值不一致")
+    except AssertionError:
+        print("  ❌ 数值不一致")
 
 
 print("--- 开始数值正确性校验 ---")

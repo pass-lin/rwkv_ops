@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+
+# Ruff 缓存
+.ruff_cache/
+
+# 虚拟环境
+venv/
+env/
+.env/
+
+# CMake 构建产物
+build/
+cmake-build-*/
+*.so
+*.o
+*.obj
+*.a
+*.lib
+*.exe
+*.out
+
+# IDE
+.vscode/
+.idea/
+
+# 本地配置文件
+config.local.py

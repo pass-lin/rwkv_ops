@@ -1,6 +1,5 @@
 import torch
 import triton
-import triton.language as tl
 
 # 假设你的 kernel 代码保存在这个路径
 from ..triton_kernel.mhc_pre_op import *

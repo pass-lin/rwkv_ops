@@ -48,7 +48,7 @@ def generalized_delta_rule(
     根据output_final_state参数决定是否返回最终状态。
     """
     DTYPE = r.dtype
-    B, T, H, N = ops.shape(r)
+
     r = transpose_head(r, head_first)
 
     k = transpose_head(k, head_first)
@@ -58,7 +58,7 @@ def generalized_delta_rule(
     b = transpose_head(b, head_first)
     w = transpose_head(w, head_first)
     w = ops.exp(-ops.exp(w))
-
+    B, T, H, N = ops.shape(r)
     if initial_state is not None:
         state = initial_state
         if ops.shape(state)[0] == 1:

@@ -3,6 +3,61 @@ import jax
 import jax.numpy as jnp
 import jax_triton as jt
 from functools import partial
+import jax.tree_util as jtu
+
+# 引入自定义分区器和切分规则 (适配 JAX 新版 Shardy 引擎)
+from jax.experimental.custom_partitioning import custom_partitioning
+
+# =========================================================================
+# 【核心配置】：为 Shardy 引擎定义的静态 Einsum 切分映射字符串
+# 字母含义: b=Batch, t=Time, n=NSize1, m=NSize2, c=Channel
+# =========================================================================
+BATCH_AXIS_NAME = "data"
+
+# FWD_RULE 含义:
+# 输入1(x):        b t n c
+# 输入2(h_res_in): b t n m
+# 输入3(h_pre_in): b t n
+# 输出1(out):      b t c
+# 输出2(H_res_out):b t n m
+FWD_RULE = "b t n c, b t n m, b t n -> b t c, b t n m"
+
+# BWD_RULE 含义:
+# 输入1-3同上
+# 输入4(g_out):    b t c
+# 输入5(g_H_res):  b t n m
+# 输出1(gx):       b t n c
+# 输出2(gh_res):   b t n m
+# 输出3(gh_pre):   b t n
+BWD_RULE = "b t n c, b t n m, b t n, b t c, b t n m -> b t n c, b t n m, b t n"
+
+
+# 兼容老版本的推导函数 (接收末尾传来的静态参数 *static_args)
+def _fwd_infer_sharding(arg_shapes, arg_shardings, *static_args):
+    qs = arg_shardings[0]
+    return (qs, qs)
+
+
+def _bwd_infer_sharding(arg_shapes, arg_shardings, *static_args):
+    qs = arg_shardings[0]
+    return (qs, qs, qs)
+
+
+# JAX 官方标准的 partition 回调生成器 (接收末尾传来的静态参数 *static_args)
+def _create_partition(impl_fn):
+    def partition(mesh, arg_shapes, result_shape, *static_args):
+        def lower_fn(*args):
+            # 将动态 args 和 静态 static_args 拼在一起传给底层
+            return impl_fn(*args, *static_args)
+
+        result_shardings = jtu.tree_map(lambda x: x.sharding, result_shape)
+        arg_shardings = jtu.tree_map(lambda x: x.sharding, arg_shapes)
+        return mesh, lower_fn, result_shardings, arg_shardings
+
+    return partition
+
+
+# =========================================================================
 
 
 # --- 1. 前向 Launcher ---
@@ -20,7 +75,7 @@ def mhc_pre_op_fwd_kernel_call(x, h_res_in, h_pre_in, num_iters, eps):
     shr_bt, shr_n1, shr_n2 = jt.strides_from_shape(h_res_v.shape)
     shp_bt, shp_n = jt.strides_from_shape(h_pre_v.shape)
 
-    # 准备输出结构 (注意：out 是 BF16, H_res_out 是 FP32)
+    # 准备输出结构 (注意：out 是 BF16/FP16等, H_res_out 是 FP32)
     out_shapes = [
         jax.ShapeDtypeStruct((total_bt, C), x.dtype),  # out_ptr
         jax.ShapeDtypeStruct((total_bt, n, n), jnp.float32),  # H_res_out_ptr
@@ -30,13 +85,13 @@ def mhc_pre_op_fwd_kernel_call(x, h_res_in, h_pre_in, num_iters, eps):
     so_bt, so_c = jt.strides_from_shape(out_shapes[0].shape)
     sHr_bt, sHr_n1, sHr_n2 = jt.strides_from_shape(out_shapes[1].shape)
 
-    # 定义 Grid (匹配你代码里的 lambda)
+    # 定义 Grid
     grid = lambda meta: (
         jt.cdiv(total_bt, meta["BLOCK_BT"]),
         jt.cdiv(C, meta["BLOCK_C"]),
     )
 
-    # 调用 Triton: 这里的关键字参数必须与你 Forward Kernel 的参数名完全一致
+    # 调用 Triton
     out_v, H_res_out_v = jt.triton_call(
         x_v,
         h_res_v,
@@ -44,7 +99,7 @@ def mhc_pre_op_fwd_kernel_call(x, h_res_in, h_pre_in, num_iters, eps):
         kernel=sinkhorn_aggregate_fused_kernel,
         out_shape=out_shapes,  # 产生指针参数 4, 5
         grid=grid,
-        # --- 标量参数: 必须匹配前向 Kernel 的定义 ---
+        # --- 标量参数 ---
         Total_BT_CONST=total_bt,
         NSIZE=n,
         CSIZE=C,
@@ -66,6 +121,24 @@ def mhc_pre_op_fwd_kernel_call(x, h_res_in, h_pre_in, num_iters, eps):
     )
 
     return out_v.reshape(B, T, C), H_res_out_v.reshape(B, T, n, n)
+
+
+# =========================================================================
+# 【新增】：包装前向算子 (适配 SPMD 并行，修复调用方式)
+# =========================================================================
+def _mhc_pre_op_fwd_spmd_impl(x, h_res_in, h_pre_in, num_iters, eps):
+    return mhc_pre_op_fwd_kernel_call(x, h_res_in, h_pre_in, num_iters, eps)
+
+
+mhc_pre_op_fwd_spmd = custom_partitioning(
+    _mhc_pre_op_fwd_spmd_impl, static_argnums=(3, 4)
+)
+
+mhc_pre_op_fwd_spmd.def_partition(
+    infer_sharding_from_operands=_fwd_infer_sharding,
+    sharding_rule=FWD_RULE,
+    partition=_create_partition(mhc_pre_op_fwd_kernel_call),
+)
 
 
 # --- 2. 反向 Launcher ---
@@ -99,7 +172,7 @@ def mhc_pre_op_bwd_kernel_call(x, h_res, h_pre, grad_out, grad_H_res, num_iters,
     sghr_bt, sghr_n1, sghr_n2 = sh_bt, sh_n1, sh_n2
     sghp_bt, sghp_n = shp_bt, shp_n
 
-    # 调用 Triton: 这里的关键字参数必须与你 Backward Kernel 的参数名完全一致
+    # 调用 Triton
     gx_v, gh_res_v, gh_pre_v = jt.triton_call(
         g_out_v,
         g_H_v,
@@ -109,7 +182,7 @@ def mhc_pre_op_bwd_kernel_call(x, h_res, h_pre, grad_out, grad_H_res, num_iters,
         kernel=sinkhorn_aggregate_bwd_kernel,
         out_shape=out_shapes,  # 产生输出指针 6, 7, 8
         grid=(total_bt, 1),
-        # --- 标量参数: 必须匹配反向 Kernel 的定义 ---
+        # --- 标量参数 ---
         TOTAL_BT_CONST=total_bt,
         NSIZE=n,
         CHANNEL_SIZE=C,
@@ -145,6 +218,26 @@ def mhc_pre_op_bwd_kernel_call(x, h_res, h_pre, grad_out, grad_H_res, num_iters,
     )
 
 
+# =========================================================================
+# 【新增】：包装反向算子 (适配 SPMD 并行，修复调用方式)
+# =========================================================================
+def _mhc_pre_op_bwd_spmd_impl(x, h_res, h_pre, grad_out, grad_H_res, num_iters, eps):
+    return mhc_pre_op_bwd_kernel_call(
+        x, h_res, h_pre, grad_out, grad_H_res, num_iters, eps
+    )
+
+
+mhc_pre_op_bwd_spmd = custom_partitioning(
+    _mhc_pre_op_bwd_spmd_impl, static_argnums=(5, 6)
+)
+
+mhc_pre_op_bwd_spmd.def_partition(
+    infer_sharding_from_operands=_bwd_infer_sharding,
+    sharding_rule=BWD_RULE,
+    partition=_create_partition(mhc_pre_op_bwd_kernel_call),
+)
+
+
 # --- 3. JAX 接口绑定 (解决 Tracer Leak) ---
 
 
@@ -156,7 +249,8 @@ def mhc_pre_op_fused(x, h_res_in, h_pre_in, num_iters=20, eps=1e-8):
 
     @jax.custom_vjp
     def _internal_op(x_arr, hr_arr, hp_arr):
-        return mhc_pre_op_fwd_kernel_call(x_arr, hr_arr, hp_arr, num_iters, eps)
+        # 【修改】：调用切分规则封装后的 FWD
+        return mhc_pre_op_fwd_spmd(x_arr, hr_arr, hp_arr, num_iters, eps)
 
     def _internal_fwd(x_arr, hr_arr, hp_arr):
         out_tuple = _internal_op(x_arr, hr_arr, hp_arr)
@@ -173,7 +267,8 @@ def mhc_pre_op_fused(x, h_res_in, h_pre_in, num_iters=20, eps=1e-8):
         if grad_H_res is None:
             grad_H_res = jnp.zeros_like(hr_arr)
 
-        gx, ghr, ghp = mhc_pre_op_bwd_kernel_call(
+        # 【修改】：调用切分规则封装后的 BWD
+        gx, ghr, ghp = mhc_pre_op_bwd_spmd(
             x_arr, hr_arr, hp_arr, grad_out, grad_H_res, num_iters, eps
         )
         return gx, ghr, ghp

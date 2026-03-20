@@ -82,9 +82,9 @@ def get_jax_generalized_delta_rule_single_step(HEAD_SIZE=64):
     # ---------- 工具 ----------
     def _transpose_head(x: jnp.ndarray, head_first: bool) -> jnp.ndarray:
         """(B, 1, H, K) <-> (B, H, 1, K)"""
-        x = jnp.asarray(x, dtype=jnp.bfloat16)
         if head_first:
             return jnp.transpose(x, (0, 2, 1, 3))
+        x = jnp.asarray(x, dtype=jnp.bfloat16)
         return x
 
     # ---------- 前向 kernel ----------

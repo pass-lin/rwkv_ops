@@ -1,16 +1,70 @@
+from ..triton_kernel.mhc_post_op import *
 import jax
 import jax.numpy as jnp
 import jax_triton as jt
-from ..triton_kernel.mhc_post_op import *
+import jax.tree_util as jtu
+
+# 引入自定义分区器和切分规则 (适配 JAX 新版 Shardy 引擎)
+from jax.experimental.custom_partitioning import custom_partitioning
+
+# =========================================================================
+# 【核心配置】：为 Shardy 引擎定义的静态 Einsum 切分映射字符串
+# 字母含义: b=Batch, t=Time, c=Channel, n=NSize1, m=NSize2
+# =========================================================================
+BATCH_AXIS_NAME = "data"
+
+# FWD_RULE 含义:
+# 输入1(layer_out):  b t c
+# 输入2(x_expanded): b t n c
+# 输入3(h_post_raw): b t n
+# 输入4(H_res):      b t n m (用独立的 m 避免重复字母报错)
+# 输出1(out):        b t n c
+FWD_RULE = "b t c, b t n c, b t n, b t n m -> b t n c"
+
+# BWD_RULE 含义:
+# 输入1-4同上, 输入5(grad_out): b t n c
+# 输出1(gx):       b t c
+# 输出2(gh_res):   b t n c
+# 输出3(gh_pre):   b t n
+# 输出4(grad_H):   b t n m
+BWD_RULE = "b t c, b t n c, b t n, b t n m, b t n c -> b t c, b t n c, b t n, b t n m"
 
 
+# 兼容老版本的推导函数
+def _fwd_infer_sharding(arg_shapes, arg_shardings):
+    qs = arg_shardings[1]  # 输出与 x_expanded (索引1) shape/sharding 相同
+    return (qs,)
+
+
+def _bwd_infer_sharding(arg_shapes, arg_shardings):
+    # 输出梯度对应前 4 个输入
+    return (arg_shardings[0], arg_shardings[1], arg_shardings[2], arg_shardings[3])
+
+
+# JAX 官方标准的 partition 回调生成器
+def _create_partition(impl_fn):
+    def partition(mesh, arg_shapes, result_shape):
+        def lower_fn(*args):
+            return impl_fn(*args)
+
+        result_shardings = jtu.tree_map(lambda x: x.sharding, result_shape)
+        arg_shardings = jtu.tree_map(lambda x: x.sharding, arg_shapes)
+        return mesh, lower_fn, result_shardings, arg_shardings
+
+    return partition
+
+
+# =========================================================================
+
+
+# --- 1. 前向 Launcher ---
 def mhc_post_op_fwd_kernel_call(
     layer_out: jax.Array, x_expanded: jax.Array, h_post_raw: jax.Array, H_res: jax.Array
 ):
     batch, time, NSIZE, channel = x_expanded.shape
     total_bt = batch * time
 
-    # 1. 重塑形状 (JAX 中不需要像 Torch 那样显式调用 .contiguous())
+    # 1. 重塑形状
     x_v = x_expanded.reshape(total_bt, NSIZE, channel)
     h_v = h_post_raw.reshape(total_bt, NSIZE)
     H_v = H_res.reshape(total_bt, NSIZE, NSIZE)
@@ -27,7 +81,6 @@ def mhc_post_op_fwd_kernel_call(
     so_bt, so_n, so_c = sx_bt, sx_n, sx_c
 
     # 3. 定义 Grid
-    # 注意：BLOCK_CHANNEL 需要在调用时作为元参数传入
     grid = lambda meta: (total_bt, jt.cdiv(channel, meta["BLOCK_CHANNEL"]))
 
     # 4. 调用 Triton
@@ -37,9 +90,9 @@ def mhc_post_op_fwd_kernel_call(
         H_v,
         l_v,  # 输入 Array
         kernel=mhc_fused_forward_kernel,
-        out_shape=out_struct,  # 输出 Array (由 JAX 自动追加在 l_v 之后)
+        out_shape=out_struct,
         grid=grid,
-        # 标量/步长参数 (作为 kwargs 传入，对应 Kernel 中的参数名)
+        # 标量/步长参数
         stride_output_batch_time=so_bt,
         stride_output_n_size=so_n,
         stride_output_channel=so_c,
@@ -60,8 +113,24 @@ def mhc_post_op_fwd_kernel_call(
     return out_v.reshape(batch, time, NSIZE, channel)
 
 
-def mhc_post_op_bwd_kernel_call(res, grad_output):
-    layer_out, x_expanded, h_post_raw, H_res = res
+# =========================================================================
+# 【新增】：包装前向算子 (适配 SPMD 并行)
+# =========================================================================
+@custom_partitioning
+def mhc_post_op_fwd_spmd(layer_out, x_expanded, h_post_raw, H_res):
+    return mhc_post_op_fwd_kernel_call(layer_out, x_expanded, h_post_raw, H_res)
+
+
+mhc_post_op_fwd_spmd.def_partition(
+    infer_sharding_from_operands=_fwd_infer_sharding,
+    sharding_rule=FWD_RULE,
+    partition=_create_partition(mhc_post_op_fwd_kernel_call),
+)
+
+
+# --- 2. 反向 Launcher ---
+# 【修改】：展平输入参数为 5 个独立 Tensor，方便 SPMD 推导分片规则
+def mhc_post_op_bwd_kernel_call(layer_out, x_expanded, h_post_raw, H_res, grad_output):
     B, T, n, C = x_expanded.shape
     total_bt = B * T
 
@@ -79,8 +148,7 @@ def mhc_post_op_bwd_kernel_call(res, grad_output):
     sl_bt, sl_c = jt.strides_from_shape(l_v.shape)
     sg_bt, sg_n, sg_c = jt.strides_from_shape(g_out_v.shape)
 
-    # 3. 准备输出结构 (grad_x, grad_h, grad_H, grad_l)
-    # 根据原代码，h 和 H 的梯度使用 float32
+    # 3. 准备输出结构
     out_shapes = [
         jax.ShapeDtypeStruct(x_v.shape, x_v.dtype),  # grad_x
         jax.ShapeDtypeStruct(h_v.shape, jnp.float32),  # grad_h
@@ -88,14 +156,13 @@ def mhc_post_op_bwd_kernel_call(res, grad_output):
         jax.ShapeDtypeStruct(l_v.shape, l_v.dtype),  # grad_l
     ]
 
-    # 4. 计算输出步长 (用于传给 Kernel)
+    # 4. 计算输出步长
     sgx_bt, sgx_n, sgx_c = sx_bt, sx_n, sx_c
     sgh_bt, sgh_n = sh_bt, sh_n
     sgH_bt, sgH_n1, sgH_n2 = sH_bt, sH_n1, sH_n2
     sgl_bt, sgl_c = sl_bt, sl_c
 
     # 5. 调用 Triton
-    # 注意：positional args 为输入，out_shape 对应的输出会自动追加在后
     grad_x_v, grad_h_v, grad_H_v, grad_l_v = jt.triton_call(
         x_v,
         h_v,
@@ -105,7 +172,6 @@ def mhc_post_op_bwd_kernel_call(res, grad_output):
         kernel=mhc_fused_backward_kernel,
         out_shape=out_shapes,
         grid=(total_bt, 1),
-        # 对应 Kernel 参数名
         stride_x_bt=sx_bt,
         stride_x_n=sx_n,
         stride_x_c=sx_c,
@@ -133,7 +199,7 @@ def mhc_post_op_bwd_kernel_call(res, grad_output):
         NSIZE=n,
     )
 
-    # 6. 返回梯度 (需与 mhc_post_op 的输入顺序一致)
+    # 6. 返回梯度 (注意返回顺序需要和原函数输入参数一致：layer_out, x_expanded, h_post_raw, H_res)
     return (
         grad_l_v.reshape(B, T, C),
         grad_x_v.reshape(B, T, n, C),
@@ -142,13 +208,30 @@ def mhc_post_op_bwd_kernel_call(res, grad_output):
     )
 
 
+# =========================================================================
+# 【新增】：包装反向算子 (适配 SPMD 并行)
+# =========================================================================
+@custom_partitioning
+def mhc_post_op_bwd_spmd(layer_out, x_expanded, h_post_raw, H_res, grad_output):
+    return mhc_post_op_bwd_kernel_call(
+        layer_out, x_expanded, h_post_raw, H_res, grad_output
+    )
+
+
+mhc_post_op_bwd_spmd.def_partition(
+    infer_sharding_from_operands=_bwd_infer_sharding,
+    sharding_rule=BWD_RULE,
+    partition=_create_partition(mhc_post_op_bwd_kernel_call),
+)
+
+
 # --- JAX 接口绑定 ---
 
 
 @jax.custom_vjp
 def mhc_post_op(layer_out, x_expanded, h_post_raw, H_res):
-    # 这里的逻辑对应原始接口的类型转换
-    return mhc_post_op_fwd_kernel_call(
+    # 【修改】：调用切分规则封装后的 FWD
+    return mhc_post_op_fwd_spmd(
         layer_out.astype(jnp.bfloat16),
         x_expanded.astype(jnp.bfloat16),
         h_post_raw.astype(jnp.float32),
@@ -157,14 +240,19 @@ def mhc_post_op(layer_out, x_expanded, h_post_raw, H_res):
 
 
 def mhc_post_op_fwd(layer_out, x_expanded, h_post_raw, H_res):
-    # 执行前向并保存 residual
     out = mhc_post_op(layer_out, x_expanded, h_post_raw, H_res)
     return out, (layer_out, x_expanded, h_post_raw, H_res)
 
 
 def mhc_post_op_bwd(res, grad_output):
-    # 调用反向 Kernel
-    grads = mhc_post_op_bwd_kernel_call(res, grad_output)
+    layer_out, x_expanded, h_post_raw, H_res = res
+
+    # 保证健壮性，若上游传了 None 梯度则初始化为零张量
+    if grad_output is None:
+        grad_output = jnp.zeros_like(x_expanded)
+
+    # 【修改】：调用切分规则封装后的 BWD，展平传递参数
+    grads = mhc_post_op_bwd_spmd(layer_out, x_expanded, h_post_raw, H_res, grad_output)
     return grads
 
 

@@ -2,7 +2,7 @@ import os
 import torch
 from torch.utils.cpp_extension import load
 from keras.src.backend.torch.core import cast
-from keras.src.backend.torch.numpy import transpose, zeros
+from keras.src.backend.torch.numpy import transpose
 
 
 def transpose_head(x, head_first):
@@ -104,7 +104,7 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
             q, k, v, a, b, w = [
                 cast(x, "bfloat16").contiguous() for x in [q, k, v, a, b, w]
             ]
-            mask = cast(mask, "bfloat16").contiguous()  
+            mask = cast(mask, "bfloat16").contiguous()
 
             if T % CHUNK_LEN != 0:
                 raise ValueError("RWKV inputs sequence length must be divisible by 16")

@@ -55,14 +55,14 @@ def test_is_close(name, x1, x2, atol=1e-2, rtol=1e-2):
     print(f"  {equal_rate:.2f}% 的数据完全一样")
 
     if np.isnan(x1_np).any() or np.isnan(x2_np).any():
-        print(f"  ❌❌ 存在 NaN ❌❌")
+        print("  ❌❌ 存在 NaN ❌❌")
         return
 
     try:
         np.testing.assert_allclose(x1_np, x2_np, atol=atol, rtol=rtol)
         print(f"  ✅ 数值一致 (max_diff: {error.max():.6e})")
-    except AssertionError as e:
-        print(f"  ❌ 数值不一致")
+    except AssertionError:
+        print("  ❌ 数值不一致")
         # print(e)
 
 
