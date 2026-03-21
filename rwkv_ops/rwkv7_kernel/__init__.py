@@ -15,23 +15,33 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
     assert HEAD_SIZE % 4 == 0
     from .native_keras_op import generalized_delta_rule
 
-    if KERNEL_TYPE == "cuda":
-        if keras.config.backend() == "jax":
-            import jax
+    if keras.config.backend() == "jax":
+        import jax
 
-            if jax.devices()[0].platform == "gpu":
+        if jax.devices()[0].platform == "gpu":
+            if KERNEL_TYPE == "cuda":
                 from .jax_cuda_kernel.wkv7_jax import get_jax_generalized_delta_rule
 
                 return get_jax_generalized_delta_rule(HEAD_SIZE)
-        elif keras.config.backend() == "torch":
-            import torch
+            elif KERNEL_TYPE == "triton":
+                from .jax_triton_kernel import generalized_delta_rule as jax_kernel
 
-            if torch.cuda.is_available():
+                return jax_kernel, generalized_delta_rule
+    elif keras.config.backend() == "torch":
+        import torch
+
+        if torch.cuda.is_available():
+            if KERNEL_TYPE == "cuda":
                 from .torch_cuda_kernel.wkv7_torch import (
                     get_torch_generalized_delta_rule,
                 )
 
                 return get_torch_generalized_delta_rule(HEAD_SIZE)
+            elif KERNEL_TYPE == "triton":
+                from .torch_triton_kernel import generalized_delta_rule as triton_kernel
+
+                return triton_kernel, generalized_delta_rule
+
     return generalized_delta_rule, generalized_delta_rule
 
 

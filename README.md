@@ -196,15 +196,15 @@ if padding_mask is not None:
 
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
-| PyTorch     | ✅   | ❌     | ✅     |
-| JAX         | ✅   | ❌     | ✅     |
+| PyTorch     | ✅   | ✅     | ✅     |
+| JAX         | ✅   | ✅     | ✅     |
 | TensorFlow  | ❌    | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 
 
 ---
-1. `native` 为原生算子，无 chunkwise，速度慢且显存高。
-2. `cuda` 为基于 CUDA 的原生算子，速度很快，并且kernel内部使用fp32实现，所以精度也很高。缺点就是长序列的时候比较吃亏跑不满。
+1. `native` 为原生算子，速度慢且显存高。
+2. `cuda`和 `triton`为基于 CUDA 的原生算子，速度很快，并且kernel内部使用fp32实现，所以精度也很高。缺点就是长序列的时候比较吃亏跑不满。
 
 ## rwkv7_op_rnn 使用方法
 
