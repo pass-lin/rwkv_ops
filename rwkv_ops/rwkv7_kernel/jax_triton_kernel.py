@@ -347,7 +347,6 @@ def generalized_delta_rule(
     head_first: bool = False,
     mask: Optional[jnp.ndarray] = None,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
-
     # 统一转换到 Head-First [B, N, T, H]
     r = _transpose_head(r, head_first)
     w = _transpose_head(w, head_first)
