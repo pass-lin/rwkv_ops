@@ -93,19 +93,34 @@ def get_torch_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
 
             y_dtype = ctx.dtype if ctx.dtype != torch.float16 else torch.float32
             gr = torch.empty(
-                (B, T, C), device=gy.device, dtype=y_dtype, memory_format=torch.contiguous_format
+                (B, T, C),
+                device=gy.device,
+                dtype=y_dtype,
+                memory_format=torch.contiguous_format,
             )
             gk = torch.empty(
-                (B, T, C), device=gy.device, dtype=y_dtype, memory_format=torch.contiguous_format
+                (B, T, C),
+                device=gy.device,
+                dtype=y_dtype,
+                memory_format=torch.contiguous_format,
             )
             gv = torch.empty(
-                (B, T, C), device=gy.device, dtype=y_dtype, memory_format=torch.contiguous_format
+                (B, T, C),
+                device=gy.device,
+                dtype=y_dtype,
+                memory_format=torch.contiguous_format,
             )
             gw = torch.empty(
-                (B, T, C), device=gy.device, dtype=y_dtype, memory_format=torch.contiguous_format
+                (B, T, C),
+                device=gy.device,
+                dtype=y_dtype,
+                memory_format=torch.contiguous_format,
             )
             gu = torch.empty(
-                (B, C), device=gy.device, dtype=y_dtype, memory_format=torch.contiguous_format
+                (B, C),
+                device=gy.device,
+                dtype=y_dtype,
+                memory_format=torch.contiguous_format,
             )
 
             if ctx.dtype == torch.float32:
@@ -141,7 +156,10 @@ def get_torch_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
                 o_dtype = torch.float32
 
             y = torch.empty(
-                (B, T, C), device=r.device, dtype=o_dtype, memory_format=torch.contiguous_format
+                (B, T, C),
+                device=r.device,
+                dtype=o_dtype,
+                memory_format=torch.contiguous_format,
             )
             ys = torch.empty(
                 (B, H, head_size, head_size),
@@ -167,7 +185,9 @@ def get_torch_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
 
         @staticmethod
         def backward(ctx, *args):
-            raise NotImplementedError("RWKV6 forward_with_state does not support backward")
+            raise NotImplementedError(
+                "RWKV6 forward_with_state does not support backward"
+            )
 
     # ============================================================
     # 对外函数式接口
@@ -225,12 +245,8 @@ def get_torch_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
         if output_final_state or initial_state is not None:
             is_custom_state = initial_state is not None
             if initial_state is None:
-                s = torch.zeros(
-                    (0,), device=r.device, dtype=s_dtype
-                )
-                state_map_t = torch.zeros(
-                    (0,), device=r.device, dtype=torch.int64
-                )
+                s = torch.zeros((0,), device=r.device, dtype=s_dtype)
+                state_map_t = torch.zeros((0,), device=r.device, dtype=torch.int64)
             else:
                 assert len(initial_state.shape) in [3, 4]
                 if len(initial_state.shape) == 3:
@@ -243,14 +259,18 @@ def get_torch_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
                 if state_map is None:
                     assert n_state == 1 or n_state == B
                     if n_state == 1:
-                        state_map_t = torch.zeros((B,), dtype=torch.int64, device=r.device)
+                        state_map_t = torch.zeros(
+                            (B,), dtype=torch.int64, device=r.device
+                        )
                     else:
                         state_map_t = torch.tensor(
                             [i for i in range(B)], dtype=torch.int64, device=r.device
                         )
                 else:
                     if isinstance(state_map, list):
-                        state_map_t = torch.tensor(state_map, dtype=torch.int64, device=r.device)
+                        state_map_t = torch.tensor(
+                            state_map, dtype=torch.int64, device=r.device
+                        )
                     elif isinstance(state_map, torch.Tensor):
                         assert state_map.dtype in [torch.int32, torch.int64]
                         state_map_t = state_map.to(torch.int64).to(r.device)

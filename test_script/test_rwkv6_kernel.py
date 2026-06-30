@@ -20,9 +20,7 @@ def run_test(backend: str, kernel_type: str):
     v = ops.array(np.random.randn(B, T, H * C), dtype="bfloat16")
     u = ops.array(np.random.randn(1, 1, H * C), dtype="bfloat16")
     try:
-        output, state = rwkv6_op(
-            r, k, v, w, u, output_final_state=True
-        )
+        output, state = rwkv6_op(r, k, v, w, u, output_final_state=True)
         print("Output shape:", output.shape)
         assert output.shape == (
             B,

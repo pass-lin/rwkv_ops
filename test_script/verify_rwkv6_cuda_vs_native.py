@@ -56,14 +56,18 @@ def _make_inputs(backend, B, T, H, N, dtype, device=None):
 
         torch_dtype = getattr(torch, dtype)
         dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-        t = lambda a: torch.tensor(a, dtype=torch_dtype, device=dev, requires_grad=False)
+        t = lambda a: torch.tensor(
+            a, dtype=torch_dtype, device=dev, requires_grad=False
+        )
         return t(r), t(k), t(v), t(w), t(u), t(init_state)
 
     if backend == "jax":
         import jax.numpy as jnp
 
         jnp_dtype = getattr(jnp, dtype)
-        return tuple(jnp.asarray(a, dtype=jnp_dtype) for a in (r, k, v, w, u, init_state))
+        return tuple(
+            jnp.asarray(a, dtype=jnp_dtype) for a in (r, k, v, w, u, init_state)
+        )
 
     raise ValueError(f"不支持的后端: {backend}")
 
@@ -82,8 +86,10 @@ def _metrics(ref, tgt):
 
 def _print_metrics(label, ref, tgt):
     m = _metrics(ref, tgt)
-    print(f"  {label}: max={m['max']:.3e}, mean={m['mean']:.3e}, "
-          f"rel_max={m['rel_max']:.3e}, rel_mean={m['rel_mean']:.3e}")
+    print(
+        f"  {label}: max={m['max']:.3e}, mean={m['mean']:.3e}, "
+        f"rel_max={m['rel_max']:.3e}, rel_mean={m['rel_mean']:.3e}"
+    )
     return m
 
 
@@ -98,26 +104,32 @@ def _run_torch(B, T, H, N, dtype):
     from rwkv_ops import get_rwkv6_kernel
 
     native_op = get_rwkv6_kernel(HEAD_SIZE=N, KERNEL_TYPE="native")
-    cuda_op = get_rwkv6_kernel(
-        HEAD_SIZE=N, KERNEL_TYPE="cuda", MAX_SEQUENCE_LENGTH=T
-    )
+    cuda_op = get_rwkv6_kernel(HEAD_SIZE=N, KERNEL_TYPE="cuda", MAX_SEQUENCE_LENGTH=T)
 
     # native 以 float32 作为数值 ground truth；CUDA 使用目标 dtype
     r_ref, k_ref, v_ref, w_ref, u_ref, init_ref = _make_inputs(
         "torch", B, T, H, N, "float32", device
     )
-    r_c, k_c, v_c, w_c, u_c, init_c = _make_inputs(
-        "torch", B, T, H, N, dtype, device
-    )
+    r_c, k_c, v_c, w_c, u_c, init_c = _make_inputs("torch", B, T, H, N, dtype, device)
 
     print(f"\n[Torch | cuda_dtype={dtype}] forward + state (ref=float32)")
     y_n, s_n = native_op(
-        r_ref, k_ref, v_ref, w_ref, u_ref,
-        initial_state=init_ref, output_final_state=True,
+        r_ref,
+        k_ref,
+        v_ref,
+        w_ref,
+        u_ref,
+        initial_state=init_ref,
+        output_final_state=True,
     )
     y_c, s_c = cuda_op(
-        r_c, k_c, v_c, w_c, u_c,
-        initial_state=init_c, output_final_state=True,
+        r_c,
+        k_c,
+        v_c,
+        w_c,
+        u_c,
+        initial_state=init_c,
+        output_final_state=True,
     )
     _print_metrics("y", y_n, y_c)
     _print_metrics("final_state", s_n, s_c)
@@ -127,12 +139,24 @@ def _run_torch(B, T, H, N, dtype):
     init_map_c = init_c[:1]
     state_map = [0] * B
     y_n2, s_n2 = native_op(
-        r_ref, k_ref, v_ref, w_ref, u_ref,
-        initial_state=init_map_ref, output_final_state=True, state_map=state_map,
+        r_ref,
+        k_ref,
+        v_ref,
+        w_ref,
+        u_ref,
+        initial_state=init_map_ref,
+        output_final_state=True,
+        state_map=state_map,
     )
     y_c2, s_c2 = cuda_op(
-        r_c, k_c, v_c, w_c, u_c,
-        initial_state=init_map_c, output_final_state=True, state_map=state_map,
+        r_c,
+        k_c,
+        v_c,
+        w_c,
+        u_c,
+        initial_state=init_map_c,
+        output_final_state=True,
+        state_map=state_map,
     )
     _print_metrics("y", y_n2, y_c2)
     _print_metrics("final_state", s_n2, s_c2)
@@ -150,12 +174,8 @@ def _run_torch(B, T, H, N, dtype):
         loss.backward()
         return r_t.grad, k_t.grad, v_t.grad, w_t.grad, u_t.grad
 
-    gr_n, gk_n, gv_n, gw_n, gu_n = _grads(
-        native_op, r_ref, k_ref, v_ref, w_ref, u_ref
-    )
-    gr_c, gk_c, gv_c, gw_c, gu_c = _grads(
-        cuda_op, r_c, k_c, v_c, w_c, u_c
-    )
+    gr_n, gk_n, gv_n, gw_n, gu_n = _grads(native_op, r_ref, k_ref, v_ref, w_ref, u_ref)
+    gr_c, gk_c, gv_c, gw_c, gu_c = _grads(cuda_op, r_c, k_c, v_c, w_c, u_c)
     for label, gn, gc in zip(
         ["gr", "gk", "gv", "gw", "gu"],
         [gr_n, gk_n, gv_n, gw_n, gu_n],
@@ -171,27 +191,33 @@ def _run_jax(B, T, H, N, dtype):
     from rwkv_ops import get_rwkv6_kernel
 
     native_op = get_rwkv6_kernel(HEAD_SIZE=N, KERNEL_TYPE="native")
-    cuda_op = get_rwkv6_kernel(
-        HEAD_SIZE=N, KERNEL_TYPE="cuda", MAX_SEQUENCE_LENGTH=T
-    )
+    cuda_op = get_rwkv6_kernel(HEAD_SIZE=N, KERNEL_TYPE="cuda", MAX_SEQUENCE_LENGTH=T)
 
     # native 以 float32 作为数值 ground truth；CUDA 使用目标 dtype
     r_ref, k_ref, v_ref, w_ref, u_ref, init_ref = _make_inputs(
         "jax", B, T, H, N, "float32"
     )
-    r_c, k_c, v_c, w_c, u_c, init_c = _make_inputs(
-        "jax", B, T, H, N, dtype
-    )
+    r_c, k_c, v_c, w_c, u_c, init_c = _make_inputs("jax", B, T, H, N, dtype)
     u_for_cuda = jnp.reshape(u_c, (H, N))
 
     print(f"\n[JAX | cuda_dtype={dtype}] forward + state (ref=float32)")
     y_n, s_n = native_op(
-        r_ref, k_ref, v_ref, w_ref, u_ref,
-        initial_state=init_ref, output_final_state=True,
+        r_ref,
+        k_ref,
+        v_ref,
+        w_ref,
+        u_ref,
+        initial_state=init_ref,
+        output_final_state=True,
     )
     y_c, s_c = cuda_op(
-        r_c, k_c, v_c, w_c, u_for_cuda,
-        initial_state=init_c, output_final_state=True,
+        r_c,
+        k_c,
+        v_c,
+        w_c,
+        u_for_cuda,
+        initial_state=init_c,
+        output_final_state=True,
     )
     _print_metrics("y", y_n, y_c)
     _print_metrics("final_state", s_n, s_c)
@@ -201,12 +227,24 @@ def _run_jax(B, T, H, N, dtype):
     init_map_c = init_c[:1]
     state_map = jnp.zeros((B,), dtype=jnp.int32)
     y_n2, s_n2 = native_op(
-        r_ref, k_ref, v_ref, w_ref, u_ref,
-        initial_state=init_map_ref, output_final_state=True, state_map=state_map,
+        r_ref,
+        k_ref,
+        v_ref,
+        w_ref,
+        u_ref,
+        initial_state=init_map_ref,
+        output_final_state=True,
+        state_map=state_map,
     )
     y_c2, s_c2 = cuda_op(
-        r_c, k_c, v_c, w_c, u_for_cuda,
-        initial_state=init_map_c, output_final_state=True, state_map=state_map,
+        r_c,
+        k_c,
+        v_c,
+        w_c,
+        u_for_cuda,
+        initial_state=init_map_c,
+        output_final_state=True,
+        state_map=state_map,
     )
     _print_metrics("y", y_n2, y_c2)
     _print_metrics("final_state", s_n2, s_c2)
@@ -243,8 +281,7 @@ def _run_jax(B, T, H, N, dtype):
         r_c, k_c, v_c, w_c, u_for_cuda
     )
     cuda_directional = sum(
-        jnp.sum(jnp.asarray(g, jnp.float32) * d)
-        for g, d in zip(grad_c, dirs)
+        jnp.sum(jnp.asarray(g, jnp.float32) * d) for g, d in zip(grad_c, dirs)
     )
     diff = float(jnp.abs(ref_directional - cuda_directional))
     rel = float(diff / (jnp.abs(ref_directional) + 1e-8))

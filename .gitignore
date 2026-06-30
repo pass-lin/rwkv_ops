@@ -56,3 +56,4 @@ config.local.py
 *.pth
 *.ckpt
 *.safetensors
+dist/

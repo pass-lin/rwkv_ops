@@ -20,13 +20,6 @@
 pip install rwkv_ops
 ```
 
-However, compiled operators are not fully removed by `pip uninstall`. You can install from source:
-
-```bash
-git clone https://github.com/pass-lin/rwkv_ops.git 
-cd rwkv_ops
-bash install.sh
-```
 
 ---
 
@@ -322,56 +315,8 @@ y, final_state = rwkv6_op(
 > ```
 > `MAX_SEQUENCE_LENGTH` is a compile-time constant `_T_` for the CUDA kernel and must be no less than the actual sequence length; the `native` implementation ignores this parameter.
 
----
 
-### Distributed Tips
 
-- The operator itself provides SPMD data-parallel semantics; PyTorch can directly use DDP/FSDP or other multi-GPU data-parallel solutions.
-- For JAX, use `shard_map` to implement data parallelism (example):
-
-```python
-import os
-os.environ['KERAS_BACKEND'] = 'jax'
-
-import jax, jax.numpy as jnp
-from jax.experimental.shard_map import shard_map
-from jax.sharding import Mesh, PartitionSpec as P
-from functools import partial
-from rwkv_ops import RWKV6_OP
-
-batch_size, seq_length = 24, 512
-head_size, num_heads = 64, 32
-hidden_size = head_size * num_heads
-
-mesh = Mesh(jax.devices('gpu'), axis_names=('device_axis',))
-device_ns = NamedSharding(mesh, P('device_axis'))
-
-operator = RWKV6_OP(head_size=head_size, max_sequence_length=seq_length)
-
-@partial(shard_map,
-         mesh=mesh,
-         in_specs=(P('device_axis'),) * 5,
-         out_specs=(P('device_axis'), P('device_axis')),
-         check_rep=False)
-def call_kernel(r, k, v, w, u):
-    # remove device dimension
-    r, k, v, w, u = map(jnp.squeeze, (r, k, v, w, u))
-    y, ys = operator(r, k, v, w, u, with_state=True)
-    return jnp.expand_dims(y, 0), jnp.expand_dims(ys, 0)
-
-# build inputs on devices
-keys = jax.random.split(jax.random.PRNGKey(0), 5)
-shapes = [(mesh.size, batch_size, seq_len, hidden_size)] * 4 + [(mesh.size, hidden_size)]
-inputs = [jax.random.normal(k, s) for k, s in zip(keys, shapes)]
-inputs_r, inputs_k, inputs_v, inputs_w, inputs_u = map(lambda x: jax.device_put(x, device_ns), inputs)
-inputs_u = inputs_u[:, 0]  # (devices, hidden_size)
-
-# optionally: jax.jit(call_kernel, ...)
-outputs_y, y_state = call_kernel(inputs_r, inputs_k, inputs_v, inputs_w, inputs_u)
-
-print(outputs_y.shape, outputs_y.sharding)
-print(y_state.shape, y_state.sharding)
-```
 
 ---
 

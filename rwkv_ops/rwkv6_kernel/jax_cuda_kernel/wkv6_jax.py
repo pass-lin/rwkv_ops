@@ -25,9 +25,7 @@ _CURRENT_DIR = pathlib.Path(__file__).parent.absolute()
 # ---------------------------------------------------------------------------
 FWD_RULE = "b t c, b t c, b t c, b t c, h n -> b t c"
 BWD_RULE = "b t c, b t c, b t c, b t c, h n, b t c -> b t c, b t c, b t c, b t c, h n"
-FWD_STATE_RULE = (
-    "b t c, b t c, b t c, b t c, h n, b, b h n n -> b t c, b h n n"
-)
+FWD_STATE_RULE = "b t c, b t c, b t c, b t c, h n, b, b h n n -> b t c, b h n n"
 
 
 def _fwd_infer_sharding(arg_shapes, arg_shardings):
@@ -143,9 +141,9 @@ def get_jax_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
         B, T, C = r.shape
         dtype = r.dtype
         out_type = jax.ShapeDtypeStruct((B, T, C), dtype)
-        return jax.ffi.ffi_call(
-            "wkv6_fwd", out_type, vmap_method="broadcast_all"
-        )(r, k, v, w, u)
+        return jax.ffi.ffi_call("wkv6_fwd", out_type, vmap_method="broadcast_all")(
+            r, k, v, w, u
+        )
 
     @custom_partitioning
     def _rwkv6_fwd(r, k, v, w, u):
@@ -174,7 +172,9 @@ def get_jax_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
         gw_type = jax.ShapeDtypeStruct((B, T, C), dtype)
         gu_type = jax.ShapeDtypeStruct((B, C), dtype)
         return jax.ffi.ffi_call(
-            "wkv6_bwd", (gr_type, gk_type, gv_type, gw_type, gu_type), vmap_method="broadcast_all"
+            "wkv6_bwd",
+            (gr_type, gk_type, gv_type, gw_type, gu_type),
+            vmap_method="broadcast_all",
         )(r, k, v, w, u, gy)
 
     @custom_partitioning
@@ -205,7 +205,9 @@ def get_jax_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
         B, T, C = r.shape
         dtype = r.dtype
         out_type = jax.ShapeDtypeStruct((B, T, C), dtype)
-        state_type = jax.ShapeDtypeStruct((B, C // head_size, head_size, head_size), dtype)
+        state_type = jax.ShapeDtypeStruct(
+            (B, C // head_size, head_size, head_size), dtype
+        )
         return jax.ffi.ffi_call(
             "wkv6_fwd_with_state", (out_type, state_type), vmap_method="broadcast_all"
         )(r, k, v, w, u, state_map, init_state)
@@ -275,9 +277,7 @@ def get_jax_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
                 f"序列长度 T={T} 超过编译期最大序列长度 max_sequence_length={max_sequence_length}"
             )
         if C % head_size != 0:
-            raise ValueError(
-                f"通道数 C={C} 必须能被 head_size={head_size} 整除"
-            )
+            raise ValueError(f"通道数 C={C} 必须能被 head_size={head_size} 整除")
         H = C // head_size
         N = head_size
 
@@ -302,13 +302,13 @@ def get_jax_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
                 elif state_kinds == B:
                     state_map = jnp.arange(B, dtype=jnp.int32)
                 else:
-                    raise ValueError(
-                        "无法推断 state_map，请手动指定"
-                    )
+                    raise ValueError("无法推断 state_map，请手动指定")
             else:
                 state_map = jnp.asarray(state_map, dtype=jnp.int32)
                 if state_map.shape != (B,):
-                    raise ValueError(f"state_map 形状必须为 (B,)，当前为 {state_map.shape}")
+                    raise ValueError(
+                        f"state_map 形状必须为 (B,)，当前为 {state_map.shape}"
+                    )
         else:
             assert state_map is None, "指定 state_map 时必须同时传入 initial_state"
             initial_state = jnp.zeros((1, H, N, N), dtype=jnp.bfloat16)
