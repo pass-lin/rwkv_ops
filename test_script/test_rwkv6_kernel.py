@@ -11,7 +11,7 @@ def run_test(backend: str, kernel_type: str):
     os.environ["KERNEL_TYPE"] = kernel_type
     from keras import ops
 
-    from rwkv_ops import RWKV6_OP
+    from rwkv_ops import rwkv6_op
 
     B, T, H, C = 2, 16, 6, 64
     r = ops.array(np.random.randn(B, T, H * C), dtype="bfloat16")
@@ -19,10 +19,10 @@ def run_test(backend: str, kernel_type: str):
     k = ops.array(np.random.randn(B, T, H * C), dtype="bfloat16")
     v = ops.array(np.random.randn(B, T, H * C), dtype="bfloat16")
     u = ops.array(np.random.randn(1, 1, H * C), dtype="bfloat16")
-    rwkv6_op = RWKV6_OP(C, T)
-    output, state = rwkv6_op(r, k, v, w, u)
     try:
-        output, state = rwkv6_op(r, k, v, w, u)
+        output, state = rwkv6_op(
+            r, k, v, w, u, output_final_state=True
+        )
         print("Output shape:", output.shape)
         assert output.shape == (
             B,
@@ -30,11 +30,12 @@ def run_test(backend: str, kernel_type: str):
             H * C,
         ), f"Expected output shape {(B, T, H * C)}, got {output.shape}"
         print(
-            "✅ Test passed at %s Backend and %s impplementation"
+            "✅ Test passed at %s Backend and %s implementation"
             % (backend, kernel_type)
         )
     except Exception as e:
         print(f"❌ Test failed: {e}")
+        raise
 
 
 if __name__ == "__main__":

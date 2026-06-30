@@ -268,68 +268,66 @@ def rwkv7_op_rnn(
 - Dependencies: `keras`, `ninja`, and a complete CUDA toolkit.
 - If using VS Code with a virtual environment for debugging, make sure to manually activate the virtual environment in the terminal before running the code; otherwise, ninja may not work.
 - Although PyTorch can run normally even if the CUDA version in the virtual environment is inconsistent with the global CUDA version, it is strongly recommended to keep them consistent.
-- PyTorch Limitations: Only one `RWKV6_OP` object can be instantiated within the same program; the operator is thread-safe (stateless) and can be called from multiple places.
+- The operator is thread-safe (stateless) and can be called from multiple places.
 
 ### JAX Usage Notes
 
-- Dependencies: `keras`, `gcc`, `pybind11`, and a complete CUDA toolkit.
+- Dependencies: `keras`, `cmake`, `gcc`, and a complete CUDA toolkit.
 - Even if CUDA is installed for JAX via a virtual environment, a complete CUDA installation at the system level is required, and the versions must be consistent to ensure fast parallel compilation in JAX.
 - JAX compilation depends on the soft link `/usr/local/cuda`; if it does not exist, create it manually:
   ```shell
   sudo ln -sf /usr/local/cuda-12.4 /usr/local/cuda
   ```
 - Ensure that `nvcc -V` outputs correctly and that `which nvcc` points to the correct version.
-- JAX Limitations: Only one `RWKV6_OP` object can be instantiated within the same program; the operator is thread-safe (stateless) and can be called from multiple places.
-- JAX ≥ 0.6.0 no longer uses CUDA operators and defaults to native operators; version 0.4.34 is recommended.
+- JAX `cuda` backend uses `jax.ffi` and supports JAX >= 0.4.31 (including 0.6.x). `bfloat16` is accelerated via CUDA; other dtypes fall back to `native`.
 
 ### TensorFlow Usage Notes
 
-- Only native API-based `RWKV6` operators are provided, which are only suitable for inference and have low efficiency.
+- Only native API-based `RWKV6` operators are provided, which have low efficiency.
 
 ---
 
 ### Usage
 
-Note that unlike `rwkv7`, which is written as a function, `RWKV6` is a class that needs to be instantiated.
-```python
-from rwkv_ops import RWKV6_OP
-
-operator = RWKV6_OP(
-    head_size=64,               # Head size; use 64 if uncertain
-    max_sequence_length=4096,   # Maximum training sequence length; inference is not limited
-    ops_loop=False              # Optional: Whether to use the upper-level API instead of CUDA when sequence length = 1
-)
-```
-
-#### Invocation
+Like `rwkv7`, `RWKV6` now exposes a **functional interface**.
 
 ```python
-y, y_state = operator(
+from rwkv_ops import rwkv6_op  # or backward-compatible alias RWKV6_OP
+
+y, final_state = rwkv6_op(
     r, k, v, w, u,
-    with_state=False,   # Whether to use a custom initial state / output final state
-    init_state=None,    # Initial state [n_state, num_heads, head_size, head_size]
-    state_map=None      # int32 one-dimensional array, length=batch_size, defining the init_state mapping
+    initial_state=None,
+    output_final_state=False,
+    state_map=None,
+    head_first=False,
 )
 ```
 
 | Parameter | Shape | Description |
 |-----------|-------|-------------|
-| r, k, v, w | (batch_size, seq_len, hidden_size) | — |
-| u | (num_heads, head_size) or (hidden_size,) | — |
-| init_state | (n_state, num_heads, head_size, head_size) | When n_state=1, all samples share it; when n_state=batch_size, they correspond one-to-one |
-| state_map | (batch_size,) | Specifies the init_state index for each sample |
+| r, k, v, w | (B, T, C) or (B, H, T, N) | — |
+| u | (H, N) or (C,) | — |
+| initial_state | (S, H, N, N) or (H, N, N) | S=1 shared; S=B one-to-one |
+| state_map | (B,) int32 | Index into initial_state for each sample |
 
 | Return Value | Shape | Description |
 |--------------|-------|-------------|
-| y | (batch_size, seq_len, hidden_size) | Output |
-| y_state | (batch_size, num_heads, head_size, head_size) or None | Final state |
+| y | (B, T, C) or (B, H, T, N) | Output |
+| final_state | (B, H, N, N) or None | Final state |
+
+> For a custom `head_size` or `max_sequence_length`, use:
+> ```python
+> from rwkv_ops import get_rwkv6_kernel
+> rwkv6_op = get_rwkv6_kernel(HEAD_SIZE=64, KERNEL_TYPE="cuda", MAX_SEQUENCE_LENGTH=4096)
+> ```
+> `MAX_SEQUENCE_LENGTH` is a compile-time constant `_T_` for the CUDA kernel and must be no less than the actual sequence length; the `native` implementation ignores this parameter.
 
 ---
 
 ### Distributed Tips
 
-- The operator itself does not support distributed computing; PyTorch can directly use multi-threaded distributed computing.
-- For JAX, use `shard_map` for packaging (example):
+- The operator itself provides SPMD data-parallel semantics; PyTorch can directly use DDP/FSDP or other multi-GPU data-parallel solutions.
+- For JAX, use `shard_map` to implement data parallelism (example):
 
 ```python
 import os
@@ -382,8 +380,8 @@ print(y_state.shape, y_state.sharding)
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
 | PyTorch     | ✅   | ❌     | ✅     |
-| JAX         | ⚠️   | ❌     | ✅     |
+| JAX         | ✅   | ❌     | ✅     |
 | TensorFlow  | ❌   | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 
-⚠️ JAX CUDA kernels only for versions < 0.6.0; recommended 0.4.34.
+JAX `cuda` backend is based on `jax.ffi` and supports JAX >= 0.4.31 (including 0.6.x). Currently, only `bfloat16` is CUDA-accelerated; other dtypes fall back to `native`.

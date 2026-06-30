@@ -240,8 +240,13 @@ def mhc_post_op(layer_out, x_expanded, h_post_raw, H_res):
 
 
 def mhc_post_op_fwd(layer_out, x_expanded, h_post_raw, H_res):
-    out = mhc_post_op(layer_out, x_expanded, h_post_raw, H_res)
-    return out, (layer_out, x_expanded, h_post_raw, H_res)
+    layer_out_c = layer_out.astype(jnp.bfloat16)
+    x_expanded_c = x_expanded.astype(jnp.bfloat16)
+    h_post_raw_c = h_post_raw.astype(jnp.float32)
+    H_res_c = H_res.astype(jnp.float32)
+    out = mhc_post_op_fwd_spmd(layer_out_c, x_expanded_c, h_post_raw_c, H_res_c)
+    # 保存 cast 后的张量，确保反向使用的 dtype 与前向实际进 kernel 的 dtype 一致
+    return out, (layer_out_c, x_expanded_c, h_post_raw_c, H_res_c)
 
 
 def mhc_post_op_bwd(res, grad_output):

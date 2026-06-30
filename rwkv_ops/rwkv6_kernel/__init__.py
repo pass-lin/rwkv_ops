@@ -1,120 +1,56 @@
-# copy right from https://github.com/infiy-quine/RWKV6_Keras_Operator
-import os
 import keras
-from keras import ops
-from distutils.util import strtobool
-from packaging import version
 
 
-def get_rwkv6_kernel(KERNEL_TYPE="native"):
-    ops_kernel = True
+def get_rwkv6_kernel(HEAD_SIZE=64, KERNEL_TYPE="native", MAX_SEQUENCE_LENGTH=4096):
+    """
+    获取 RWKV-6 函数式算子。
+
+    根据当前 Keras backend、环境变量 KERNEL_TYPE 以及可用硬件，
+    返回 CUDA（JAX/Torch）或原生 Keras-ops 实现的 rwkv6_op。
+
+    Args:
+        HEAD_SIZE: head 维度，默认 64，需被 4 整除。
+        KERNEL_TYPE: "native" | "cuda" | "triton"（RWKV-6 当前仅支持 native/cuda）。
+        MAX_SEQUENCE_LENGTH: CUDA  kernel 编译期最大序列长度，默认 4096。
+
+    Returns:
+        rwkv6_op(r, k, v, w, u, initial_state=None, output_final_state=False,
+                 state_map=None, head_first=False)
+    """
+    assert HEAD_SIZE % 4 == 0, f"HEAD_SIZE={HEAD_SIZE} 必须被 4 整除"
+    assert KERNEL_TYPE in ["native", "cuda", "triton"], (
+        f"不支持的 KERNEL_TYPE={KERNEL_TYPE}"
+    )
+
+    from .native_keras_op import rwkv6 as native_rwkv6
+
     if KERNEL_TYPE == "cuda":
         if keras.config.backend() == "jax":
             import jax
 
-            if version.parse(jax.__version__) < version.parse("0.6.0"):
-                from .jax_rwkv_kernel import RWKVKernelOperator as CudaOperator
+            if jax.devices()[0].platform == "gpu":
+                from .jax_cuda_kernel.wkv6_jax import get_jax_rwkv6
 
-                ops_kernel = False
-            else:
-                CudaOperator = None
+                return get_jax_rwkv6(
+                    head_size=HEAD_SIZE,
+                    max_sequence_length=MAX_SEQUENCE_LENGTH,
+                )
         elif keras.config.backend() == "torch":
-            from .torch_rwkv_kernel import RWKVKernelOperator as CudaOperator
+            import torch
 
-            ops_kernel = False
-        else:
-            CudaOperator = None
-    else:
-        CudaOperator = None
-    from .ops_rwkv_kernel import RWKVKernelOperator as OpsOperator
+            if torch.cuda.is_available():
+                from .torch_cuda_kernel.wkv6_torch import get_torch_rwkv6
 
-    class RWKVKernelOperator:
-        def __init__(self, head_size, max_sequence_length, ops_loop=False):
-            self.enbale_cuda = CudaOperator is not None
-
-            if self.enbale_cuda:
-                self.cuda_operator = CudaOperator(head_size, max_sequence_length)
-
-            self.ops_operator = OpsOperator(head_size, max_sequence_length)
-
-            self.ops_loop = ops_loop
-
-        def __call__(
-            self, r, k, v, w, u, with_state=False, init_state=None, state_map=None
-        ):
-            seq_len = r.shape[1]
-
-            def call_parallel():
-                if self.enbale_cuda:
-                    return self.cuda_operator(
-                        r=r,
-                        k=k,
-                        v=v,
-                        w=w,
-                        u=u,
-                        with_state=with_state,
-                        init_state=init_state,
-                        state_map=state_map,
-                    )
-                else:
-                    return self.ops_operator(
-                        r=r,
-                        k=k,
-                        v=v,
-                        w=w,
-                        u=u,
-                        with_state=with_state,
-                        init_state=init_state,
-                        state_map=state_map,
-                    )
-
-            def call_one_step():
-                return self.ops_operator(
-                    r=r,
-                    k=k,
-                    v=v,
-                    w=w,
-                    u=u,
-                    with_state=with_state,
-                    init_state=init_state,
-                    state_map=state_map,
+                return get_torch_rwkv6(
+                    head_size=HEAD_SIZE,
+                    max_sequence_length=MAX_SEQUENCE_LENGTH,
                 )
 
-            if not self.ops_loop:
-                return ops.cond(
-                    seq_len != 1 and not ops_kernel, call_parallel, call_one_step
-                )
-            else:
-                return call_parallel()
+    # native / 未检测到 GPU / 其它 backend 均回退到原生实现
+    from functools import partial
 
-    return RWKVKernelOperator
-
-
-# from .ops_rwkv_kernal import RWKVKernelOperator as OPSKernelOperator
-
-
-"""
-新增三个参数
-return_state 布尔类型 是否返回最终的state,如果想自定义init_state也需要启用这个开关
-
-init_state
-    当init_state省缺时，则使用全零初始化BatchSize维度上的状态。
-    形状: (state_kinds,num_heads,head_size, head_size)， 其中state_kinds为小于等于Batch_Size的正整数
-    精度: 在r为fp16时 init_state为fp32 其余时候类型与r相同
-
-
-state_map
-    形状: (Batch_Size,)
-    精度: int64, list[int]
-    这个数组定义了state到r上每个Batch维度切片间的映射关系
-    取值范围: [0, state_kinds)
-
-返回:
-    output, output_state 
-
-def __call__(self,r, k, v, w, u, return_state=False, init_state=None, state_map=None):
-
-
-
-
-"""
+    return partial(
+        native_rwkv6,
+        head_size=HEAD_SIZE,
+        max_sequence_length=MAX_SEQUENCE_LENGTH,
+    )

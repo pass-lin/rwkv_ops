@@ -253,7 +253,7 @@ def mhc_pre_op_fused(x, h_res_in, h_pre_in, num_iters=20, eps=1e-8):
         return mhc_pre_op_fwd_spmd(x_arr, hr_arr, hp_arr, num_iters, eps)
 
     def _internal_fwd(x_arr, hr_arr, hp_arr):
-        out_tuple = _internal_op(x_arr, hr_arr, hp_arr)
+        out_tuple = mhc_pre_op_fwd_spmd(x_arr, hr_arr, hp_arr, num_iters, eps)
         # 只保存参与微分的张量
         return out_tuple, (x_arr, hr_arr, hp_arr)
 

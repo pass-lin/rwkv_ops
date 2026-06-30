@@ -1,4 +1,4 @@
-__version__ = "0.8.1"
+__version__ = "0.9.0"
 import os
 
 KERNEL_TYPE = os.environ.get("KERNEL_TYPE", "cuda").lower()
@@ -32,5 +32,7 @@ rnn_generalized_delta_rule = get_rnn_generalized_delta_rule(KERNEL_TYPE=KERNEL_T
 rwkv7_op_rnn = rnn_generalized_delta_rule
 
 
-RWKV6_OP = get_rwkv6_kernel(KERNEL_TYPE=KERNEL_TYPE)
+rwkv6_op = get_rwkv6_kernel(KERNEL_TYPE=KERNEL_TYPE)
+# 保留旧名称的向后兼容别名（其调用方式已变为函数式）
+RWKV6_OP = rwkv6_op
 mhc_pre_op, mhc_post_op = get_mhc_kernel(KERNEL_TYPE=KERNEL_TYPE)

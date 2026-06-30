@@ -347,6 +347,7 @@ def generalized_delta_rule(
     head_first: bool = False,
     mask: Optional[jnp.ndarray] = None,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
+    dtype = r.dtype
     # 统一转换到 Head-First [B, N, T, H]
     r = _transpose_head(r, head_first)
     w = _transpose_head(w, head_first)
@@ -379,6 +380,7 @@ def generalized_delta_rule(
         out, last_state = rwkv7_kernel_with_mask_triton(r, w, k, v, a, b, h0, mask)
 
     out = jnp.transpose(out, (0, 2, 1, 3))
+    out = jnp.asarray(out, dtype)
 
     if output_final_state:
         return out, last_state

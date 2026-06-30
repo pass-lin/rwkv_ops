@@ -257,121 +257,70 @@ def rwkv7_op_rnn(
 - 安装依赖：`keras`、`ninja`、完整的 CUDA 工具包。
 - 若使用 VS Code + 虚拟环境调试，请务必在终端手动激活虚拟环境，再运行代码，否则 ninja 可能无法工作。
 - 虽然 PyTorch 在「虚拟环境中的 CUDA 版本」与「全局 CUDA 版本」不一致时仍可正常运行，但强烈建议保持一致。
-- PyTorch 限制：同一程序内只能实例化 **一个** `RWKV6_OP` 对象；算子线程安全（无状态），可在多处调用。
+- 算子线程安全（无状态），可在多处调用。
 
 ### JAX 使用注意事项
 
-- 安装依赖：`keras`、`gcc`、`pybind11`、完整的 CUDA 工具包。
+- 安装依赖：`keras`、`cmake`、`gcc`、完整的 CUDA 工具包。
 - 即使通过虚拟环境为 JAX 安装 CUDA，也必须在系统级安装完整 CUDA；两者版本需一致，以保证 JAX 并行编译速度。
 - JAX 编译依赖 `/usr/local/cuda` 软链接，如不存在请手动创建：
   ```shell
   sudo ln -sf /usr/local/cuda-12.4 /usr/local/cuda
   ```
 - 确保 `nvcc -V` 正常输出，且 `which nvcc` 指向正确版本。
-- JAX 限制：同一程序内只能实例化 **一个** `RWKV6_OP` 对象；算子线程安全（无状态），可在多处调用。
-- JAX ≥ 0.6.0 不再使用 CUDA 算子，默认使用原生算子；推荐 0.4.34。
+- JAX `cuda` 后端基于 `jax.ffi`，支持 JAX >= 0.4.31（含 0.6.x），`bfloat16` 走 CUDA 加速，其它 dtype 自动回退到 `native`。
 
 ### TensorFlow 使用注意事项
 
-- 仅提供基于原生 API 的 `RWKV6` 算子，仅用于推理，效率较低。
+- 仅提供基于原生 API 的 `RWKV6` 算子，效率较低。
 
 ---
 
 ### 使用方法
-需要注意的是，和rwkv7写成函数的形式不一样，RWKV6的op是一个类，需要实例化。
-```python
-from rwkv_ops import RWKV6_OP
 
-operator = RWKV6_OP(
-    head_size=64,               # 头大小，不确定时填 64
-    max_sequence_length=4096,   # 训练最大序列长度；推理不受限
-    ops_loop=False              # 可选：序列长度=1 时是否用上层 API 替代 CUDA
-)
-```
-
-#### 调用
+RWKV-6 现在与 RWKV-7 一样提供**函数式接口**。
 
 ```python
-y, y_state = operator(
+from rwkv_ops import rwkv6_op  # 或兼容别名 RWKV6_OP
+
+y, final_state = rwkv6_op(
     r, k, v, w, u,
-    with_state=False,   # 是否使用自定义初始状态 / 输出结束状态
-    init_state=None,    # 初始状态 [n_state, num_heads, head_size, head_size]
-    state_map=None      # int32 一维数组，长度=batch_size，定义 init_state 映射
+    initial_state=None,         # 可选初始状态
+    output_final_state=False,   # 是否返回结束状态
+    state_map=None,             # 状态映射，见下文
+    head_first=False,           # 输入是否为 [B, H, T, N]
 )
 ```
 
 | 参数 | 形状 | 说明 |
 |---|---|---|
-| r, k, v, w | (batch_size, seq_len, hidden_size) | — |
-| u | (num_heads, head_size) 或 (hidden_size,) | — |
-| init_state | (n_state, num_heads, head_size, head_size) | n_state=1 时所有样本共用；n_state=batch_size 时一一对应 |
-| state_map | (batch_size,) | 指定每个样本用到的 init_state 索引 |
+| r, k, v, w | (B, T, C) 或 (B, H, T, N) | — |
+| u | (H, N) 或 (C,) | — |
+| initial_state | (S, H, N, N) 或 (H, N, N) | S=1 时所有样本共用；S=B 时一一对应 |
+| state_map | (B,) int32 | 指定每个样本用到的 initial_state 索引 |
 
 | 返回值 | 形状 | 说明 |
 |---|---|---|
-| y | (batch_size, seq_len, hidden_size) | 输出 |
-| y_state | (batch_size, num_heads, head_size, head_size) 或 None | 结束状态 |
+| y | (B, T, C) 或 (B, H, T, N) | 输出 |
+| final_state | (B, H, N, N) 或 None | 结束状态 |
+
+> 如需指定非默认的 `head_size` 或 `max_sequence_length`，请使用：
+> ```python
+> from rwkv_ops import get_rwkv6_kernel
+> rwkv6_op = get_rwkv6_kernel(HEAD_SIZE=64, KERNEL_TYPE="cuda", MAX_SEQUENCE_LENGTH=4096)
+> ```
+> `MAX_SEQUENCE_LENGTH` 是 CUDA kernel 的编译期常量 `_T_`，必须大于等于实际序列长度；`native` 实现会忽略该参数。
 
 ---
 
-### 分布式小贴士
-
-- 算子本身无分布式支持；PyTorch 可直接用多线程分布式。
-- JAX 需通过 `shard_map` 包装（示例）：
-
-```python
-import os
-os.environ['KERAS_BACKEND'] = 'jax'
-
-import jax, jax.numpy as jnp
-from jax.experimental.shard_map import shard_map
-from jax.sharding import Mesh, PartitionSpec as P
-from functools import partial
-from rwkv_ops import RWKV6_OP
-
-batch_size, seq_length = 24, 512
-head_size, num_heads = 64, 32
-hidden_size = head_size * num_heads
-
-mesh = Mesh(jax.devices('gpu'), axis_names=('device_axis',))
-device_ns = NamedSharding(mesh, P('device_axis'))
-
-operator = RWKV6_OP(head_size=head_size, max_sequence_length=seq_length)
-
-@partial(shard_map,
-         mesh=mesh,
-         in_specs=(P('device_axis'),) * 5,
-         out_specs=(P('device_axis'), P('device_axis')),
-         check_rep=False)
-def call_kernel(r, k, v, w, u):
-    # 去掉最外 device 维度
-    r, k, v, w, u = map(jnp.squeeze, (r, k, v, w, u))
-    y, ys = operator(r, k, v, w, u, with_state=True)
-    return jnp.expand_dims(y, 0), jnp.expand_dims(ys, 0)
-
-# 构造输入并放置到对应设备
-keys = jax.random.split(jax.random.PRNGKey(0), 5)
-inputs = [jax.random.normal(k, (mesh.size, batch_size, seq_length, hidden_size)) for k in keys]
-inputs_r, inputs_k, inputs_v, inputs_w, inputs_u = map(
-    lambda x: jax.device_put(x, device_ns), inputs)
-inputs_u = inputs_u[:, :, 0]  # (devices, hidden_size)
-
-# 可选：jax.jit(call_kernel, ...) 加速
-outputs_y, y_state = call_kernel(inputs_r, inputs_k, inputs_v, inputs_w, inputs_u)
-
-print(outputs_y.shape, outputs_y.sharding)
-print(y_state.shape, y_state.sharding)
-```
-
----
 
 ### rwkv6op 实现状态
 
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
 | PyTorch     | ✅   | ❌     | ✅     |
-| JAX         | ⚠️   | ❌     | ✅     |
+| JAX         | ✅   | ❌     | ✅     |
 | TensorFlow  | ❌   | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 
-⚠️ JAX 的 CUDA 实现仅适用于 < 0.6.0，推荐 0.4.34。
+JAX `cuda` 后端基于 `jax.ffi`，支持 JAX >= 0.4.31（含 0.6.x）；当前 CUDA FFI 仅对 `bfloat16` 加速，其它 dtype 回退到 `native`。
