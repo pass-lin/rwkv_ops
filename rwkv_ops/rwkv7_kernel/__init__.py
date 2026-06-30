@@ -1,6 +1,4 @@
 import keras
-from distutils.util import strtobool
-import os
 from keras import ops
 
 

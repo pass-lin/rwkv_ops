@@ -1,5 +1,9 @@
 import torch
-from ..triton_kernel.mhc_post_op import *
+import triton
+from ..triton_kernel.mhc_post_op import (
+    mhc_fused_backward_kernel,
+    mhc_fused_forward_kernel,
+)
 
 
 def mhc_post_op_forward(
@@ -19,7 +23,8 @@ def mhc_post_op_forward(
 
     output_tensor = torch.empty_like(x_v)
 
-    grid = lambda META: (total_batch_time, triton.cdiv(channel, META["BLOCK_CHANNEL"]))
+    def grid(META):
+        return (total_batch_time, triton.cdiv(channel, META["BLOCK_CHANNEL"]))
 
     mhc_fused_forward_kernel[grid](
         x_v,
@@ -57,7 +62,6 @@ def mhc_post_op_backward(
 ):
     B, T, n, C = x_expanded.shape
     total_bt = B * T
-    device = x_expanded.device
 
     # 1. 连续化
     x_v = x_expanded.reshape(-1, n, C).contiguous()

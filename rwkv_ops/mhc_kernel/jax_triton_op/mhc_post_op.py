@@ -1,4 +1,7 @@
-from ..triton_kernel.mhc_post_op import *
+from ..triton_kernel.mhc_post_op import (
+    mhc_fused_backward_kernel,
+    mhc_fused_forward_kernel,
+)
 import jax
 import jax.numpy as jnp
 import jax_triton as jt
@@ -81,7 +84,8 @@ def mhc_post_op_fwd_kernel_call(
     so_bt, so_n, so_c = sx_bt, sx_n, sx_c
 
     # 3. 定义 Grid
-    grid = lambda meta: (total_bt, jt.cdiv(channel, meta["BLOCK_CHANNEL"]))
+    def grid(meta):
+        return (total_bt, jt.cdiv(channel, meta["BLOCK_CHANNEL"]))
 
     # 4. 调用 Triton
     out_v = jt.triton_call(

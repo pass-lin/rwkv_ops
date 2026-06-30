@@ -1,5 +1,10 @@
 import torch
-from .triton_kernel import *
+from .triton_kernel import (
+    rwkv7_bwd_kernel,
+    rwkv7_bwd_kernel_with_mask,
+    rwkv7_fwd_kernel,
+    rwkv7_fwd_kernel_with_mask,
+)
 
 
 class TritonWindBackstepping(torch.autograd.Function):

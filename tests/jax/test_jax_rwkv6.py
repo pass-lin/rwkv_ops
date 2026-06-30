@@ -155,7 +155,10 @@ def test_rwkv6_backward_directional(jax_op, native_op, sample_inputs, sample_sha
     )
 
     params_c = [r_c, k_c, v_c, w_c, jnp.reshape(u_c, (-1, N))]
-    loss_cuda = lambda r, k, v, w, u: loss(jax_op, [r, k, v, w, u])
+
+    def loss_cuda(r, k, v, w, u):
+        return loss(jax_op, [r, k, v, w, u])
+
     grad_c = jax.grad(loss_cuda, argnums=(0, 1, 2, 3, 4))(*params_c)
 
     for g in grad_c:

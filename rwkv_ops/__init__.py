@@ -18,9 +18,13 @@ else:
     keras.config.set_backend("torch")
 assert KERNEL_TYPE in ["triton", "cuda", "native"]
 assert BACKEND in ["torch", "jax", "numpy", "tensorflow"]
-from .rwkv7_kernel import get_generalized_delta_rule, get_rnn_generalized_delta_rule
-from .rwkv6_kernel import get_rwkv6_kernel
-from .mhc_kernel import get_mhc_kernel
+from .rwkv7_kernel import (  # noqa: E402
+    get_generalized_delta_rule,
+    get_rnn_generalized_delta_rule,
+)
+
+from .rwkv6_kernel import get_rwkv6_kernel  # noqa: E402
+from .mhc_kernel import get_mhc_kernel  # noqa: E402
 
 generalized_delta_rule, generalized_delta_rule_inference = get_generalized_delta_rule(
     KERNEL_TYPE=KERNEL_TYPE

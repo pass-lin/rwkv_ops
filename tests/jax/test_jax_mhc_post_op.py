@@ -49,15 +49,15 @@ def test_mhc_post_op_backward(ops, mhc_post_inputs):
     h_post = _to_jax(mhc_post_inputs["h_post"], "float32")
     H_res = _to_jax(mhc_post_inputs["H_res"], "float32")
 
-    def loss_fn(op_func, l, x, h, H):
-        out = op_func(l, x, h, H)
+    def loss_fn(op_func, lo, x, h, H):
+        out = op_func(lo, x, h, H)
         return jnp.mean(out.astype(jnp.float32) ** 2)
 
     grad_native = jax.grad(
-        lambda l, x, h, H: loss_fn(native_mhc_op, l, x, h, H), argnums=(0, 1, 2, 3)
+        lambda lo, x, h, H: loss_fn(native_mhc_op, lo, x, h, H), argnums=(0, 1, 2, 3)
     )(layer_out, x_expanded, h_post, H_res)
     grad_triton = jax.grad(
-        lambda l, x, h, H: loss_fn(triton_mhc_op, l, x, h, H), argnums=(0, 1, 2, 3)
+        lambda lo, x, h, H: loss_fn(triton_mhc_op, lo, x, h, H), argnums=(0, 1, 2, 3)
     )(layer_out, x_expanded, h_post, H_res)
 
     names = ["layer_out", "x_expanded", "h_post", "H_res"]

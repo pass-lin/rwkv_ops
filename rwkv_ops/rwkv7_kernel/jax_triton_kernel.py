@@ -80,7 +80,8 @@ def _wkv7_fwd_triton_call(r, w, k, v, a, b, h0):
         jax.ShapeDtypeStruct((B, N, chunk_num, H, H), jnp.float32),  # STATE_CHKP
     ]
 
-    grid = lambda meta: ((B + meta["MINI_BSZ"] - 1) // meta["MINI_BSZ"], N)
+    def grid(meta):
+        return ((B + meta["MINI_BSZ"] - 1) // meta["MINI_BSZ"], N)
 
     out, sa_out, state_chkp = jt.triton_call(
         r,
@@ -128,7 +129,8 @@ def _wkv7_bwd_triton_call(r, w, k, v, a, b, dy, sa, state_chkp, dht):
         jax.ShapeDtypeStruct((B, N, H, H), jnp.float32),  # DH0
     ]
 
-    grid = lambda meta: ((B + meta["MINI_BSZ"] - 1) // meta["MINI_BSZ"], N)
+    def grid(meta):
+        return ((B + meta["MINI_BSZ"] - 1) // meta["MINI_BSZ"], N)
 
     dr, dw, dk, dv, da, db, dh0 = jt.triton_call(
         r,
@@ -211,7 +213,8 @@ def _wkv7_fwd_with_mask_triton_call(r, w, k, v, a, b, h0, mask):
         jax.ShapeDtypeStruct((B, N, chunk_num, H, H), jnp.float32),
     ]
 
-    grid = lambda meta: ((B + meta["MINI_BSZ"] - 1) // meta["MINI_BSZ"], N)
+    def grid(meta):
+        return ((B + meta["MINI_BSZ"] - 1) // meta["MINI_BSZ"], N)
 
     out, sa_out, state_chkp = jt.triton_call(
         r,
@@ -260,7 +263,8 @@ def _wkv7_bwd_with_mask_triton_call(r, w, k, v, a, b, mask, dy, sa, state_chkp, 
         jax.ShapeDtypeStruct((B, N, H, H), jnp.float32),  # DH0
     ]
 
-    grid = lambda meta: ((B + meta["MINI_BSZ"] - 1) // meta["MINI_BSZ"], N)
+    def grid(meta):
+        return ((B + meta["MINI_BSZ"] - 1) // meta["MINI_BSZ"], N)
 
     dr, dw, dk, dv, da, db, dh0 = jt.triton_call(
         r,

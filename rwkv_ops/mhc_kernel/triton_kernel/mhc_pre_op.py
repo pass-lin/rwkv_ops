@@ -260,7 +260,6 @@ def sinkhorn_aggregate_bwd_kernel(
 
     # [2.1] 准备聚合权重与掩码
     off_n = tl.arange(0, NSIZE)
-    n_range = off_n[None, :]
     h_pre_ptr = h_pre_in_ptr + pid_bt * stride_h_pre_bt + off_n * stride_h_pre_n
     h_pre = tl.load(h_pre_ptr).to(tl.float32)
     w_pre = tl.sigmoid(h_pre)

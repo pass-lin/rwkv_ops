@@ -1,4 +1,7 @@
-from ..triton_kernel.mhc_pre_op import *
+from ..triton_kernel.mhc_pre_op import (
+    sinkhorn_aggregate_bwd_kernel,
+    sinkhorn_aggregate_fused_kernel,
+)
 import jax
 import jax.numpy as jnp
 import jax_triton as jt
@@ -86,10 +89,11 @@ def mhc_pre_op_fwd_kernel_call(x, h_res_in, h_pre_in, num_iters, eps):
     sHr_bt, sHr_n1, sHr_n2 = jt.strides_from_shape(out_shapes[1].shape)
 
     # 定义 Grid
-    grid = lambda meta: (
-        jt.cdiv(total_bt, meta["BLOCK_BT"]),
-        jt.cdiv(C, meta["BLOCK_C"]),
-    )
+    def grid(meta):
+        return (
+            jt.cdiv(total_bt, meta["BLOCK_BT"]),
+            jt.cdiv(C, meta["BLOCK_C"]),
+        )
 
     # 调用 Triton
     out_v, H_res_out_v = jt.triton_call(

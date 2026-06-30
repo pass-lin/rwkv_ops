@@ -70,7 +70,7 @@ _set_cuda_host_compiler()
 os.environ.setdefault("KERAS_BACKEND", "jax")
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 
-import pytest
+import pytest  # noqa: E402
 
 pytest.importorskip("jax")
 pytest.importorskip("jax.numpy")

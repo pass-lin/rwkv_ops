@@ -1,8 +1,10 @@
 import torch
 import triton
 
-# 假设你的 kernel 代码保存在这个路径
-from ..triton_kernel.mhc_pre_op import *
+from ..triton_kernel.mhc_pre_op import (
+    sinkhorn_aggregate_bwd_kernel,
+    sinkhorn_aggregate_fused_kernel,
+)
 
 
 def mhc_pre_op_fwd_kernel_call(
@@ -37,10 +39,11 @@ def mhc_pre_op_fwd_kernel_call(
 
     # 5. Grid 计算函数
     # Grid: (Total_BT // BLOCK_BT, C // BLOCK_C)
-    grid = lambda META: (
-        triton.cdiv(Total_BT, META["BLOCK_BT"]),
-        triton.cdiv(C, META["BLOCK_C"]),
-    )
+    def grid(META):
+        return (
+            triton.cdiv(Total_BT, META["BLOCK_BT"]),
+            triton.cdiv(C, META["BLOCK_C"]),
+        )
 
     # 6. 启动 Kernel
     sinkhorn_aggregate_fused_kernel[grid](
