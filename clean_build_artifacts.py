@@ -12,7 +12,6 @@
     python clean_build_artifacts.py
 """
 
-import os
 import shutil
 from pathlib import Path
 
@@ -78,7 +77,7 @@ def _clean_pycache():
     return count
 
 
-def main():
+def clean_all():
     removed = 0
     for pattern in _CLEAN_PATTERNS:
         for path in _glob_paths(pattern):
@@ -91,6 +90,11 @@ def main():
         print("没有找到需要清理的构建产物。")
     else:
         print(f"\n共清理 {removed} 个文件/目录。")
+    return removed
+
+
+def main():
+    clean_all()
 
 
 if __name__ == "__main__":

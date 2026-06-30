@@ -1,0 +1,21 @@
+#!/bin/bash
+# Wrapper around nvcc that prepends a local include path to work around the
+# glibc 2.41+ / CUDA 13.1 conflict where system mathcalls.h declares
+# rsqrt/rsqrtf with noexcept(true) while CUDA's math_functions.h declares them
+# without.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ -n "${REAL_NVCC:-}" ]; then
+    NVCC="$REAL_NVCC"
+elif [ -n "${CUDA_HOME:-}" ] && [ -x "${CUDA_HOME}/bin/nvcc" ]; then
+    NVCC="${CUDA_HOME}/bin/nvcc"
+elif command -v nvcc >/dev/null 2>&1; then
+    NVCC="$(command -v nvcc)"
+else
+    NVCC="/usr/local/cuda/bin/nvcc"
+fi
+
+exec "$NVCC" -I"${SCRIPT_DIR}/include" "$@"

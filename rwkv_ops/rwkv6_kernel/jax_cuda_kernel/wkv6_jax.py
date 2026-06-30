@@ -19,6 +19,9 @@ from jax.experimental.custom_partitioning import custom_partitioning
 
 _CURRENT_DIR = pathlib.Path(__file__).parent.absolute()
 
+# 用于绕过 glibc 2.41+ 与 CUDA 13.1 的 rsqrt noexcept 冲突
+_NVCC_WRAPPER = _CURRENT_DIR.parents[2] / "cuda_tools" / "nvcc_wrap"
+
 # ---------------------------------------------------------------------------
 # Shardy 分片规则（与 rwkv7 风格一致）
 # 字母含义：b=Batch, t=Time, c=Channel(H*N), h=Head, n=HeadDim
@@ -98,6 +101,7 @@ def get_jax_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
             f"-DXLA_INCLUDE_DIR={xla_include_dir}",
             f"-DHEAD_SIZE={head_size}",
             f"-DMAX_SEQUENCE_LENGTH={max_sequence_length}",
+            f"-DCMAKE_CUDA_COMPILER={_NVCC_WRAPPER}",
             f"-DCMAKE_CUDA_FLAGS={' '.join(cuda_flags)}",
         ]
         subprocess.check_call(cmake_args)

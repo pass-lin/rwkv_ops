@@ -21,6 +21,9 @@ dependencies = [
     "keras>=3.0"
 ]
 
+[project.optional-dependencies]
+test = ["pytest>=8.0", "jax-triton>=0.3.1"]
+
 [project.urls]
 "Homepage" = "https://github.com/pass-lin/rwkv_ops"
 

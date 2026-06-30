@@ -15,7 +15,13 @@ rwkv_ops/
 ├── rwkv6_kernel/            # RWKV-6 算子
 └── rwkv7_kernel/            # RWKV-7 广义 delta rule 算子
 
-test_script/                 # 测试脚本
+tests/                       # pytest 测试目录（按后端隔离）
+├── conftest.py              # 公共 fixtures / 数值对比工具
+├── jax/                     # JAX 后端测试
+├── numpy/                   # NumPy 后端测试
+├── tensorflow/              # TensorFlow 后端测试
+└── torch/                   # PyTorch 后端测试
+
 dist/                        # 构建产物（whl）
 pyproject.toml               # hatchling 构建配置
 ```
@@ -244,13 +250,29 @@ y_t = state_t @ r_t
 
 ## 6. 测试规范
 
-### 6.1 测试脚本分类
+### 6.1 测试入口
 
-```text
-test_cuda_kernel.sh      # RWKV7 CUDA 内核正确性（JAX/Torch/TF）
-test_native_kernel.sh    # 原生算子（RWKV6/RWKV7）
-test_triton_kernel.sh    # mHC Triton 算子（JAX/Torch）
+项目使用 pytest，按后端分目录隔离（每个目录的 `conftest.py` 在导入 keras 前设置 `KERAS_BACKEND`）：
+
+```bash
+# 安装测试依赖
+pip install -e ".[test]"
+
+# 各后端入口
+pytest tests/torch -v
+pytest tests/jax -v
+pytest tests/numpy -v
+pytest tests/tensorflow -v
+
+# 跳过较重的 slow 测试
+pytest tests/torch tests/jax -v -m "not slow"
 ```
+
+> **注意**：同一 Python 进程内 Keras 后端只能设定一次，因此 torch/jax 测试必须分进程运行，不要在一个 pytest 进程里同时跑 `tests/torch` 和 `tests/jax`。
+>
+> **文件名约定**：不同后端目录下的测试文件必须保持**唯一的模块名**（例如 `test_torch_rwkv6.py` / `test_jax_rwkv6.py`）。如果多个目录存在同名 `test_rwkv6.py`，pytest 在顶层收集时会发生 `import file mismatch`，导致部分后端测试无法被发现。
+>
+> **JAX 编译器自动选择**：`tests/jax/conftest.py` 会在导入前检测系统 GCC 版本。若默认 GCC 版本过高（如 GCC 15 + CUDA 13.1），会自动在 `PATH` 中寻找 `gcc-13`/`g++-13`、`gcc-12`/`g++-12` 或 `x86_64-conda-linux-gnu-gcc/g++` 并设置 `CC`/`CXX`/`CUDAHOSTCXX`；若用户已显式设置这些变量，则保持用户配置不变。
 
 ### 6.2 测试覆盖要求
 
@@ -264,14 +286,17 @@ test_triton_kernel.sh    # mHC Triton 算子（JAX/Torch）
 ### 6.3 运行单个测试
 
 ```bash
-# RWKV6 原生
-python test_script/test_rwkv6_kernel.py --backend torch --kernel-type native
+# RWKV6 Torch CUDA vs native
+pytest tests/torch/test_torch_rwkv6.py -v
 
-# RWKV7 原生（CPU）
-python test_script/test_rwkv7_native.py --backend tensorflow
+# RWKV7 JAX CUDA
+pytest tests/jax/test_jax_rwkv7.py -v
 
 # mHC Triton（Torch）
-python test_script/test_torch_mhc_post_op_triton.py
+pytest tests/torch/test_torch_mhc_post_op.py -v
+
+# 原生 NumPy smoke
+pytest tests/numpy/test_numpy_native_simple.py -v
 ```
 
 ---
@@ -324,7 +349,7 @@ python test_script/test_torch_mhc_post_op_triton.py
 2. 在 `__init__.py` 中实现工厂函数，按 `KERNEL_TYPE` + `keras.config.backend()` 分发。
 3. 为每个加速后端编写桥接文件，共享同一套 Triton/CUDA 内核。
 4. 在 `rwkv_ops/__init__.py` 中导入并暴露。
-5. 在 `test_script/` 中添加跨后端测试，并更新根目录的 shell 脚本。
+5. 在 `tests/<backend>/` 中添加对应后端的 pytest 测试；文件名需与已有后端保持唯一模块名，避免 `import file mismatch`。
 6. 更新本 `AGENTS.md`、README.md、ENREADME.md 中的支持矩阵。
 
 ---

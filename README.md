@@ -5,6 +5,7 @@
 > 由于 RWKV 将持续迭代，核心算子会随之更新。  
 > 本仓专门维护「算子」本身，不维护 layer 与 model；尽可能提供各框架的 GPU 算子。  
 
+<a id="当前支持"></a>
 ### 当前支持
 | 算子类型 | 框架支持 |
 |----------|----------|
@@ -12,10 +13,38 @@
 | 原生算子 | PyTorch、JAX、TensorFlow、NumPy |
 
 > 未来若 Keras 生态扩展，可能支持 MLX、OpenVINO。  
+
 > 注意：本库依赖 `keras`。
+
+## 目录
+
+  - [当前支持](#当前支持)
+- [安装](#安装)
+- [环境变量](#环境变量)
+- [mhcop 使用方法](#mhcop-使用方法)
+  - [快速开始](#快速开始)
+  - [函数接口说明](#函数接口说明)
+    - [`mhc_pre_op`](#mhc_pre_op)
+    - [`mhc_post_op`](#mhc_post_op)
+  - [mhcop 实现状态](#mhcop-实现状态)
+- [rwkv7op 使用方法](#rwkv7op-使用方法)
+  - [cuda-kernel 特殊用法](#cuda-kernel-特殊用法)
+  - [rwkv7op 实现状态](#rwkv7op-实现状态)
+- [rwkv7_op_rnn 使用方法](#rwkv7_op_rnn-使用方法)
+  - [背景](#背景)
+  - [使用方法](#使用方法)
+  - [rwkv7_op_rnn 实现状态](#rwkv7_op_rnn-实现状态)
+- [rwkv6op 使用方法](#rwkv6op-使用方法)
+  - [PyTorch 使用注意事项](#pytorch-使用注意事项)
+  - [JAX 使用注意事项](#jax-使用注意事项)
+  - [TensorFlow 使用注意事项](#tensorflow-使用注意事项)
+  - [使用方法](#使用方法-1)
+  - [rwkv6op 实现状态](#rwkv6op-实现状态)
+- [测试](#测试)
 
 ---
 
+<a id="安装"></a>
 ## 安装
 
 ```bash
@@ -23,6 +52,7 @@ pip install rwkv_ops
 ```
 
 
+<a id="环境变量"></a>
 ## 环境变量
 
 | 变量名 | 含义 | 取值 | 默认值 | 优先级 |
@@ -32,7 +62,9 @@ pip install rwkv_ops
 | `KERNEL_TYPE` | 实现类型 | `triton` / `cuda` / `native` | `cuda` | — |
 
 > 若 `KERNEL_BACKEND` 有值，直接采用；若为空，则用 `KERAS_BACKEND`；两者皆空则默认 `torch`。  
+
 ---
+<a id="mhcop-使用方法"></a>
 ## mhcop 使用方法
 
 [mHC (Multi-Head Control)](https://arxiv.org/pdf/2512.24880) 是 DeepSeek 实现的一种取代 ResNet 的新残差交互机制。它将传统的单流残差扩展为多流并行，并引入动态聚合与分发。
@@ -41,6 +73,7 @@ pip install rwkv_ops
 * **JAX 端**：XLA 的融合能力极其恐怖，导致 Triton 的提速并不明显（Native 耗时约 ResNet 的 1.5x，Triton 约 1.27x，DeepSeek 原版约 1.06x）。但在 **显存** 方面，Triton 算子通过手写 VJP 强制重计算，在 `128x1024x4x768` 规模下可比 JAX Native 节省 **3~4GB** 显存。注意这里说的是模型整体。  
 * **Torch 端**：由于 `torch.compile` 对此类复杂逻辑的融合效率远不如 XLA，Triton 算子表现出巨大的优势（Pre-Op 提速可达 8 倍，Post-Op 约 3 倍）。**建议 Torch 用户默认开启。** 注意这里说的是单算子，我懒得测torch的模型整体情况了。  
 
+<a id="快速开始"></a>
 ### 快速开始
 
 ```python
@@ -65,8 +98,10 @@ x_next = mhc_post_op(x_layer_out, x, h_post, h_res)
 
 ---
 
+<a id="函数接口说明"></a>
 ### 函数接口说明
 
+<a id="mhc_pre_op"></a>
 #### `mhc_pre_op`
 将多流特征聚合为核心层输入，并生成后续所需的投影系数。
 
@@ -87,6 +122,7 @@ x_next = mhc_post_op(x_layer_out, x, h_post, h_res)
 
 ---
 
+<a id="mhc_post_op"></a>
 #### `mhc_post_op`
 将核心层输出通过门控权重分发回多流，并利用混合矩阵更新流状态。
 
@@ -104,6 +140,7 @@ x_next = mhc_post_op(x_layer_out, x, h_post, h_res)
 ---
 **C必须能被128整除**  
 
+<a id="mhcop-实现状态"></a>
 ### mhcop 实现状态
 
 | Framework | cuda | triton | native |
@@ -120,6 +157,7 @@ x_next = mhc_post_op(x_layer_out, x, h_post, h_res)
 
 ---
 
+<a id="rwkv7op-使用方法"></a>
 ## rwkv7op 使用方法
 
 ```python
@@ -161,6 +199,7 @@ def generalized_delta_rule(
 ```
 generalized_delta_rule_inference和generalized_delta_rule的区别是前者没有梯度。因为不需要存储激活值，所以可以节省一部分显存。
 
+<a id="cuda-kernel-特殊用法"></a>
 ### cuda-kernel 特殊用法
 
 - torch-cuda和jax-cuda kernel 下 `head_size` 也是一个 kernel 参数，默认为 64。  
@@ -185,6 +224,7 @@ if padding_mask is not None:
 - 而如果用的是chunkwise算子，建议统一left padding，如果是cuda或者原生，则都left right都能正确处理
 
 
+<a id="rwkv7op-实现状态"></a>
 ### rwkv7op 实现状态
 
 | Framework   | cuda | triton | native |
@@ -199,11 +239,14 @@ if padding_mask is not None:
 1. `native` 为原生算子，速度慢且显存高。
 2. `cuda`和 `triton`为基于 CUDA 的原生算子，速度很快，并且kernel内部使用fp32实现，所以精度也很高。缺点就是长序列的时候比较吃亏跑不满。
 
+<a id="rwkv7_op_rnn-使用方法"></a>
 ## rwkv7_op_rnn 使用方法
 
+<a id="背景"></a>
 ### 背景
 这是RWKV7 OP的特殊情况，就是我们只考虑长度=1的情况。专门用于推理的decode阶段的加速
 
+<a id="使用方法"></a>
 ### 使用方法
 
 ```python
@@ -231,6 +274,7 @@ def rwkv7_op_rnn(
             last_state: (B, H, K, K) 当 output_final_state=True
         """
 ```
+<a id="rwkv7_op_rnn-实现状态"></a>
 ### rwkv7_op_rnn 实现状态
 
 | Framework   | cuda | triton | native |
@@ -243,8 +287,10 @@ def rwkv7_op_rnn(
 1. native实现我们直接复用了rwkv7_op的native实现
 2. **这个算子没有梯度**
 
+<a id="rwkv6op-使用方法"></a>
 ## rwkv6op 使用方法
 
+<a id="pytorch-使用注意事项"></a>
 ### PyTorch 使用注意事项
 
 - 安装依赖：`keras`、`ninja`、完整的 CUDA 工具包。
@@ -252,6 +298,7 @@ def rwkv7_op_rnn(
 - 虽然 PyTorch 在「虚拟环境中的 CUDA 版本」与「全局 CUDA 版本」不一致时仍可正常运行，但强烈建议保持一致。
 - 算子线程安全（无状态），可在多处调用。
 
+<a id="jax-使用注意事项"></a>
 ### JAX 使用注意事项
 
 - 安装依赖：`keras`、`cmake`、`gcc`、完整的 CUDA 工具包。
@@ -263,12 +310,14 @@ def rwkv7_op_rnn(
 - 确保 `nvcc -V` 正常输出，且 `which nvcc` 指向正确版本。
 - JAX `cuda` 后端基于 `jax.ffi`，支持 JAX >= 0.4.31（含 0.6.x），`bfloat16` 走 CUDA 加速，其它 dtype 自动回退到 `native`。
 
+<a id="tensorflow-使用注意事项"></a>
 ### TensorFlow 使用注意事项
 
 - 仅提供基于原生 API 的 `RWKV6` 算子，效率较低。
 
 ---
 
+<a id="使用方法-1"></a>
 ### 使用方法
 
 RWKV-6 现在与 RWKV-7 一样提供**函数式接口**。
@@ -307,6 +356,7 @@ y, final_state = rwkv6_op(
 ---
 
 
+<a id="rwkv6op-实现状态"></a>
 ### rwkv6op 实现状态
 
 | Framework   | cuda | triton | native |
@@ -317,3 +367,33 @@ y, final_state = rwkv6_op(
 | NumPy       | ❌   | ❌     | ✅     |
 
 JAX `cuda` 后端基于 `jax.ffi`，支持 JAX >= 0.4.31（含 0.6.x）；当前 CUDA FFI 仅对 `bfloat16` 加速，其它 dtype 回退到 `native`。
+
+
+<a id="测试"></a>
+## 测试
+
+项目已迁移到 pytest，测试按后端隔离：
+
+```bash
+# 安装测试依赖
+pip install -e ".[test]"
+
+# torch 后端（包含 rwkv6/rwkv7 CUDA、推理、单步、triton、mHC）
+pytest tests/torch -v
+
+# jax 后端（需要 cmake 与兼容的 GCC）
+pytest tests/jax -v
+
+# numpy / tensorflow 只做 native 简单烟雾测试
+pytest tests/numpy -v
+pytest tests/tensorflow -v
+
+# 跳过编译较重的 slow 测试
+pytest tests/torch tests/jax -v -m "not slow"
+```
+
+每次 pytest 会话结束后会自动清理 `build_*`、`.so` 与 `__pycache__`。
+
+> **注意**：不同后端目录中的测试文件采用了不同的模块名（如 `test_torch_rwkv6.py` / `test_jax_rwkv6.py`），以保证从 `tests` 根目录直接收集时不会出现 `import file mismatch`。如果你新增跨后端测试，请保持文件名唯一。
+>
+> **JAX CUDA 编译兼容性**：`rwkv_ops` 会自动使用项目内的 `cuda_tools/nvcc_wrap` 绕过 glibc 2.41+ 与 CUDA 13.1 之间 `rsqrt` 头文件声明冲突，无需手动修改系统 CUDA 头文件。

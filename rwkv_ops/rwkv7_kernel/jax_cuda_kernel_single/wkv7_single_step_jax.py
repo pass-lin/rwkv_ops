@@ -14,6 +14,9 @@ from typing import Optional, Tuple, Union
 # ---------- 延迟编译（改到当前目录） ----------
 _CURRENT_DIR = pathlib.Path(__file__).parent.absolute()
 
+# 用于绕过 glibc 2.41+ 与 CUDA 13.1 的 rsqrt noexcept 冲突
+_NVCC_WRAPPER = _CURRENT_DIR.parents[2] / "cuda_tools" / "nvcc_wrap"
+
 
 def get_jax_generalized_delta_rule_single_step(HEAD_SIZE=64):
     _BUILD_DIR = _CURRENT_DIR / f"build_single_step_{HEAD_SIZE}"
@@ -57,6 +60,7 @@ def get_jax_generalized_delta_rule_single_step(HEAD_SIZE=64):
             "-DCMAKE_BUILD_TYPE=Release",
             f"-DCMAKE_INSTALL_PREFIX={_CURRENT_DIR}",
             f"-DXLA_INCLUDE_DIR={xla_include_dir}",
+            f"-DCMAKE_CUDA_COMPILER={_NVCC_WRAPPER}",
             f"-DCMAKE_CUDA_FLAGS={' '.join(cuda_flags)}",
         ]
         subprocess.check_call(cmake_args)

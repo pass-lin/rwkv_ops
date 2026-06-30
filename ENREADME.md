@@ -3,6 +3,7 @@
 > As RWKV continues to evolve, the core operators will be updated accordingly.  
 > This repository is dedicated to maintaining the **operators** themselves, not layers or models; it aims to provide GPU-accelerated operators for various frameworks.
 
+<a id="current-support"></a>
 ### Current Support
 | Operator Type | Framework Support |
 |---------------|-------------------|
@@ -10,10 +11,38 @@
 | Native operators | PyTorch, JAX, TensorFlow, NumPy |
 
 > If the Keras ecosystem expands, MLX and OpenVINO may be supported in the future.  
+
 > Note: This library depends on `keras`.
+
+## Table of Contents
+
+  - [Current Support](#current-support)
+- [Installation](#installation)
+- [Environment Variables](#environment-variables)
+- [mHC Operations Usage](#mhc-operations-usage)
+  - [Quick Start](#quick-start)
+  - [API Reference](#api-reference)
+    - [`mhc_pre_op`](#mhc_pre_op)
+    - [`mhc_post_op`](#mhc_post_op)
+  - [mHC Implementation Status](#mhc-implementation-status)
+- [rwkv7op Usage Guide](#rwkv7op-usage-guide)
+  - [CUDA-kernel special usage](#cuda-kernel-special-usage)
+  - [rwkv7op implementation status](#rwkv7op-implementation-status)
+- [Usage of `rwkv7_op_rnn`](#usage-of-rwkv7_op_rnn)
+  - [Background](#background)
+  - [Usage](#usage)
+  - [Implementation Status of `rwkv7_op_rnn`](#implementation-status-of-rwkv7_op_rnn)
+- [Usage of `rwkv6op`](#usage-of-rwkv6op)
+  - [PyTorch Usage Notes](#pytorch-usage-notes)
+  - [JAX Usage Notes](#jax-usage-notes)
+  - [TensorFlow Usage Notes](#tensorflow-usage-notes)
+  - [Usage](#usage-1)
+  - [rwkv6op Implementation Status](#rwkv6op-implementation-status)
+- [Testing](#testing)
 
 ---
 
+<a id="installation"></a>
 ## Installation
 
 ```bash
@@ -23,6 +52,7 @@ pip install rwkv_ops
 
 ---
 
+<a id="environment-variables"></a>
 ## Environment Variables
 
 | Variable Name | Meaning | Values | Default | Priority |
@@ -37,6 +67,7 @@ pip install rwkv_ops
 
 ---
 
+<a id="mhc-operations-usage"></a>
 ## mHC Operations Usage
 
 [mHC (Multi-Head Control)](https://arxiv.org/pdf/2512.24880) is a new residual interaction mechanism introduced by DeepSeek as an evolution/replacement for standard ResNet. It extends the traditional single-stream residual connection into a parallel multi-stream architecture, introducing dynamic aggregation and distribution.
@@ -45,6 +76,7 @@ This repository provides Keras-compatible kernels implemented in **Triton**. As 
 * **JAX Backend**: XLA's fusion capabilities are formidable, making the Triton speedup less significant (Native latency is ~1.5x ResNet, Triton is ~1.27x, while DeepSeek's expert-optimized version is ~1.06x). However, in terms of **VRAM usage**, the Triton operator uses a custom VJP to force recomputation, saving **3~4GB VRAM** for a full model (tested at `128x1024x4x768`) compared to JAX Native.
 * **Torch Backend**: Since `torch.compile` is currently less efficient at fusing such complex logic than XLA, the Triton operator shows significant advantages (**Pre-Op is ~8x faster, Post-Op is ~3x faster** in single-op benchmarks). **It is highly recommended for Torch users to enable Triton by default.** (Note: These benchmarks refer to individual operators).
 
+<a id="quick-start"></a>
 ### Quick Start
 
 ```python
@@ -69,8 +101,10 @@ x_next = mhc_post_op(x_layer_out, x, h_post, h_res)
 
 ---
 
+<a id="api-reference"></a>
 ### API Reference
 
+<a id="mhc_pre_op"></a>
 #### `mhc_pre_op`
 Aggregates multi-stream features into the core layer input and generates coefficients for subsequent stages.
 
@@ -91,6 +125,7 @@ Aggregates multi-stream features into the core layer input and generates coeffic
 
 ---
 
+<a id="mhc_post_op"></a>
 #### `mhc_post_op`
 Distributes the core layer output back to multiple streams using gated weights and updates the stream states via the mixing matrix.
 
@@ -108,6 +143,7 @@ Distributes the core layer output back to multiple streams using gated weights a
 ---
 **Constraint: The channel dimension `C` must be divisible by 128.**
 
+<a id="mhc-implementation-status"></a>
 ### mHC Implementation Status
 
 | Framework | cuda | triton | native |
@@ -123,6 +159,7 @@ Distributes the core layer output back to multiple streams using gated weights a
 > 3. **Consistency**: JAX and Torch share the same Triton logic; performance differences arise from how each backend schedules external kernels (XLA has superior graph-packing, while Torch is currently weaker in this regard).
 
 ---
+<a id="rwkv7op-usage-guide"></a>
 ## rwkv7op Usage Guide
 
 ```python
@@ -164,6 +201,7 @@ def generalized_delta_rule(
 
 The only difference between `generalized_delta_rule_inference` and `generalized_delta_rule` is that the former does not compute gradients. Because activations need not be stored, memory consumption is reduced.
 
+<a id="cuda-kernel-special-usage"></a>
 ### CUDA-kernel special usage
 
 - In the `torch-cuda` and `jax-cuda` kernels, `head_size` is also a kernel parameter; the default is 64.  
@@ -189,6 +227,7 @@ if padding_mask is not None:
 - When the chunkwise kernel is used, **left padding is recommended**.  
   With the CUDA or native kernels, both left and right padding work correctly.
 
+<a id="rwkv7op-implementation-status"></a>
 ### rwkv7op implementation status
 
 | Framework   | cuda | triton | native |
@@ -203,13 +242,17 @@ if padding_mask is not None:
 
 1. `native` = pure-Python / pure-JAX implementation, no chunking, slow and memory-hungry.  
 2. `cuda` = hand-written CUDA kernel, very fast and internally uses FP32, so accuracy is high. Its weakness is throughput on very long sequences.  
+
 ---
 
+<a id="usage-of-rwkv7_op_rnn"></a>
 ## Usage of `rwkv7_op_rnn`
 
+<a id="background"></a>
 ### Background
 This is a special case of RWKV7 OP for **sequence length = 1**, optimized for the **decoding stage** in inference.
 
+<a id="usage"></a>
 ### Usage
 
 ```python
@@ -241,6 +284,7 @@ def rwkv7_op_rnn(
     """
 ```
 
+<a id="implementation-status-of-rwkv7_op_rnn"></a>
 ### Implementation Status of `rwkv7_op_rnn`
 
 | Framework   | cuda | triton | native |
@@ -252,10 +296,13 @@ def rwkv7_op_rnn(
 
 1. Native implementation reuses `rwkv7_op`’s native code.
 2. **This operator has no gradient support**.
+
 ---
 
+<a id="usage-of-rwkv6op"></a>
 ## Usage of `rwkv6op`
 
+<a id="pytorch-usage-notes"></a>
 ### PyTorch Usage Notes
 
 - Dependencies: `keras`, `ninja`, and a complete CUDA toolkit.
@@ -263,6 +310,7 @@ def rwkv7_op_rnn(
 - Although PyTorch can run normally even if the CUDA version in the virtual environment is inconsistent with the global CUDA version, it is strongly recommended to keep them consistent.
 - The operator is thread-safe (stateless) and can be called from multiple places.
 
+<a id="jax-usage-notes"></a>
 ### JAX Usage Notes
 
 - Dependencies: `keras`, `cmake`, `gcc`, and a complete CUDA toolkit.
@@ -274,12 +322,14 @@ def rwkv7_op_rnn(
 - Ensure that `nvcc -V` outputs correctly and that `which nvcc` points to the correct version.
 - JAX `cuda` backend uses `jax.ffi` and supports JAX >= 0.4.31 (including 0.6.x). `bfloat16` is accelerated via CUDA; other dtypes fall back to `native`.
 
+<a id="tensorflow-usage-notes"></a>
 ### TensorFlow Usage Notes
 
 - Only native API-based `RWKV6` operators are provided, which have low efficiency.
 
 ---
 
+<a id="usage-1"></a>
 ### Usage
 
 Like `rwkv7`, `RWKV6` now exposes a **functional interface**.
@@ -320,6 +370,7 @@ y, final_state = rwkv6_op(
 
 ---
 
+<a id="rwkv6op-implementation-status"></a>
 ### rwkv6op Implementation Status
 
 | Framework   | cuda | triton | native |
@@ -330,3 +381,33 @@ y, final_state = rwkv6_op(
 | NumPy       | ❌   | ❌     | ✅     |
 
 JAX `cuda` backend is based on `jax.ffi` and supports JAX >= 0.4.31 (including 0.6.x). Currently, only `bfloat16` is CUDA-accelerated; other dtypes fall back to `native`.
+
+
+<a id="testing"></a>
+## Testing
+
+The project has been migrated to pytest, with tests isolated by backend:
+
+```bash
+# Install test dependencies
+pip install -e ".[test]"
+
+# torch backend (covers rwkv6/rwkv7 CUDA, inference, single-step, triton, mHC)
+pytest tests/torch -v
+
+# jax backend (requires cmake and a compatible GCC)
+pytest tests/jax -v
+
+# numpy / tensorflow only run native smoke tests
+pytest tests/numpy -v
+pytest tests/tensorflow -v
+
+# Skip heavier slow tests
+pytest tests/torch tests/jax -v -m "not slow"
+```
+
+After each pytest session, `build_*` directories, `.so` files, and `__pycache__` are automatically cleaned up.
+
+> **Note**: Test files in different backend directories use unique module names (e.g. `test_torch_rwkv6.py` / `test_jax_rwkv6.py`) so that collecting from the `tests` root does not hit pytest's `import file mismatch`. Keep filenames unique when adding cross-backend tests.
+>
+> **JAX CUDA compilation compatibility**: `rwkv_ops` automatically uses the in-tree `cuda_tools/nvcc_wrap` to work around the `rsqrt` header conflict between glibc 2.41+ and CUDA 13.1, so no system CUDA header patching is required.

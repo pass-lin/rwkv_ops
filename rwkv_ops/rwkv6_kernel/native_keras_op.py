@@ -5,7 +5,6 @@ RWKV-6 原生 Keras-ops 实现（函数式接口）。
 仅将其封装为与 CUDA 版本一致的函数签名。
 """
 
-from functools import partial
 from .ops_rwkv_kernel import RWKVKernelOperator
 
 

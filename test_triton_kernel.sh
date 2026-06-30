@@ -1,4 +1,0 @@
-python test_script/test_jax_mhc_post_op_triton.py
-python test_script/test_jax_mhc_pre_op_triton.py
-python test_script/test_torch_mhc_post_op_triton.py
-python test_script/test_torch_mhc_pre_op_triton.py

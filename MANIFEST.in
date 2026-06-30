@@ -1,6 +1,7 @@
 global-include *.py
 global-include *.cu *.cpp *.cc *.h *.hpp *.cuh *.hip
 global-include CMakeLists.txt *.cmake *.txt
+recursive-include cuda_tools *
 
 
 global-exclude __pycache__
