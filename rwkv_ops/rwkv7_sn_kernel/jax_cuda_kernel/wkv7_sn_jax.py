@@ -17,7 +17,7 @@ from jax.experimental.custom_partitioning import custom_partitioning
 
 CHUNK_LEN = 16
 _CURRENT_DIR = pathlib.Path(__file__).parent.absolute()
-_NVCC_WRAPPER = _CURRENT_DIR.parents[2] / "cuda_tools" / "nvcc_wrap"
+_NVCC_WRAPPER = _CURRENT_DIR.parents[1] / "cuda_tools" / "nvcc_wrap"
 
 FWD_RULE = (
     "b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b c h, b c, b h k v -> "

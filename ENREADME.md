@@ -517,4 +517,4 @@ After each pytest session, `build_*` directories, `.so` files, and `__pycache__`
 
 > **Note**: Test files in different backend directories use unique module names (e.g. `test_torch_rwkv6.py` / `test_jax_rwkv6.py`) so that collecting from the `tests` root does not hit pytest's `import file mismatch`. Keep filenames unique when adding cross-backend tests.
 >
-> **JAX CUDA compilation compatibility**: `rwkv_ops` automatically uses the in-tree `cuda_tools/nvcc_wrap` to work around the `rsqrt` header conflict between glibc 2.41+ and CUDA 13.1, so no system CUDA header patching is required.
+> **JAX CUDA compilation compatibility**: `rwkv_ops` automatically uses the in-tree `rwkv_ops/cuda_tools/nvcc_wrap` to work around the `rsqrt` header conflict between glibc 2.41+ and CUDA 13.1, so no system CUDA header patching is required.

@@ -22,7 +22,7 @@ _CURRENT_DIR = pathlib.Path(
 ).parent.absolute()  # rwkv_ops/rwkv7_kernel/jax_cuda_kernel
 
 # 用于绕过 glibc 2.41+ 与 CUDA 13.1 的 rsqrt noexcept 冲突
-_NVCC_WRAPPER = _CURRENT_DIR.parents[2] / "cuda_tools" / "nvcc_wrap"
+_NVCC_WRAPPER = _CURRENT_DIR.parents[1] / "cuda_tools" / "nvcc_wrap"
 
 # =========================================================================
 # 【核心修复】：为 Shardy 引擎定义的静态 Einsum 切分映射字符串

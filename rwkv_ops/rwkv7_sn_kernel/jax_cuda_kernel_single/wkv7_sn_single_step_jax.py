@@ -11,7 +11,7 @@ import jax.numpy as jnp
 from typing import Optional, Tuple, Union
 
 _CURRENT_DIR = pathlib.Path(__file__).parent.absolute()
-_NVCC_WRAPPER = _CURRENT_DIR.parents[2] / "cuda_tools" / "nvcc_wrap"
+_NVCC_WRAPPER = _CURRENT_DIR.parents[1] / "cuda_tools" / "nvcc_wrap"
 
 
 def get_jax_generalized_delta_rule_sn_single_step(HEAD_SIZE=64):

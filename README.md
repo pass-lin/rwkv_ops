@@ -499,4 +499,4 @@ pytest tests/torch tests/jax -v -m "not slow"
 
 > **注意**：不同后端目录中的测试文件采用了不同的模块名（如 `test_torch_rwkv6.py` / `test_jax_rwkv6.py`），以保证从 `tests` 根目录直接收集时不会出现 `import file mismatch`。如果你新增跨后端测试，请保持文件名唯一。
 >
-> **JAX CUDA 编译兼容性**：`rwkv_ops` 会自动使用项目内的 `cuda_tools/nvcc_wrap` 绕过 glibc 2.41+ 与 CUDA 13.1 之间 `rsqrt` 头文件声明冲突，无需手动修改系统 CUDA 头文件。
+> **JAX CUDA 编译兼容性**：`rwkv_ops` 会自动使用项目内的 `rwkv_ops/cuda_tools/nvcc_wrap` 绕过 glibc 2.41+ 与 CUDA 13.1 之间 `rsqrt` 头文件声明冲突，无需手动修改系统 CUDA 头文件。

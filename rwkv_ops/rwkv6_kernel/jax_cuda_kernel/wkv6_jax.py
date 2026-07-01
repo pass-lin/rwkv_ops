@@ -21,7 +21,7 @@ from jax.experimental.custom_partitioning import custom_partitioning
 _CURRENT_DIR = pathlib.Path(__file__).parent.absolute()
 
 # 用于绕过 glibc 2.41+ 与 CUDA 13.1 的 rsqrt noexcept 冲突
-_NVCC_WRAPPER = _CURRENT_DIR.parents[2] / "cuda_tools" / "nvcc_wrap"
+_NVCC_WRAPPER = _CURRENT_DIR.parents[1] / "cuda_tools" / "nvcc_wrap"
 
 # ---------------------------------------------------------------------------
 # Shardy 分片规则（与 rwkv7 风格一致）

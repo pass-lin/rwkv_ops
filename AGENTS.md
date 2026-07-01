@@ -26,7 +26,7 @@
 - 输入 `r,w,k,v,a,b` 强制 cast 到 `bfloat16`，State 和 `tau` 保持 `float32`。
 - 训练 kernel 的 checkpoint `s_` 保存 **SN 之前** 的 State，供反向使用。
 - 反向时先算 `dtau`，再把 `dstate`/`dstateT` 乘 `sech2`。
-- Torch 通过 `torch.utils.cpp_extension.load` 延迟编译；JAX 通过 `cmake` + `cuda_tools/nvcc_wrap` 编译 FFI `.so`。
+- Torch 通过 `torch.utils.cpp_extension.load` 延迟编译；JAX 通过 `cmake` + `rwkv_ops/cuda_tools/nvcc_wrap` 编译 FFI `.so`。
 
 ### 训练与推理 kernel 的取舍
 
@@ -47,4 +47,4 @@
 ## 构建与清理
 
 - JAX FFI 构建产物位于 `rwkv_ops/*/jax_cuda_kernel*/build_*` 和对应 `.so`，由 `clean_build_artifacts.clean_all()` 在测试后自动清理。
-- CUDA 13.1 与新版 glibc 的 `rsqrt`/`rsqrtf` 冲突通过 `cuda_tools/nvcc_wrap` 绕过，不要修改系统 CUDA 头文件。
+- CUDA 13.1 与新版 glibc 的 `rsqrt`/`rsqrtf` 冲突通过 `rwkv_ops/cuda_tools/nvcc_wrap` 绕过，不要修改系统 CUDA 头文件。

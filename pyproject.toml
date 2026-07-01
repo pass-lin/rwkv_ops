@@ -36,4 +36,5 @@ packages = [
     "rwkv_ops.rwkv6_kernel",
     "rwkv_ops.rwkv7_kernel",
     "rwkv_ops.rwkv7_sn_kernel",
+    "rwkv_ops.cuda_tools",
 ]
