@@ -34,6 +34,10 @@
   - [背景](#背景)
   - [使用方法](#使用方法)
   - [rwkv7_op_rnn 实现状态](#rwkv7_op_rnn-实现状态)
+- [rwkv7op_sn 使用方法](#rwkv7op_sn-使用方法)
+  - [rwkv7op_sn 实现状态](#rwkv7op_sn-实现状态)
+- [rwkv7_op_sn_rnn 使用方法](#rwkv7_op_sn_rnn-使用方法)
+  - [rwkv7_op_sn_rnn 实现状态](#rwkv7_op_sn_rnn-实现状态)
 - [rwkv6op 使用方法](#rwkv6op-使用方法)
   - [PyTorch 使用注意事项](#pytorch-使用注意事项)
   - [JAX 使用注意事项](#jax-使用注意事项)
@@ -286,6 +290,104 @@ def rwkv7_op_rnn(
 
 1. native实现我们直接复用了rwkv7_op的native实现
 2. **这个算子没有梯度**
+
+<a id="rwkv7op_sn-使用方法"></a>
+## rwkv7op_sn 使用方法
+
+```python
+from rwkv_ops import generalized_delta_rule_sn, generalized_delta_rule_sn_inference
+
+def generalized_delta_rule_sn(
+    r,
+    w,
+    k,
+    v,
+    a,
+    b,
+    tau,                  # [B, T//16, H]，float32，已预处理为 softplus(param)+1
+    initial_state=None,
+    output_final_state: bool = True,
+    head_first: bool = False,
+):
+    """
+    带 State Norm 的 RWKV-7 广义 Delta 规则（训练 / prefill 通用）。
+    不再内置 token-level mask；padding 请在外部保证 k=0, a=0, w=-inf，
+    并将全 padding chunk 的 tau 置 0.0。
+
+    Args:
+        r, w, k, v, a, b: [B, T, H, K] 或 [B, H, T, K]，T 必须被 16 整除。
+        tau: [B, T//16, H]，有效 chunk > 0，padding chunk = 0.0。
+        initial_state: [B, H, K, K] 或 [1, H, K, K]。
+        output_final_state: 是否返回最终 State。
+        head_first: 是否 head-first。
+
+    Returns:
+        out: [B, T, H, K]
+        final_state: [B, H, K, K]
+    """
+```
+
+`generalized_delta_rule_sn_inference` 与 `generalized_delta_rule_sn` 接口一致，但**不计算梯度**，可节省显存。
+注意：当前推理 kernel 仍按 chunk 读取 `tau`，所以 **T 仍需被 16 整除**；若需要任意长度 prefill，请使用下方的单步 RNN 接口。
+
+<a id="rwkv7op_sn-实现状态"></a>
+### rwkv7op_sn 实现状态
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ✅   | ❌     | ✅     |
+| JAX         | ✅   | ❌     | ✅     |
+| TensorFlow  | ❌    | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+
+<a id="rwkv7_op_sn_rnn-使用方法"></a>
+## rwkv7_op_sn_rnn 使用方法
+
+```python
+from rwkv_ops import rwkv7_op_sn_rnn
+
+def rwkv7_op_sn_rnn(
+    r,                    # [B, 1, H, K] 或 [B, H, 1, K]
+    w,
+    k,
+    v,
+    a,
+    b,
+    tau,                  # [B, H]，float32
+    do_sn,                # bool 或 [B] bool，True 表示本步后执行 State Norm
+    initial_state=None,
+    output_final_state: bool = True,
+    head_first: bool = False,
+):
+    """
+    带 State Norm 的 RWKV-7 单步推理（RNN 模式）。
+    输出基于 SN 前的 State，state_out 已按 do_sn 应用 SN。
+    """
+```
+
+调用示例（每 16 步触发一次 SN）：
+
+```python
+for step in range(seq_len):
+    do_sn = (step % 16 == 15)
+    out, state = rwkv7_op_sn_rnn(
+        r[step], w[step], k[step], v[step], a[step], b[step],
+        tau=tau, do_sn=do_sn, initial_state=state
+    )
+```
+
+<a id="rwkv7_op_sn_rnn-实现状态"></a>
+### rwkv7_op_sn_rnn 实现状态
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ✅   | ❌     | ✅     |
+| JAX         | ✅   | ❌     | ✅     |
+| TensorFlow  | ❌    | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+
+1. 单步算子**没有梯度**。
+2. CUDA 版本会强制把输入 cast 到 bfloat16，与 rwkv7_op_rnn 行为一致。
 
 <a id="rwkv6op-使用方法"></a>
 ## rwkv6op 使用方法

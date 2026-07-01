@@ -89,6 +89,18 @@ def rwkv7_inputs(rng, rwkv7_shape):
 
 
 @pytest.fixture(scope="session")
+def rwkv7_sn_inputs(rng, rwkv7_inputs):
+    """
+    RWKV-7-SN 测试输入：在 rwkv7_inputs 基础上补充 tau。
+    tau = softplus(x) + 1，x 随机，均值约 4 以让 tau 接近 100（近似恒等映射）。
+    """
+    B, T, H, _ = rwkv7_inputs["r"].shape
+    x = rng.standard_normal((B, T // 16, H), dtype=np.float32) * 0.5 + 7.0
+    tau = np.log1p(np.exp(x)) + 1.0
+    return {**rwkv7_inputs, "tau": tau.astype(np.float32)}
+
+
+@pytest.fixture(scope="session")
 def mhc_shape():
     """mHC 默认 (B, T, n, C)。"""
     return 64, 64, 4, 512

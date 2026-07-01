@@ -32,6 +32,10 @@
   - [Background](#background)
   - [Usage](#usage)
   - [Implementation Status of `rwkv7_op_rnn`](#implementation-status-of-rwkv7_op_rnn)
+- [Usage of `rwkv7op_sn`](#usage-of-rwkv7op_sn)
+  - [rwkv7op_sn implementation status](#rwkv7op_sn-implementation-status)
+- [Usage of `rwkv7_op_sn_rnn`](#usage-of-rwkv7_op_sn_rnn)
+  - [Implementation Status of `rwkv7_op_sn_rnn`](#implementation-status-of-rwkv7_op_sn_rnn)
 - [Usage of `rwkv6op`](#usage-of-rwkv6op)
   - [PyTorch Usage Notes](#pytorch-usage-notes)
   - [JAX Usage Notes](#jax-usage-notes)
@@ -296,6 +300,108 @@ def rwkv7_op_rnn(
 
 1. Native implementation reuses `rwkv7_op`’s native code.
 2. **This operator has no gradient support**.
+
+---
+
+<a id="usage-of-rwkv7op_sn"></a>
+## Usage of `rwkv7op_sn`
+
+```python
+from rwkv_ops import generalized_delta_rule_sn, generalized_delta_rule_sn_inference
+
+def generalized_delta_rule_sn(
+    r,
+    w,
+    k,
+    v,
+    a,
+    b,
+    tau,                  # [B, T//16, H], float32, already softplus(param)+1
+    initial_state=None,
+    output_final_state: bool = True,
+    head_first: bool = False,
+):
+    """
+    RWKV-7 generalized delta rule with State Norm (training / prefill).
+    No built-in token-level mask; padding must be handled externally by
+    setting k=0, a=0, w=-inf, and tau=0.0 for fully-padded chunks.
+
+    Args:
+        r, w, k, v, a, b: [B, T, H, K] or [B, H, T, K], T must be divisible by 16.
+        tau: [B, T//16, H], valid chunk > 0, padded chunk = 0.0.
+        initial_state: [B, H, K, K] or [1, H, K, K].
+        output_final_state: whether to return the final state.
+        head_first: whether input is head-first.
+
+    Returns:
+        out: [B, T, H, K]
+        final_state: [B, H, K, K]
+    """
+```
+
+`generalized_delta_rule_sn_inference` has the same interface but **does not compute gradients**, saving memory.
+Note: the inference kernel still reads `tau` per chunk, so **T must still be divisible by 16**; for arbitrary-length prefill, use the single-step RNN interface below.
+
+<a id="rwkv7op_sn-implementation-status"></a>
+### rwkv7op_sn implementation status
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ✅   | ❌     | ✅     |
+| JAX         | ✅   | ❌     | ✅     |
+| TensorFlow  | ❌    | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+
+---
+
+<a id="usage-of-rwkv7_op_sn_rnn"></a>
+## Usage of `rwkv7_op_sn_rnn`
+
+```python
+from rwkv_ops import rwkv7_op_sn_rnn
+
+def rwkv7_op_sn_rnn(
+    r,                    # [B, 1, H, K] or [B, H, 1, K]
+    w,
+    k,
+    v,
+    a,
+    b,
+    tau,                  # [B, H], float32
+    do_sn,                # bool or [B] bool, True -> apply State Norm after this step
+    initial_state=None,
+    output_final_state: bool = True,
+    head_first: bool = False,
+):
+    """
+    RWKV-7 single-step inference with State Norm (RNN mode).
+    Output is computed from the pre-SN state; state_out has SN applied when do_sn is True.
+    """
+```
+
+Example (trigger SN every 16 steps):
+
+```python
+for step in range(seq_len):
+    do_sn = (step % 16 == 15)
+    out, state = rwkv7_op_sn_rnn(
+        r[step], w[step], k[step], v[step], a[step], b[step],
+        tau=tau, do_sn=do_sn, initial_state=state
+    )
+```
+
+<a id="implementation-status-of-rwkv7_op_sn_rnn"></a>
+### Implementation Status of `rwkv7_op_sn_rnn`
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ✅   | ❌     | ✅     |
+| JAX         | ✅   | ❌     | ✅     |
+| TensorFlow  | ❌    | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+
+1. Single-step operator **has no gradient support**.
+2. The CUDA version casts inputs to bfloat16 internally, same as `rwkv7_op_rnn`.
 
 ---
 

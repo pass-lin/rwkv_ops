@@ -22,6 +22,10 @@ from .rwkv7_kernel import (  # noqa: E402
     get_generalized_delta_rule,
     get_rnn_generalized_delta_rule,
 )
+from .rwkv7_sn_kernel import (  # noqa: E402
+    get_generalized_delta_rule_sn,
+    get_rnn_generalized_delta_rule_sn,
+)
 
 from .rwkv6_kernel import get_rwkv6_kernel  # noqa: E402
 from .mhc_kernel import get_mhc_kernel  # noqa: E402
@@ -34,6 +38,18 @@ rwkv7_op_inference = generalized_delta_rule_inference
 
 rnn_generalized_delta_rule = get_rnn_generalized_delta_rule(KERNEL_TYPE=KERNEL_TYPE)
 rwkv7_op_rnn = rnn_generalized_delta_rule
+
+(
+    generalized_delta_rule_sn,
+    generalized_delta_rule_sn_inference,
+) = get_generalized_delta_rule_sn(KERNEL_TYPE=KERNEL_TYPE)
+rwkv7_op_sn = generalized_delta_rule_sn
+rwkv7_op_sn_inference = generalized_delta_rule_sn_inference
+
+rnn_generalized_delta_rule_sn = get_rnn_generalized_delta_rule_sn(
+    KERNEL_TYPE=KERNEL_TYPE
+)
+rwkv7_op_sn_rnn = rnn_generalized_delta_rule_sn
 
 
 rwkv6_op = get_rwkv6_kernel(KERNEL_TYPE=KERNEL_TYPE)

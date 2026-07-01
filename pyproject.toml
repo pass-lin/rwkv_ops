@@ -30,6 +30,7 @@ test = ["pytest>=8.0", "jax-triton>=0.3.1"]
 [tool.hatch.build.targets.wheel]
 packages = [
     "rwkv_ops",
-    "rwkv_ops.rwkv6_kernel", 
-    "rwkv_ops.rwkv7_kernel"
+    "rwkv_ops.rwkv6_kernel",
+    "rwkv_ops.rwkv7_kernel",
+    "rwkv_ops.rwkv7_sn_kernel",
 ]
