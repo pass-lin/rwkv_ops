@@ -28,7 +28,7 @@ def rwkv6(
         u: [H, N] 或 [C]
         initial_state: 可选，[B, H, N, N] 或 [H, N, N]
         output_final_state: 是否返回最终状态
-        state_map: [B] int32，当 initial_state 的 batch 维度与 B 不一致时使用
+        state_map: [B] int64，当 initial_state 的 batch 维度与 B 不一致时使用
         head_size: 每个 head 的维度，默认 64
         max_sequence_length: 最大序列长度，默认 4096
 

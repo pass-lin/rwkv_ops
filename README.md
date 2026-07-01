@@ -441,7 +441,7 @@ y, final_state = rwkv6_op(
 | r, k, v, w | (B, T, C) 或 (B, H, T, N) | — |
 | u | (H, N) 或 (C,) | — |
 | initial_state | (S, H, N, N) 或 (H, N, N) | S=1 时所有样本共用；S=B 时一一对应 |
-| state_map | (B,) int32 | 指定每个样本用到的 initial_state 索引 |
+| state_map | (B,) int64 | 指定每个样本用到的 initial_state 索引 |
 
 | 返回值 | 形状 | 说明 |
 |---|---|---|

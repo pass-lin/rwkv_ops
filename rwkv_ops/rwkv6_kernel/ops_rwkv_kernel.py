@@ -41,10 +41,10 @@ class RWKVKernelOperator:
             if state_map is None:
                 state_kinds = init_state.shape[0]
                 if state_kinds == 1:
-                    state_map = ops.zeros(shape=(B,), dtype="int32")
+                    state_map = ops.zeros(shape=(B,), dtype="int64")
                 elif state_kinds == B:
                     state_map = ops.convert_to_tensor(
-                        [i for i in range(B)], dtype="int32"
+                        [i for i in range(B)], dtype="int64"
                     )
                 else:
                     raise ValueError(
@@ -53,8 +53,8 @@ class RWKVKernelOperator:
 
             else:
                 if isinstance(state_map, list):
-                    state_map = ops.convert_to_tensor(state_map, dtype="int32")
-                state_map = ops.cast(state_map, "int32")
+                    state_map = ops.convert_to_tensor(state_map, dtype="int64")
+                state_map = ops.cast(state_map, "int64")
                 assert (state_map >= 0).all() and (state_map < state_kinds).all(), (
                     f"请确保state_map的值域为[0, {state_kinds})"
                 )

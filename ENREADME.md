@@ -457,7 +457,7 @@ y, final_state = rwkv6_op(
 | r, k, v, w | (B, T, C) or (B, H, T, N) | — |
 | u | (H, N) or (C,) | — |
 | initial_state | (S, H, N, N) or (H, N, N) | S=1 shared; S=B one-to-one |
-| state_map | (B,) int32 | Index into initial_state for each sample |
+| state_map | (B,) int64 | Index into initial_state for each sample |
 
 | Return Value | Shape | Description |
 |--------------|-------|-------------|
