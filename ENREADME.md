@@ -316,19 +316,20 @@ def generalized_delta_rule_sn(
     v,
     a,
     b,
-    tau,                  # [B, T//16, H], float32, already softplus(param)+1
+    tau,                  # [B, T//16, H], float32, already softplus(param)+1, must be > 0
+    mask=None,            # [B, T//16], float32, 1 -> apply SN, 0 -> skip; shared across heads
     initial_state=None,
     output_final_state: bool = True,
     head_first: bool = False,
 ):
     """
     RWKV-7 generalized delta rule with State Norm (training / prefill).
-    No built-in token-level mask; padding must be handled externally by
-    setting k=0, a=0, w=-inf, and tau=0.0 for fully-padded chunks.
 
     Args:
         r, w, k, v, a, b: [B, T, H, K] or [B, H, T, K], T must be divisible by 16.
-        tau: [B, T//16, H], valid chunk > 0, padded chunk = 0.0.
+        tau: [B, T//16, H], float32, must be > 0.
+        mask: [B, T//16], float32, 0/1 per-chunk flag for State Norm;
+              defaults to all ones. Set padded chunks to 0 and keep k=0, a=0, w=-inf.
         initial_state: [B, H, K, K] or [1, H, K, K].
         output_final_state: whether to return the final state.
         head_first: whether input is head-first.
@@ -426,7 +427,7 @@ for step in range(seq_len):
   sudo ln -sf /usr/local/cuda-12.4 /usr/local/cuda
   ```
 - Ensure that `nvcc -V` outputs correctly and that `which nvcc` points to the correct version.
-- JAX `cuda` backend uses `jax.ffi` and supports JAX >= 0.4.31 (including 0.6.x). `bfloat16` is accelerated via CUDA; other dtypes fall back to `native`.
+- JAX `cuda` backend uses `jax.ffi` and supports JAX >= 0.4.31 (including 0.6.x). The CUDA path only accelerates `bfloat16`; non-`bfloat16` inputs trigger a warning and are cast to `bfloat16`, no longer falling back to `native`.
 
 <a id="tensorflow-usage-notes"></a>
 ### TensorFlow Usage Notes
@@ -486,7 +487,7 @@ y, final_state = rwkv6_op(
 | TensorFlow  | ❌   | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 
-JAX `cuda` backend is based on `jax.ffi` and supports JAX >= 0.4.31 (including 0.6.x). Currently, only `bfloat16` is CUDA-accelerated; other dtypes fall back to `native`.
+JAX `cuda` backend is based on `jax.ffi` and supports JAX >= 0.4.31 (including 0.6.x). The CUDA path only accelerates `bfloat16`; non-`bfloat16` inputs trigger a warning and are cast to `bfloat16`, no longer falling back to `native`.
 
 
 <a id="testing"></a>

@@ -1,4 +1,5 @@
 import os
+import warnings
 import torch
 from torch.utils.cpp_extension import load
 
@@ -237,10 +238,19 @@ def get_torch_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
         assert w.is_contiguous()
         assert u.is_contiguous()
 
-        if r.dtype in [torch.float32, torch.bfloat16]:
-            s_dtype = r.dtype
-        else:
-            s_dtype = torch.float32
+        if r.dtype != torch.bfloat16:
+            warnings.warn(
+                f"RWKV-6 Torch CUDA kernel expects bfloat16 inputs, got {r.dtype}. "
+                "Casting to bfloat16. This may introduce precision differences.",
+                stacklevel=2,
+            )
+            r = r.bfloat16()
+            k = k.bfloat16()
+            v = v.bfloat16()
+            w = w.bfloat16()
+            u = u.bfloat16()
+
+        s_dtype = torch.bfloat16
 
         if output_final_state or initial_state is not None:
             is_custom_state = initial_state is not None
@@ -252,7 +262,7 @@ def get_torch_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
                 if len(initial_state.shape) == 3:
                     initial_state = initial_state[None, :]
                 assert initial_state.shape[1:] == (H, head_size, head_size)
-                assert initial_state.dtype == s_dtype
+                initial_state = initial_state.to(s_dtype)
                 assert initial_state.device == r.device
 
                 n_state = initial_state.shape[0]

@@ -37,13 +37,14 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
 
     class WindBacksteppingSN(torch.autograd.Function):
         @staticmethod
-        def forward(ctx, w, q, k, v, a, b, tau, h0):
+        def forward(ctx, w, q, k, v, a, b, tau, mask, h0):
             B, T, H, N = w.shape
             DTYPE = q.dtype
             q, k, v, a, b, w = [
                 cast(x, "bfloat16").contiguous() for x in [q, k, v, a, b, w]
             ]
             tau = cast(tau, "float32").contiguous()
+            mask = cast(mask, "float32").contiguous()
 
             if T % CHUNK_LEN != 0:
                 raise ValueError(
@@ -57,19 +58,20 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
             sa = torch.empty(B, T, H, N, dtype=torch.float32, device=w.device)
 
             torch.ops.wind_backstepping_sn.forward_sn(
-                w, q, k, v, a, b, tau, y, s, sa, h0
+                w, q, k, v, a, b, tau, mask, y, s, sa, h0
             )
 
-            ctx.save_for_backward(w, q, k, v, a, b, tau, s, sa)
+            ctx.save_for_backward(w, q, k, v, a, b, tau, mask, s, sa)
 
             last_state = torch.empty_like(h0)
             last_state.copy_(transpose(s[:, :, -1], [0, 1, 3, 2]))
 
             # s[:, :, -1] 是 SN 之前的 checkpoint，需要再应用一次 SN 得到 final_state
             last_tau = tau[:, -1].view(B, H, 1, 1)
+            last_mask = mask[:, -1].view(B, 1, 1, 1)
             tau_safe = torch.clamp(last_tau, min=1e-6)
             sn_state = last_tau * torch.tanh(last_state / tau_safe)
-            last_state = torch.where(last_tau > 0, sn_state, last_state)
+            last_state = torch.where(last_mask > 0, sn_state, last_state)
 
             return cast(y, DTYPE), last_state
 
@@ -78,14 +80,33 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
             DTYPE = dy.dtype
             dy = cast(dy, torch.bfloat16).contiguous()
             dht = cast(dht, "float32").contiguous()
-            w, q, k, v, a, b, tau, s, sa = ctx.saved_tensors
+            w, q, k, v, a, b, tau, mask, s, sa = ctx.saved_tensors
 
             dh0 = torch.empty(dht.shape, dtype=dht.dtype, device=dht.device)
             dtau = torch.empty(tau.shape, dtype=tau.dtype, device=tau.device)
             dw, dq, dk, dv, da, db = [torch.empty_like(x) for x in [w, q, k, v, a, b]]
 
             torch.ops.wind_backstepping_sn.backward_sn(
-                w, q, k, v, a, b, tau, dy, s, sa, dht, dh0, dtau, dw, dq, dk, dv, da, db
+                w,
+                q,
+                k,
+                v,
+                a,
+                b,
+                tau,
+                mask,
+                dy,
+                s,
+                sa,
+                dht,
+                dh0,
+                dtau,
+                dw,
+                dq,
+                dk,
+                dv,
+                da,
+                db,
             )
             return (
                 cast(dw, DTYPE),
@@ -95,25 +116,27 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
                 cast(da, DTYPE),
                 cast(db, DTYPE),
                 dtau,
+                None,  # mask has no gradient
                 dh0,
             )
 
     # 纯推理 / prefill：不保存反向 checkpoint，只输出 y 与最终 state。
-    # 因 tau 按 chunk 读取，T 仍需被 16 整除；任意长度请用单步 RNN 接口。
+    # 因 tau/mask 按 chunk 读取，T 仍需被 16 整除；任意长度请用单步 RNN 接口。
     class Wkv7SnInference(torch.autograd.Function):
         @staticmethod
-        def forward(ctx, w, q, k, v, a, b, tau, h0):
+        def forward(ctx, w, q, k, v, a, b, tau, mask, h0):
             B, T, H, N = w.shape
             DTYPE = q.dtype
             q, k, v, a, b, w = [
                 cast(x, "bfloat16").contiguous() for x in [q, k, v, a, b, w]
             ]
             tau = cast(tau, "float32").contiguous()
+            mask = cast(mask, "float32").contiguous()
 
             y = torch.empty_like(v)
             s = torch.empty(B, H, N, N, dtype=torch.float32, device=w.device)
             torch.ops.wind_backstepping_sn.forward_inference_sn(
-                w, q, k, v, a, b, tau, y, s, h0
+                w, q, k, v, a, b, tau, mask, y, s, h0
             )
             return cast(y, DTYPE), s
 
@@ -129,6 +152,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
         a,
         b,
         tau,
+        mask=None,
         initial_state=None,
         output_final_state=True,
         head_first=False,
@@ -144,6 +168,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
                 a=a,
                 b=b,
                 tau=tau,
+                mask=mask,
                 initial_state=initial_state,
                 output_final_state=output_final_state,
                 head_first=head_first,
@@ -163,6 +188,16 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
                 f"but got T={T}."
             )
 
+        tau = cast(tau, "float32").contiguous()
+        if mask is None:
+            mask = torch.ones(B, T // CHUNK_LEN, dtype=torch.float32, device=w.device)
+        else:
+            mask = cast(mask, "float32").contiguous()
+            if mask.shape != (B, T // CHUNK_LEN):
+                raise ValueError(
+                    f"mask shape {tuple(mask.shape)} must match (B, T//16) = ({B}, {T // CHUNK_LEN})"
+                )
+
         if initial_state is None:
             initial_state = torch.zeros(
                 B, H, N, N, dtype=torch.float32, device=r.device
@@ -170,7 +205,9 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
         else:
             initial_state = cast(initial_state, "float32")
 
-        out, state = WindBacksteppingSN.apply(w, r, k, v, a, b, tau, initial_state)
+        out, state = WindBacksteppingSN.apply(
+            w, r, k, v, a, b, tau, mask, initial_state
+        )
         return (out, state) if output_final_state else out
 
     def generalized_delta_rule_sn_inference(
@@ -181,6 +218,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
         a,
         b,
         tau,
+        mask=None,
         initial_state=None,
         output_final_state=True,
         head_first=False,
@@ -202,6 +240,16 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
                 f"but got T={T}."
             )
 
+        tau = cast(tau, "float32").contiguous()
+        if mask is None:
+            mask = torch.ones(B, T // CHUNK_LEN, dtype=torch.float32, device=w.device)
+        else:
+            mask = cast(mask, "float32").contiguous()
+            if mask.shape != (B, T // CHUNK_LEN):
+                raise ValueError(
+                    f"mask shape {tuple(mask.shape)} must match (B, T//16) = ({B}, {T // CHUNK_LEN})"
+                )
+
         if initial_state is None:
             initial_state = torch.zeros(
                 B, H, N, N, dtype=torch.float32, device=r.device
@@ -209,8 +257,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
         else:
             initial_state = cast(initial_state, "float32")
 
-        tau = cast(tau, "float32").contiguous()
-        out, state = Wkv7SnInference.apply(w, r, k, v, a, b, tau, initial_state)
+        out, state = Wkv7SnInference.apply(w, r, k, v, a, b, tau, mask, initial_state)
         return (out, state) if output_final_state else out
 
     return [generalized_delta_rule_sn, generalized_delta_rule_sn_inference]

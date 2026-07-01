@@ -32,7 +32,7 @@ def test_rwkv7_single_step_forward_state(
             for name in ["r", "k", "v", "a", "b", "w"]
         } | {"h0": _to_torch(tensors["h0"], "float32", device)}
 
-    ref = make(single_step_inputs, "float32")
+    ref = make(single_step_inputs, "bfloat16")
     tgt = make(single_step_inputs, "bfloat16")
 
     def call(op, t):
@@ -50,5 +50,5 @@ def test_rwkv7_single_step_forward_state(
     y_ref, s_ref = call(rwkv7_native_op, ref)
     y_tgt, s_tgt = call(rwkv7_rnn_op, tgt)
 
-    assert_allclose_with_stats(y_ref, y_tgt, "y", atol=1.0, rtol=1e-1)
-    assert_allclose_with_stats(s_ref, s_tgt, "final_state", atol=1.0, rtol=1e-1)
+    assert_allclose_with_stats(y_ref, y_tgt, "y", atol=1e-5, rtol=1e-2)
+    assert_allclose_with_stats(s_ref, s_tgt, "final_state", atol=1e-5, rtol=1e-3)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import ctypes
 import pathlib
 import subprocess
+import warnings
 from typing import Optional, Tuple, Union
 
 import jax
@@ -248,26 +249,11 @@ def get_jax_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
         w = _transpose_head(w, head_first)
 
         if dtype != jnp.bfloat16:
-            from ..native_keras_op import rwkv6 as native_rwkv6
-
-            y = native_rwkv6(
-                r=r,
-                k=k,
-                v=v,
-                w=w,
-                u=u,
-                initial_state=initial_state,
-                output_final_state=output_final_state,
-                state_map=state_map,
-                head_size=head_size,
-                max_sequence_length=max_sequence_length,
+            warnings.warn(
+                f"RWKV-6 JAX CUDA kernel expects bfloat16 inputs, got {dtype}. "
+                "Casting to bfloat16. This may introduce precision differences.",
+                stacklevel=2,
             )
-            if output_final_state:
-                y, final_state = y
-                y = _transpose_head_back(y, head_first)
-                return y, final_state
-            y = _transpose_head_back(y, head_first)
-            return y
 
         r = jnp.asarray(r, dtype=jnp.bfloat16)
         k = jnp.asarray(k, dtype=jnp.bfloat16)

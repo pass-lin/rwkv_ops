@@ -13,11 +13,13 @@ __device__ inline bf to_bf(const float &u) {
 }
 typedef bf * __restrict__ F_;
 
+/* mask: [B, T//16]; m > 0 means apply State Norm at chunk boundary. */
 
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_kernel_sn(int T, int H,
      F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
      const float* __restrict__ tau_,
+     const float* __restrict__ mask_,
      bf* y_, float* s_, float* sa_, float* h0_) {
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
     float state[C] = {0};
@@ -60,10 +62,12 @@ __global__ void forward_kernel_sn(int T, int H,
             #pragma unroll
             for (int j = 0; j < C; j++) s_[base + j*C] = state[j];
 
+            int64_t cond_idx = (int64_t)bb * num_chunks + chunk;
+            float m = mask_[cond_idx];
             float tau = tau_[bb * num_chunks * H + chunk * H + hh];
-            if (tau > 0.0f) {
-                #pragma unroll
-                for (int j = 0; j < C; j++) state[j] = tau * tanhf(state[j] / tau);
+            #pragma unroll
+            for (int j = 0; j < C; j++) {
+                state[j] = state[j] * (1.0f - m) + m * tau * tanhf(state[j] / tau);
             }
         }
     }
@@ -73,6 +77,7 @@ template<int C> __launch_bounds__(C, 2)
 __global__ void backward_kernel_sn(int T, int H,
     F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
     const float* __restrict__ tau_,
+    const float* __restrict__ mask_,
     F_ dy_,
     float * __restrict__ s_, float * __restrict__ sa_,
     float * __restrict__ dht_, float * __restrict__ dh0_,
@@ -119,29 +124,30 @@ __global__ void backward_kernel_sn(int T, int H,
                 stateT[j+2] = q_vec.z; stateT[j+3] = q_vec.w;
             }
 
+            int64_t cond_idx = (int64_t)bb * num_chunks + chunk;
             float tau = tau_[bb * num_chunks * H + chunk * H + hh];
-            if (tau > 0.0f) {
-                float inv_tau = 1.0f / tau;
-                float dtau_local = 0.0f;
-                #pragma unroll
-                for (int j = 0; j < C; j++) {
-                    float u = stateT[j] * inv_tau;
-                    float tnh = tanhf(u);
-                    float sech2 = 1.0f - tnh * tnh;
-                    dtau_local += dstate[j] * (tnh - u * sech2);
-                    dstate[j]  *= sech2;
-                    dstateT[j] *= sech2;
-                }
-                dtau_shared[i] = dtau_local;
+            float m = mask_[cond_idx];
+            float inv_tau = 1.0f / tau;
+            float dtau_local = 0.0f;
+            #pragma unroll
+            for (int j = 0; j < C; j++) {
+                float u = stateT[j] * inv_tau;
+                float tnh = tanhf(u);
+                float sech2 = 1.0f - tnh * tnh;
+                float blend = (1.0f - m) + m * sech2;
+                dtau_local += m * dstate[j] * (tnh - u * sech2);
+                dstate[j]  *= blend;
+                dstateT[j] *= blend;
+            }
+            dtau_shared[i] = dtau_local;
+            __syncthreads();
+            #pragma unroll
+            for (int stride = C/2; stride > 0; stride /= 2) {
+                if (i < stride) dtau_shared[i] += dtau_shared[i + stride];
                 __syncthreads();
-                #pragma unroll
-                for (int stride = C/2; stride > 0; stride /= 2) {
-                    if (i < stride) dtau_shared[i] += dtau_shared[i + stride];
-                    __syncthreads();
-                }
-                if (i == 0) {
-                    dtau_[bb * num_chunks * H + chunk * H + hh] = dtau_shared[0];
-                }
+            }
+            if (i == 0) {
+                dtau_[bb * num_chunks * H + chunk * H + hh] = dtau_shared[0];
             }
         }
         float dq_val = 0;
@@ -192,6 +198,7 @@ template<int C> __launch_bounds__(C, 2)
 __global__ void forward_inference_kernel_sn(int T, int H,
                                              F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
                                              const float* __restrict__ tau_,
+                                             const float* __restrict__ mask_,
                                              bf *y_, float *s_, float *h0_) {
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
     float state[C] = {0};
@@ -226,10 +233,12 @@ __global__ void forward_inference_kernel_sn(int T, int H,
 
         if ((t + 1) % _CHUNK_LEN_ == 0) {
             int chunk = t / _CHUNK_LEN_;
+            int64_t cond_idx = (int64_t)bb * num_chunks + chunk;
+            float m = mask_[cond_idx];
             float tau = tau_[bb * num_chunks * H + chunk * H + hh];
-            if (tau > 0.0f) {
-                #pragma unroll
-                for (int j = 0; j < C; ++j) state[j] = tau * tanhf(state[j] / tau);
+            #pragma unroll
+            for (int j = 0; j < C; ++j) {
+                state[j] = state[j] * (1.0f - m) + m * tau * tanhf(state[j] / tau);
             }
         }
     }
@@ -242,29 +251,31 @@ __global__ void forward_inference_kernel_sn(int T, int H,
 
 /* -------------------- Host 接口 -------------------- */
 void cuda_forward_sn(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, bf* a, bf* b,
-                     const float* tau, bf* y, float* s, float* sa, float* h0) {
+                     const float* tau, const float* mask,
+                     bf* y, float* s, float* sa, float* h0) {
     constexpr int C = _C_;
     dim3 blocks(H, B);
     dim3 threads(C);
-    forward_kernel_sn<C><<<blocks, threads>>>(T, H, w, q, k, v, a, b, tau, y, s, sa, h0);
+    forward_kernel_sn<C><<<blocks, threads>>>(T, H, w, q, k, v, a, b, tau, mask, y, s, sa, h0);
 }
 
 void cuda_backward_sn(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, bf* a, bf* b,
-                      const float* tau, bf* dy, float* s, float* sa,
+                      const float* tau, const float* mask, bf* dy, float* s, float* sa,
                       float* dht, float* dh0, float* dtau,
                       bf* dw, bf* dq, bf* dk, bf* dv, bf* da, bf* db) {
     constexpr int C = _C_;
     dim3 blocks(H, B);
     dim3 threads(C);
     backward_kernel_sn<C><<<blocks, threads>>>(
-        T, H, w, q, k, v, a, b, tau, dy, s, sa, dht, dh0, dtau,
+        T, H, w, q, k, v, a, b, tau, mask, dy, s, sa, dht, dh0, dtau,
         dw, dq, dk, dv, da, db);
 }
 
 void cuda_forward_inference_sn(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, bf* a, bf* b,
-                               const float* tau, bf* y, float* s, float* h0) {
+                               const float* tau, const float* mask,
+                               bf* y, float* s, float* h0) {
     constexpr int C = _C_;
     dim3 blocks(H, B);
     dim3 threads(C);
-    forward_inference_kernel_sn<C><<<blocks, threads>>>(T, H, w, q, k, v, a, b, tau, y, s, h0);
+    forward_inference_kernel_sn<C><<<blocks, threads>>>(T, H, w, q, k, v, a, b, tau, mask, y, s, h0);
 }

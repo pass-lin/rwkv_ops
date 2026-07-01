@@ -43,18 +43,13 @@ def _call_op(op, r, k, v, a, b, w, h0, output_final_state=True, mask=None):
 def test_rwkv7_inference_forward_state(
     rwkv7_inference_op, rwkv7_native_op, rwkv7_inputs
 ):
-    r_ref, k_ref, v_ref, a_ref, b_ref, w_ref, h0_ref = _prepare_inputs(
-        rwkv7_inputs, "float32"
-    )
-    r_c, k_c, v_c, a_c, b_c, w_c, h0_c = _prepare_inputs(rwkv7_inputs, "bfloat16")
+    r, k, v, a, b, w, h0 = _prepare_inputs(rwkv7_inputs, "bfloat16")
 
-    y_ref, s_ref = _call_op(
-        rwkv7_native_op, r_ref, k_ref, v_ref, a_ref, b_ref, w_ref, h0_ref
-    )
-    y_c, s_c = _call_op(rwkv7_inference_op, r_c, k_c, v_c, a_c, b_c, w_c, h0_c)
+    y_ref, s_ref = _call_op(rwkv7_native_op, r, k, v, a, b, w, h0)
+    y_c, s_c = _call_op(rwkv7_inference_op, r, k, v, a, b, w, h0)
 
-    assert_allclose_with_stats(y_ref, y_c, "y", atol=1.0, rtol=1e-1)
-    assert_allclose_with_stats(s_ref, s_c, "final_state", atol=1.0, rtol=1e-1)
+    assert_allclose_with_stats(y_ref, y_c, "y", atol=1e-5, rtol=1e-2)
+    assert_allclose_with_stats(s_ref, s_c, "final_state", atol=1e-5, rtol=1e-3)
 
 
 @pytest.mark.jax
@@ -65,20 +60,13 @@ def test_rwkv7_inference_masked(rwkv7_inference_op, rwkv7_native_op, rwkv7_input
     mask_np[freeze] = 0.0
     mask = jnp.asarray(mask_np)
 
-    r_ref, k_ref, v_ref, a_ref, b_ref, w_ref, h0_ref = _prepare_inputs(
-        rwkv7_inputs, "float32"
-    )
-    r_c, k_c, v_c, a_c, b_c, w_c, h0_c = _prepare_inputs(rwkv7_inputs, "bfloat16")
+    r, k, v, a, b, w, h0 = _prepare_inputs(rwkv7_inputs, "bfloat16")
 
-    y_ref, s_ref = _call_op(
-        rwkv7_native_op, r_ref, k_ref, v_ref, a_ref, b_ref, w_ref, h0_ref, mask=mask
-    )
-    y_c, s_c = _call_op(
-        rwkv7_inference_op, r_c, k_c, v_c, a_c, b_c, w_c, h0_c, mask=mask
-    )
+    y_ref, s_ref = _call_op(rwkv7_native_op, r, k, v, a, b, w, h0, mask=mask)
+    y_c, s_c = _call_op(rwkv7_inference_op, r, k, v, a, b, w, h0, mask=mask)
 
-    assert_allclose_with_stats(y_ref, y_c, "y_mask", atol=1.0, rtol=1e-1)
-    assert_allclose_with_stats(s_ref, s_c, "final_state_mask", atol=1.0, rtol=1e-1)
+    assert_allclose_with_stats(y_ref, y_c, "y_mask", atol=1e-5, rtol=1e-2)
+    assert_allclose_with_stats(s_ref, s_c, "final_state_mask", atol=1e-5, rtol=1e-3)
 
 
 @pytest.mark.jax

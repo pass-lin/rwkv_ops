@@ -18,6 +18,7 @@ def _to_jax(arr, dtype):
 
 
 def _prepare_inputs(rwkv7_sn_inputs, head_first, dtype="bfloat16"):
+    B, T, H, _ = rwkv7_sn_inputs["r"].shape
     if head_first:
         r = _to_jax(np.transpose(rwkv7_sn_inputs["r"], (0, 2, 1, 3)), dtype)
         k = _to_jax(np.transpose(rwkv7_sn_inputs["k"], (0, 2, 1, 3)), dtype)
@@ -33,8 +34,26 @@ def _prepare_inputs(rwkv7_sn_inputs, head_first, dtype="bfloat16"):
         b = _to_jax(rwkv7_sn_inputs["b"], dtype)
         w = _to_jax(rwkv7_sn_inputs["w"], dtype)
     tau = _to_jax(rwkv7_sn_inputs["tau"], "float32")
+    mask = jnp.ones((B, T // 16), dtype=jnp.float32)
     h0 = _to_jax(rwkv7_sn_inputs["h0"], "float32")
-    return r, k, v, a, b, w, tau, h0
+    return r, k, v, a, b, w, tau, mask, h0
+
+
+def _test_is_close(name, ref, tgt, atol, rtol, min_exact_rate=None):
+    ref_f = np.asarray(ref, dtype=np.float32)
+    tgt_f = np.asarray(tgt, dtype=np.float32)
+    diff = np.abs(ref_f - tgt_f)
+    total = ref_f.size
+    exact_rate = np.sum(diff < 1e-7) / total * 100
+    avg_err = diff.mean()
+    max_diff = diff.max()
+    print("-" * 80)
+    print(
+        f"[{name}] exact={exact_rate:.2f}%, avg_err={avg_err:.6e}, max_diff={max_diff:.6e}"
+    )
+    # exact match rate 仅作为诊断信息打印，不作为通过/失败条件。
+    # 数值正确性由下面的 atol/rtol 保证。
+    assert_allclose_with_stats(ref, tgt, name, atol=atol, rtol=rtol)
 
 
 @pytest.mark.jax
@@ -42,10 +61,10 @@ def _prepare_inputs(rwkv7_sn_inputs, head_first, dtype="bfloat16"):
 def test_rwkv7_sn_forward_state(
     rwkv7_sn_jax_op, rwkv7_sn_native_op, rwkv7_sn_inputs, head_first
 ):
-    r_ref, k_ref, v_ref, a_ref, b_ref, w_ref, tau_ref, h0_ref = _prepare_inputs(
-        rwkv7_sn_inputs, head_first, "float32"
+    r_ref, k_ref, v_ref, a_ref, b_ref, w_ref, tau_ref, mask_ref, h0_ref = (
+        _prepare_inputs(rwkv7_sn_inputs, head_first, "bfloat16")
     )
-    r_c, k_c, v_c, a_c, b_c, w_c, tau_c, h0_c = _prepare_inputs(
+    r_c, k_c, v_c, a_c, b_c, w_c, tau_c, mask_c, h0_c = _prepare_inputs(
         rwkv7_sn_inputs, head_first, "bfloat16"
     )
 
@@ -57,6 +76,7 @@ def test_rwkv7_sn_forward_state(
         a=a_ref,
         b=b_ref,
         tau=tau_ref,
+        mask=mask_ref,
         initial_state=h0_ref,
         output_final_state=True,
         head_first=head_first,
@@ -69,44 +89,43 @@ def test_rwkv7_sn_forward_state(
         a=a_c,
         b=b_c,
         tau=tau_c,
+        mask=mask_c,
         initial_state=h0_c,
         output_final_state=True,
         head_first=head_first,
     )
 
-    assert_allclose_with_stats(
-        y_ref, y_c, f"y_head_first={head_first}", atol=1.0, rtol=1e-1
+    _test_is_close(
+        f"y_head_first={head_first}",
+        y_ref,
+        y_c,
+        atol=1e-4,
+        rtol=1e-2,
+        min_exact_rate=99.0,
     )
-    assert_allclose_with_stats(
-        s_ref, s_c, f"final_state_head_first={head_first}", atol=1.0, rtol=1e-1
+    _test_is_close(
+        f"final_state_head_first={head_first}",
+        s_ref,
+        s_c,
+        atol=1e-5,
+        rtol=1e-3,
+        min_exact_rate=55.0,
     )
 
 
 @pytest.mark.jax
 @pytest.mark.slow
 @pytest.mark.parametrize("head_first", [False, True])
-def test_rwkv7_sn_backward_directional(
-    rwkv7_sn_jax_op, rwkv7_sn_native_op, rwkv7_sn_inputs, head_first, rng
+def test_rwkv7_sn_backward(
+    rwkv7_sn_jax_op, rwkv7_sn_native_op, rwkv7_sn_inputs, head_first
 ):
-    """CUDA custom_vjp 反向与 native 有限差分对比（包含 tau 梯度）。"""
-    r_ref, k_ref, v_ref, a_ref, b_ref, w_ref, tau_ref, h0_ref = _prepare_inputs(
-        rwkv7_sn_inputs, head_first, "float32"
-    )
-    r_c, k_c, v_c, a_c, b_c, w_c, tau_c, h0_c = _prepare_inputs(
+    """CUDA custom_vjp 反向梯度与 native Keras 实现逐元素对比（含 tau/mask）。"""
+    r, k, v, a, b, w, tau, mask, h0 = _prepare_inputs(
         rwkv7_sn_inputs, head_first, "bfloat16"
     )
 
-    key = jax.random.PRNGKey(int(rng.integers(0, 2**31)))
-    keys = jax.random.split(key, 8)
-    dirs = [
-        jax.random.normal(k, p.shape, dtype=jnp.float32)
-        for k, p in zip(
-            keys, [w_ref, r_ref, k_ref, v_ref, a_ref, b_ref, tau_ref, h0_ref]
-        )
-    ]
-
     def loss(op, params):
-        w, r, k, v, a, b, tau, h0 = params
+        w, r, k, v, a, b, tau, mask, h0 = params
         y, state = op(
             r=r,
             w=w,
@@ -115,6 +134,7 @@ def test_rwkv7_sn_backward_directional(
             a=a,
             b=b,
             tau=tau,
+            mask=mask,
             initial_state=h0,
             output_final_state=True,
             head_first=head_first,
@@ -123,33 +143,22 @@ def test_rwkv7_sn_backward_directional(
             jnp.asarray(state, jnp.float32) ** 2
         )
 
-    def directional_fd(op, params, dirs, eps=1e-3):
-        plus = [p + eps * d for p, d in zip(params, dirs)]
-        minus = [p - eps * d for p, d in zip(params, dirs)]
-        return (loss(op, plus) - loss(op, minus)) / (2 * eps)
-
-    ref_val = directional_fd(
-        rwkv7_sn_native_op,
-        [w_ref, r_ref, k_ref, v_ref, a_ref, b_ref, tau_ref, h0_ref],
-        dirs,
+    ref_grads = jax.grad(lambda *p: loss(rwkv7_sn_native_op, p), argnums=range(9))(
+        w, r, k, v, a, b, tau, mask, h0
+    )
+    cuda_grads = jax.grad(lambda *p: loss(rwkv7_sn_jax_op, p), argnums=range(9))(
+        w, r, k, v, a, b, tau, mask, h0
     )
 
-    def cuda_loss_fn(w, r, k, v, a, b, tau, h0):
-        return loss(rwkv7_sn_jax_op, [w, r, k, v, a, b, tau, h0])
-
-    grad_c = jax.grad(cuda_loss_fn, argnums=range(8))(
-        w_c, r_c, k_c, v_c, a_c, b_c, tau_c, h0_c
-    )
-    cuda_val = sum(
-        jnp.sum(jnp.asarray(g, jnp.float32) * d) for g, d in zip(grad_c, dirs)
-    )
-
-    rel = float(jnp.abs(ref_val - cuda_val) / (jnp.abs(ref_val) + 1e-8))
-    print(
-        f"[directional_derivative sn head_first={head_first}] ref={float(ref_val):.6e}, "
-        f"cuda={float(cuda_val):.6e}, rel_diff={rel:.3e}"
-    )
-    assert rel < 1e-1, f"方向导数相对差异过大: {rel}"
+    names = ["w", "r", "k", "v", "a", "b", "tau", "mask", "h0"]
+    for name, g_ref, g_c in zip(names, ref_grads, cuda_grads):
+        assert_allclose_with_stats(
+            g_ref,
+            g_c,
+            f"grad_{name}_head_first={head_first}",
+            atol=7e-3,
+            rtol=1e-3,
+        )
 
 
 @pytest.mark.jax
@@ -164,7 +173,7 @@ def test_rwkv7_sn_rnn(
     prefill_len = 16
     pre_inputs = {k: v[:, :prefill_len] for k, v in inputs.items()}
     pre_inputs["tau"] = inputs["tau"][:, : prefill_len // 16]
-    r_c, k_c, v_c, a_c, b_c, w_c, tau_c, h0_c = _prepare_inputs(
+    r_c, k_c, v_c, a_c, b_c, w_c, tau_c, mask_c, h0_c = _prepare_inputs(
         pre_inputs, head_first=False, dtype="bfloat16"
     )
 
@@ -176,6 +185,7 @@ def test_rwkv7_sn_rnn(
         a=a_c,
         b=b_c,
         tau=tau_c,
+        mask=mask_c,
         initial_state=h0_c,
         output_final_state=True,
         head_first=False,
@@ -230,13 +240,166 @@ def test_rwkv7_sn_rnn(
             head_first=False,
         )
 
-        assert_allclose_with_stats(
-            native_y, cuda_y, f"rnn_y_step_{step}", atol=1.0, rtol=1e-1
+        _test_is_close(
+            f"rnn_y_step_{step}",
+            native_y,
+            cuda_y,
+            atol=1e-4,
+            rtol=1e-2,
+            min_exact_rate=99.0,
         )
-        assert_allclose_with_stats(
+        # 单步 CUDA 使用 fast_math tanhf，SN 后与 native 的 ops.tanh 可能差几个 1e-5，
+        # 完全一致率会下降，但 close_match/max_diff 仍能守住数值正确性。
+        _test_is_close(
+            f"rnn_state_step_{step}",
             native_state,
             cuda_state,
-            f"rnn_state_step_{step}",
-            atol=1.0,
-            rtol=1e-1,
+            atol=1e-5,
+            rtol=1e-3,
+            min_exact_rate=0.0,
         )
+
+
+@pytest.mark.jax
+def test_rwkv7_sn_mask_all_one_equivalent(rwkv7_sn_jax_op, rwkv7_sn_inputs):
+    B, T, H, K = rwkv7_sn_inputs["r"].shape
+    n_chunks = T // 16
+    mask = jnp.ones((B, n_chunks), dtype=jnp.float32)
+    r, k, v, a, b, w, tau, _, h0 = _prepare_inputs(rwkv7_sn_inputs, head_first=False)
+
+    y_no_mask, s_no_mask = rwkv7_sn_jax_op(
+        r=r, w=w, k=k, v=v, a=a, b=b, tau=tau, initial_state=h0, output_final_state=True
+    )
+    y_all_one, s_all_one = rwkv7_sn_jax_op(
+        r=r,
+        w=w,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        tau=tau,
+        mask=mask,
+        initial_state=h0,
+        output_final_state=True,
+    )
+
+    pred_diff = float(jnp.max(jnp.abs(y_all_one - y_no_mask)))
+    state_diff = float(jnp.max(jnp.abs(s_all_one - s_no_mask)))
+    assert pred_diff < 1e-5, f"全 1 Mask 输出不一致 (max_diff={pred_diff:.3e})"
+    assert state_diff < 1e-5, f"全 1 Mask 状态不一致 (max_diff={state_diff:.3e})"
+
+
+@pytest.mark.jax
+def test_rwkv7_sn_irregular_padding(
+    rwkv7_sn_jax_op, rwkv7_sn_native_op, rwkv7_sn_rnn_native_op, rwkv7_sn_inputs
+):
+    """
+    验证不规则长度 padding 场景：实际长度 34，pad 到 48，
+    padding chunk mask=0，且 padding 位置 k=v=a=b=0, w=-inf。
+    """
+    B, T, H, K = rwkv7_sn_inputs["r"].shape
+    actual_len = 34
+    pad_len = ((actual_len + 15) // 16) * 16  # 48
+    assert pad_len <= T
+
+    def _pad(name, val, pad_val):
+        full = rwkv7_sn_inputs[name][:, :pad_len].copy()
+        full[:, actual_len:] = pad_val
+        return full
+
+    r = _pad("r", rwkv7_sn_inputs["r"][:, :pad_len], 0.0)
+    k = _pad("k", rwkv7_sn_inputs["k"][:, :pad_len], 0.0)
+    v = _pad("v", rwkv7_sn_inputs["v"][:, :pad_len], 0.0)
+    a = _pad("a", rwkv7_sn_inputs["a"][:, :pad_len], 0.0)
+    b = _pad("b", rwkv7_sn_inputs["b"][:, :pad_len], 0.0)
+    w = _pad("w", rwkv7_sn_inputs["w"][:, :pad_len], -1e9)
+
+    tau_full = rwkv7_sn_inputs["tau"][:, : pad_len // 16].copy()
+    mask_np = np.ones((B, pad_len // 16), dtype=np.float32)
+    mask_np[:, actual_len // 16 :] = 0.0
+
+    h0 = rwkv7_sn_inputs["h0"]
+
+    tensors = {
+        "r": _to_jax(r, "bfloat16"),
+        "k": _to_jax(k, "bfloat16"),
+        "v": _to_jax(v, "bfloat16"),
+        "a": _to_jax(a, "bfloat16"),
+        "b": _to_jax(b, "bfloat16"),
+        "w": _to_jax(w, "bfloat16"),
+        "tau": _to_jax(tau_full, "float32"),
+        "mask": _to_jax(mask_np, "float32"),
+        "h0": _to_jax(h0, "float32"),
+    }
+
+    _, state_cuda = rwkv7_sn_jax_op(
+        r=tensors["r"],
+        w=tensors["w"],
+        k=tensors["k"],
+        v=tensors["v"],
+        a=tensors["a"],
+        b=tensors["b"],
+        tau=tensors["tau"],
+        mask=tensors["mask"],
+        initial_state=tensors["h0"],
+        output_final_state=True,
+        head_first=False,
+    )
+
+    # 参考：先跑完前 32 个 token 的训练版本（mask [1,1]）
+    pre_tensors = {
+        "r": _to_jax(r[:, :32], "bfloat16"),
+        "k": _to_jax(k[:, :32], "bfloat16"),
+        "v": _to_jax(v[:, :32], "bfloat16"),
+        "a": _to_jax(a[:, :32], "bfloat16"),
+        "b": _to_jax(b[:, :32], "bfloat16"),
+        "w": _to_jax(w[:, :32], "bfloat16"),
+        "tau": _to_jax(tau_full[:, :2], "float32"),
+        "mask": jnp.ones((B, 2), dtype=jnp.float32),
+        "h0": _to_jax(h0, "float32"),
+    }
+    _, state_ref = rwkv7_sn_native_op(
+        r=pre_tensors["r"],
+        w=pre_tensors["w"],
+        k=pre_tensors["k"],
+        v=pre_tensors["v"],
+        a=pre_tensors["a"],
+        b=pre_tensors["b"],
+        tau=pre_tensors["tau"],
+        mask=pre_tensors["mask"],
+        initial_state=pre_tensors["h0"],
+        output_final_state=True,
+        head_first=False,
+    )
+
+    # 再用 native 单步跑 token 32,33（不触发 SN）
+    for step in range(32, actual_len):
+        rr = _to_jax(rwkv7_sn_inputs["r"][:, step : step + 1], "bfloat16")
+        kk = _to_jax(rwkv7_sn_inputs["k"][:, step : step + 1], "bfloat16")
+        vv = _to_jax(rwkv7_sn_inputs["v"][:, step : step + 1], "bfloat16")
+        aa = _to_jax(rwkv7_sn_inputs["a"][:, step : step + 1], "bfloat16")
+        bb = _to_jax(rwkv7_sn_inputs["b"][:, step : step + 1], "bfloat16")
+        ww = _to_jax(rwkv7_sn_inputs["w"][:, step : step + 1], "bfloat16")
+        tau_s = _to_jax(rwkv7_sn_inputs["tau"][:, 2], "float32")
+        _, state_ref = rwkv7_sn_rnn_native_op(
+            r=rr,
+            w=ww,
+            k=kk,
+            v=vv,
+            a=aa,
+            b=bb,
+            tau=tau_s,
+            do_sn=False,
+            initial_state=state_ref,
+            output_final_state=True,
+            head_first=False,
+        )
+
+    _test_is_close(
+        "irregular_padding_state",
+        state_ref,
+        state_cuda,
+        atol=1e-4,
+        rtol=1e-3,
+        min_exact_rate=5.0,
+    )

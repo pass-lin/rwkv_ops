@@ -21,7 +21,7 @@ __global__ void forward_kernel_single_step_sn(
     int B, int H,
     F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
     const float* __restrict__ tau_,
-    const int64_t* __restrict__ do_sn_,
+    const int32_t* __restrict__ do_sn_,
     bf *y_, float *s_, float *h0_)
 {
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
@@ -78,7 +78,7 @@ static ffi::Error WKV7SnSingleStepFwdHost(
     ffi::Buffer<ffi::BF16> a,
     ffi::Buffer<ffi::BF16> b,
     ffi::Buffer<ffi::F32>  tau,
-    ffi::Buffer<ffi::S64>  do_sn,
+    ffi::Buffer<ffi::S32>  do_sn,
     ffi::Buffer<ffi::F32>  h0,
     ffi::ResultBuffer<ffi::BF16> y,
     ffi::ResultBuffer<ffi::F32>  s)
@@ -121,7 +121,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::BF16>>()
         .Arg<ffi::Buffer<ffi::BF16>>()
         .Arg<ffi::Buffer<ffi::F32>>()
-        .Arg<ffi::Buffer<ffi::S64>>()
+        .Arg<ffi::Buffer<ffi::S32>>()
         .Arg<ffi::Buffer<ffi::F32>>()
         .Ret<ffi::Buffer<ffi::BF16>>()
         .Ret<ffi::Buffer<ffi::F32>>()

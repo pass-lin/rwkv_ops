@@ -46,67 +46,45 @@ def _prepare_inputs(rwkv7_inputs, head_first, dtype="bfloat16"):
 @pytest.mark.jax
 @pytest.mark.parametrize("head_first", [False, True])
 def test_rwkv7_forward_state(rwkv7_jax_op, rwkv7_native_op, rwkv7_inputs, head_first):
-    r_ref, k_ref, v_ref, a_ref, b_ref, w_ref, h0_ref = _prepare_inputs(
-        rwkv7_inputs, head_first, "float32"
-    )
-    r_c, k_c, v_c, a_c, b_c, w_c, h0_c = _prepare_inputs(
-        rwkv7_inputs, head_first, "bfloat16"
-    )
+    r, k, v, a, b, w, h0 = _prepare_inputs(rwkv7_inputs, head_first, "bfloat16")
 
     y_ref, s_ref = rwkv7_native_op(
-        r=r_ref,
-        k=k_ref,
-        v=v_ref,
-        a=a_ref,
-        b=b_ref,
-        w=w_ref,
-        initial_state=h0_ref,
+        r=r,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        w=w,
+        initial_state=h0,
         output_final_state=True,
         head_first=head_first,
     )
     y_c, s_c = rwkv7_jax_op(
-        r=r_c,
-        k=k_c,
-        v=v_c,
-        a=a_c,
-        b=b_c,
-        w=w_c,
-        initial_state=h0_c,
+        r=r,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        w=w,
+        initial_state=h0,
         output_final_state=True,
         head_first=head_first,
     )
 
     assert_allclose_with_stats(
-        y_ref, y_c, f"y_head_first={head_first}", atol=1.0, rtol=1e-1
+        y_ref, y_c, f"y_head_first={head_first}", atol=1e-5, rtol=1e-2
     )
     assert_allclose_with_stats(
-        s_ref, s_c, f"final_state_head_first={head_first}", atol=1.0, rtol=1e-1
+        s_ref, s_c, f"final_state_head_first={head_first}", atol=1e-5, rtol=1e-3
     )
 
 
 @pytest.mark.jax
 @pytest.mark.slow
 @pytest.mark.parametrize("head_first", [False, True])
-def test_rwkv7_backward_directional(
-    rwkv7_jax_op, rwkv7_native_op, rwkv7_inputs, head_first, rng
-):
-    """
-    JAX native 的 fori_loop/while_loop 不支持 reverse-mode 自动求导，
-    因此用随机方向的有限差分验证 CUDA custom_vjp 的反向梯度。
-    """
-    r_ref, k_ref, v_ref, a_ref, b_ref, w_ref, h0_ref = _prepare_inputs(
-        rwkv7_inputs, head_first, "float32"
-    )
-    r_c, k_c, v_c, a_c, b_c, w_c, h0_c = _prepare_inputs(
-        rwkv7_inputs, head_first, "bfloat16"
-    )
-
-    key = jax.random.PRNGKey(int(rng.integers(0, 2**31)))
-    keys = jax.random.split(key, 7)
-    dirs = [
-        jax.random.normal(k, p.shape, dtype=jnp.float32)
-        for k, p in zip(keys, [w_ref, r_ref, k_ref, v_ref, a_ref, b_ref, h0_ref])
-    ]
+def test_rwkv7_backward(rwkv7_jax_op, rwkv7_native_op, rwkv7_inputs, head_first):
+    """CUDA custom_vjp 反向梯度与 native Keras 实现逐元素对比。"""
+    r, k, v, a, b, w, h0 = _prepare_inputs(rwkv7_inputs, head_first, "bfloat16")
 
     def loss(op, params):
         w, r, k, v, a, b, h0 = params
@@ -125,33 +103,21 @@ def test_rwkv7_backward_directional(
             jnp.asarray(state, jnp.float32) ** 2
         )
 
-    def directional_fd(op, params, dirs, eps=1e-3):
-        plus = [p + eps * d for p, d in zip(params, dirs)]
-        minus = [p - eps * d for p, d in zip(params, dirs)]
-        return (loss(op, plus) - loss(op, minus)) / (2 * eps)
-
-    ref_val = directional_fd(
-        rwkv7_native_op,
-        [w_ref, r_ref, k_ref, v_ref, a_ref, b_ref, h0_ref],
-        dirs,
+    ref_grads = jax.grad(lambda *p: loss(rwkv7_native_op, p), argnums=range(7))(
+        w, r, k, v, a, b, h0
+    )
+    cuda_grads = jax.grad(lambda *p: loss(rwkv7_jax_op, p), argnums=range(7))(
+        w, r, k, v, a, b, h0
     )
 
-    def cuda_loss_fn(w, r, k, v, a, b, h0):
-        return loss(
-            rwkv7_jax_op,
-            [w, r, k, v, a, b, h0],
+    names = ["w", "r", "k", "v", "a", "b", "h0"]
+    for name, g_ref, g_c in zip(names, ref_grads, cuda_grads):
+        # grad_b 的数值敏感性略高，参考 torch 测试使用 1e-2
+        atol = 1e-2 if name == "b" else 7e-3
+        assert_allclose_with_stats(
+            g_ref,
+            g_c,
+            f"grad_{name}_head_first={head_first}",
+            atol=atol,
+            rtol=1e-3,
         )
-
-    grad_c = jax.grad(cuda_loss_fn, argnums=range(7))(
-        w_c, r_c, k_c, v_c, a_c, b_c, h0_c
-    )
-    cuda_val = sum(
-        jnp.sum(jnp.asarray(g, jnp.float32) * d) for g, d in zip(grad_c, dirs)
-    )
-
-    rel = float(jnp.abs(ref_val - cuda_val) / (jnp.abs(ref_val) + 1e-8))
-    print(
-        f"[directional_derivative head_first={head_first}] ref={float(ref_val):.6e}, "
-        f"cuda={float(cuda_val):.6e}, rel_diff={rel:.3e}"
-    )
-    assert rel < 1e-1, f"方向导数相对差异过大: {rel}"

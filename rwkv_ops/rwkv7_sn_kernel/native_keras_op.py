@@ -4,9 +4,11 @@ RWKV-7 State Norm (Adaptive Tanh Clipping) — 半线性 Chunkwise 训练与单�
 设计要点：
 - 训练时只在 chunk 边界（每 16 token）执行 State Norm，使用 ops.cond 避免非边界
   步的冗余计算与梯度传播。
-- 单步推理时每步都计算 SN，再用 ops.where 根据 per-sample do_sn 选择。
+- 单步推理时每步都计算 SN，再用 ops.where 根据 per-sample mask 选择。
+- `tau` 仅作为 State Norm 的阈值（必须 > 0）；是否执行 SN 由同 batch-chunk 维度的
+  `mask` 决定，形状为 [B, T//16]。
 - 不再内置 token-level mask。调用者需在外部保证 padding 位置 k=0, a=0, w=-inf，
-  并把全 padding chunk 的 tau 标记为 0.0。
+  并把全 padding chunk 的 mask 置 0。
 """
 
 import keras
@@ -30,14 +32,15 @@ def transpose_head(x, head_first):
     return ops.transpose(x, (0, 2, 1, 3))
 
 
-def _apply_state_norm_cond(state, t, tau):
+def _apply_state_norm_cond(state, t, tau, mask):
     """
     训练用：只在 chunk 边界执行 State Norm，使用 ops.cond 避免冗余计算。
 
     参数:
         state: [B, H, N, N]，float32
         t:     scalar Tensor，当前 token 索引
-        tau:   [B, T//16, H]，float32
+        tau:   [B, T//16, H]，float32，必须 > 0
+        mask:  [B, T//16]，float32/bool，>0 表示执行 SN
 
     返回:
         [B, H, N, N]
@@ -51,8 +54,11 @@ def _apply_state_norm_cond(state, t, tau):
         tau_t = ops.take(tau, chunk_idx, axis=1)
         tau_t = ops.squeeze(tau_t, axis=1)
 
-        do_sn = ops.cast(ops.greater(tau_t, 0), state.dtype)
-        do_sn = ops.reshape(do_sn, [ops.shape(do_sn)[0], ops.shape(do_sn)[1], 1, 1])
+        mask_t = ops.take(mask, chunk_idx, axis=1)
+        mask_t = ops.squeeze(mask_t, axis=1)
+
+        m = ops.cast(ops.greater(mask_t, 0), state.dtype)
+        m = ops.reshape(m, [ops.shape(m)[0], 1, 1, 1])
 
         tau_calc = ops.maximum(tau_t, 1e-6)
         tau_calc = ops.reshape(
@@ -61,7 +67,7 @@ def _apply_state_norm_cond(state, t, tau):
         )
         sn_state = tau_calc * ops.tanh(state / tau_calc)
 
-        return state * (1.0 - do_sn) + sn_state * do_sn
+        return state * (1.0 - m) + sn_state * m
 
     def _false_fn():
         return state
@@ -77,6 +83,7 @@ def generalized_delta_rule_sn(
     a,
     b,
     tau,
+    mask=None,
     initial_state=None,
     output_final_state=True,
     head_first=False,
@@ -87,14 +94,18 @@ def generalized_delta_rule_sn(
     说明：
     - 训练版本会保存反向传播所需的中间量；纯推理请使用后端对应的 inference
       入口，可减少显存占用。
-    - T 必须被 16 整除（tau 是 per-chunk）。
+    - T 必须被 16 整除（tau/mask 是 per-chunk）。
+    - `tau` 只表示阈值，必须严格 > 0；是否执行 SN 由 `mask` 决定。
 
     参数:
         r, w, k, v, a, b:
             [B, T, H, N]（head_first=False）或 [B, H, T, N]（head_first=True）。
             T 必须被 16 整除。
         tau:
-            [B, T//16, H]，float32。有效 chunk > 0，全 padding chunk = 0.0。
+            [B, T//16, H]，float32。阈值，必须 > 0。
+        mask:
+            [B, T//16]，float32/bool。>0 表示该 chunk 边界执行 SN。
+            若未提供，默认全 1（所有 chunk 边界都执行 SN）。
         initial_state:
             [B, H, N, N] 或 [1, H, N, N]，可选。
         output_final_state:
@@ -121,6 +132,16 @@ def generalized_delta_rule_sn(
         raise ValueError(
             f"RWKV-SN training/prefill requires T divisible by 16, but got T={T}."
         )
+
+    tau = ops.cast(tau, "float32")
+    if mask is None:
+        mask = ops.ones((B, T // 16), dtype="float32")
+    else:
+        mask = ops.cast(mask, "float32")
+        if ops.shape(mask) != (B, T // 16):
+            raise ValueError(
+                f"mask shape {ops.shape(mask)} must match (B, T//16) = ({B}, {T // 16})"
+            )
 
     if initial_state is not None:
         state = initial_state
@@ -153,7 +174,7 @@ def generalized_delta_rule_sn(
         else:
             out = ops.slice_update(out, [0, 0, t, 0], ops.reshape(o, (B, H, 1, N)))
 
-        state = _apply_state_norm_cond(state, t, tau)
+        state = _apply_state_norm_cond(state, t, tau, mask)
         return [state, out]
 
     if keras_backend == "tensorflow":
@@ -196,7 +217,7 @@ def rwkv7_step_sn(
         state:
             [B, H, N, N]，float32。
         tau:
-            [B, H] 或 [H]，float32。
+            [B, H] 或 [H]，float32，必须 > 0。
         do_sn:
             [B]，bool。
 
@@ -256,7 +277,7 @@ def generalized_delta_rule_sn_single_step(
         r, w, k, v, a, b:
             [B, 1, H, N]（head_first=False）或 [B, H, 1, N]（head_first=True）。
         tau:
-            [B, H]，float32。
+            [B, H]，float32，必须 > 0。
         do_sn:
             [B]，bool。
         initial_state, output_final_state, head_first: 同训练版本。

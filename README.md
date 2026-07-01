@@ -304,19 +304,20 @@ def generalized_delta_rule_sn(
     v,
     a,
     b,
-    tau,                  # [B, T//16, H]，float32，已预处理为 softplus(param)+1
+    tau,                  # [B, T//16, H]，float32，已预处理为 softplus(param)+1，必须 > 0
+    mask=None,            # [B, T//16]，float32，1 表示执行 SN，0 表示跳过；所有 head 共享
     initial_state=None,
     output_final_state: bool = True,
     head_first: bool = False,
 ):
     """
     带 State Norm 的 RWKV-7 广义 Delta 规则（训练 / prefill 通用）。
-    不再内置 token-level mask；padding 请在外部保证 k=0, a=0, w=-inf，
-    并将全 padding chunk 的 tau 置 0.0。
 
     Args:
         r, w, k, v, a, b: [B, T, H, K] 或 [B, H, T, K]，T 必须被 16 整除。
-        tau: [B, T//16, H]，有效 chunk > 0，padding chunk = 0.0。
+        tau: [B, T//16, H]，float32，必须 > 0。
+        mask: [B, T//16]，float32，0/1 标记每个 chunk 是否执行 State Norm；
+              省略时等价于全 1。padding chunk 请置 0，并配合 k=0, a=0, w=-inf。
         initial_state: [B, H, K, K] 或 [1, H, K, K]。
         output_final_state: 是否返回最终 State。
         head_first: 是否 head-first。
@@ -410,7 +411,7 @@ for step in range(seq_len):
   sudo ln -sf /usr/local/cuda-12.4 /usr/local/cuda
   ```
 - 确保 `nvcc -V` 正常输出，且 `which nvcc` 指向正确版本。
-- JAX `cuda` 后端基于 `jax.ffi`，支持 JAX >= 0.4.31（含 0.6.x），`bfloat16` 走 CUDA 加速，其它 dtype 自动回退到 `native`。
+- JAX `cuda` 后端基于 `jax.ffi`，支持 JAX >= 0.4.31（含 0.6.x）。CUDA 路径仅对 `bfloat16` 加速；非 `bfloat16` 输入会发出警告并强制 cast 为 `bfloat16`，不再回退到 `native`。
 
 <a id="tensorflow-使用注意事项"></a>
 ### TensorFlow 使用注意事项
@@ -468,7 +469,7 @@ y, final_state = rwkv6_op(
 | TensorFlow  | ❌   | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 
-JAX `cuda` 后端基于 `jax.ffi`，支持 JAX >= 0.4.31（含 0.6.x）；当前 CUDA FFI 仅对 `bfloat16` 加速，其它 dtype 回退到 `native`。
+JAX `cuda` 后端基于 `jax.ffi`，支持 JAX >= 0.4.31（含 0.6.x）。CUDA 路径仅对 `bfloat16` 加速；非 `bfloat16` 输入会发出警告并强制 cast 为 `bfloat16`，不再回退到 `native`。
 
 
 <a id="测试"></a>

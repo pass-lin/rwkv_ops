@@ -15,11 +15,15 @@ __device__ inline bf to_bf(const float &u) {
 }
 typedef bf *__restrict__ F_;
 
-/* -------------------- 训练前向 Kernel -------------------- */
+/* -------------------- 训练前向 Kernel --------------------
+ * mask: [B, T//16]，>0 表示在该 chunk 边界执行 State Norm。
+ * tau 只作为阈值，必须 > 0。
+ * -------------------- */
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_kernel_sn(int T, int H,
                                   F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
                                   const float* __restrict__ tau_,
+                                  const float* __restrict__ mask_,
                                   bf *y_, float *s_, float *sa_, float *h0_) {
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
     float state[C] = {0};
@@ -63,20 +67,25 @@ __global__ void forward_kernel_sn(int T, int H,
             #pragma unroll
             for (int j = 0; j < C; ++j) s_[base + j * C] = state[j];
 
+            int64_t cond_idx = (int64_t)bb * num_chunks + chunk;
+            float m = mask_[cond_idx];
             float tau = tau_[bb * num_chunks * H + chunk * H + hh];
-            if (tau > 0.0f) {
-                #pragma unroll
-                for (int j = 0; j < C; ++j) state[j] = tau * tanhf(state[j] / tau);
+            #pragma unroll
+            for (int j = 0; j < C; ++j) {
+                state[j] = state[j] * (1.0f - m) + m * tau * tanhf(state[j] / tau);
             }
         }
     }
 }
 
-/* -------------------- 训练反向 Kernel -------------------- */
+/* -------------------- 训练反向 Kernel --------------------
+ * mask 控制是否在该 chunk 边界产生 dtau 并修改梯度。
+ * -------------------- */
 template<int C> __launch_bounds__(C, 2)
 __global__ void backward_kernel_sn(int T, int H,
                                    F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
                                    const float* __restrict__ tau_,
+                                   const float* __restrict__ mask_,
                                    F_ dy_,
                                    float *s_, float *sa_,
                                    float *dht_, float *dh0_, float *dtau_,
@@ -125,29 +134,30 @@ __global__ void backward_kernel_sn(int T, int H,
                 stateT[j + 3] = q_vec.w;
             }
 
+            int64_t cond_idx = (int64_t)bb * num_chunks + chunk;
             float tau = tau_[bb * num_chunks * H + chunk * H + hh];
-            if (tau > 0.0f) {
-                float inv_tau = 1.0f / tau;
-                float dtau_local = 0.0f;
-                #pragma unroll
-                for (int j = 0; j < C; ++j) {
-                    float u = stateT[j] * inv_tau;
-                    float tnh = tanhf(u);
-                    float sech2 = 1.0f - tnh * tnh;
-                    dtau_local += dstate[j] * (tnh - u * sech2);
-                    dstate[j]  *= sech2;
-                    dstateT[j] *= sech2;
-                }
-                dtau_shared[i] = dtau_local;
+            float m = mask_[cond_idx];
+            float inv_tau = 1.0f / tau;
+            float dtau_local = 0.0f;
+            #pragma unroll
+            for (int j = 0; j < C; ++j) {
+                float u = stateT[j] * inv_tau;
+                float tnh = tanhf(u);
+                float sech2 = 1.0f - tnh * tnh;
+                float blend = (1.0f - m) + m * sech2;
+                dtau_local += m * dstate[j] * (tnh - u * sech2);
+                dstate[j]  *= blend;
+                dstateT[j] *= blend;
+            }
+            dtau_shared[i] = dtau_local;
+            __syncthreads();
+            #pragma unroll
+            for (int stride = C / 2; stride > 0; stride /= 2) {
+                if (i < stride) dtau_shared[i] += dtau_shared[i + stride];
                 __syncthreads();
-                #pragma unroll
-                for (int stride = C / 2; stride > 0; stride /= 2) {
-                    if (i < stride) dtau_shared[i] += dtau_shared[i + stride];
-                    __syncthreads();
-                }
-                if (i == 0) {
-                    dtau_[bb * num_chunks * H + chunk * H + hh] = dtau_shared[0];
-                }
+            }
+            if (i == 0) {
+                dtau_[bb * num_chunks * H + chunk * H + hh] = dtau_shared[0];
             }
         }
 
@@ -198,12 +208,13 @@ __global__ void backward_kernel_sn(int T, int H,
 
 /* -------------------- 推理 Kernel --------------------
  * 仅用于 prefill / 纯推理：不保存 s checkpoint 与 sa，减少显存占用。
- * 由于 tau 仍是 per-chunk，T 必须被 _CHUNK_LEN_ 整除；若需任意长度请用单步 kernel。
+ * T 必须被 _CHUNK_LEN_ 整除；若需任意长度请用单步 kernel。
  * -------------------- */
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_inference_kernel_sn(int T, int H,
                                             F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
                                             const float* __restrict__ tau_,
+                                            const float* __restrict__ mask_,
                                             bf *y_, float *s_, float *h0_) {
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
     float state[C] = {0};
@@ -240,10 +251,12 @@ __global__ void forward_inference_kernel_sn(int T, int H,
 
         if ((t + 1) % _CHUNK_LEN_ == 0) {
             int chunk = t / _CHUNK_LEN_;
+            int64_t cond_idx = (int64_t)bb * num_chunks + chunk;
+            float m = mask_[cond_idx];
             float tau = tau_[bb * num_chunks * H + chunk * H + hh];
-            if (tau > 0.0f) {
-                #pragma unroll
-                for (int j = 0; j < C; ++j) state[j] = tau * tanhf(state[j] / tau);
+            #pragma unroll
+            for (int j = 0; j < C; ++j) {
+                state[j] = state[j] * (1.0f - m) + m * tau * tanhf(state[j] / tau);
             }
         }
     }
@@ -263,6 +276,7 @@ static ffi::Error WKV7SnFwdHost(
     ffi::Buffer<ffi::BF16> a,
     ffi::Buffer<ffi::BF16> b,
     ffi::Buffer<ffi::F32>  tau,
+    ffi::Buffer<ffi::F32>  mask,
     ffi::Buffer<ffi::F32>  h0,
     ffi::ResultBuffer<ffi::BF16> y,
     ffi::ResultBuffer<ffi::F32>  s,
@@ -283,6 +297,7 @@ static ffi::Error WKV7SnFwdHost(
         reinterpret_cast<bf *>(a.typed_data()),
         reinterpret_cast<bf *>(b.typed_data()),
         tau.typed_data(),
+        mask.typed_data(),
         reinterpret_cast<bf *>(y->typed_data()),
         s->typed_data(),
         sa->typed_data(),
@@ -304,6 +319,7 @@ static ffi::Error WKV7SnBwdHost(
     ffi::Buffer<ffi::BF16> a,
     ffi::Buffer<ffi::BF16> b,
     ffi::Buffer<ffi::F32>  tau,
+    ffi::Buffer<ffi::F32>  mask,
     ffi::Buffer<ffi::BF16> dy,
     ffi::Buffer<ffi::F32>  s,
     ffi::Buffer<ffi::F32>  sa,
@@ -332,6 +348,7 @@ static ffi::Error WKV7SnBwdHost(
         reinterpret_cast<bf *>(a.typed_data()),
         reinterpret_cast<bf *>(b.typed_data()),
         tau.typed_data(),
+        mask.typed_data(),
         reinterpret_cast<bf *>(dy.typed_data()),
         s.typed_data(),
         sa.typed_data(),
@@ -361,6 +378,7 @@ static ffi::Error WKV7SnInferenceHost(
     ffi::Buffer<ffi::BF16> a,
     ffi::Buffer<ffi::BF16> b,
     ffi::Buffer<ffi::F32>  tau,
+    ffi::Buffer<ffi::F32>  mask,
     ffi::Buffer<ffi::F32>  h0,
     ffi::ResultBuffer<ffi::BF16> y,
     ffi::ResultBuffer<ffi::F32>  s)
@@ -380,6 +398,7 @@ static ffi::Error WKV7SnInferenceHost(
         reinterpret_cast<bf *>(a.typed_data()),
         reinterpret_cast<bf *>(b.typed_data()),
         tau.typed_data(),
+        mask.typed_data(),
         reinterpret_cast<bf *>(y->typed_data()),
         s->typed_data(),
         h0.typed_data());
@@ -404,6 +423,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::BF16>>()
         .Arg<ffi::Buffer<ffi::F32>>()
         .Arg<ffi::Buffer<ffi::F32>>()
+        .Arg<ffi::Buffer<ffi::F32>>()
         .Ret<ffi::Buffer<ffi::BF16>>()
         .Ret<ffi::Buffer<ffi::F32>>()
         .Ret<ffi::Buffer<ffi::F32>>()
@@ -419,6 +439,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::BF16>>()
         .Arg<ffi::Buffer<ffi::BF16>>()
         .Arg<ffi::Buffer<ffi::BF16>>()
+        .Arg<ffi::Buffer<ffi::F32>>()
         .Arg<ffi::Buffer<ffi::F32>>()
         .Arg<ffi::Buffer<ffi::BF16>>()
         .Arg<ffi::Buffer<ffi::F32>>()
@@ -444,6 +465,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::BF16>>()
         .Arg<ffi::Buffer<ffi::BF16>>()
         .Arg<ffi::Buffer<ffi::BF16>>()
+        .Arg<ffi::Buffer<ffi::F32>>()
         .Arg<ffi::Buffer<ffi::F32>>()
         .Arg<ffi::Buffer<ffi::F32>>()
         .Ret<ffi::Buffer<ffi::BF16>>()

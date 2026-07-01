@@ -21,12 +21,12 @@ def test_rwkv6_forward_state(jax_op, native_op, sample_inputs, sample_shape):
     _, _, _, N = sample_shape
     r, k, v, w, u, init = sample_inputs
 
-    r_ref = _to_jax(r, "float32")
-    k_ref = _to_jax(k, "float32")
-    v_ref = _to_jax(v, "float32")
-    w_ref = _to_jax(w, "float32")
-    u_ref = _to_jax(u, "float32")
-    init_ref = _to_jax(init, "float32")
+    r_ref = _to_jax(r, "bfloat16")
+    k_ref = _to_jax(k, "bfloat16")
+    v_ref = _to_jax(v, "bfloat16")
+    w_ref = _to_jax(w, "bfloat16")
+    u_ref = _to_jax(u, "bfloat16")
+    init_ref = _to_jax(init, "bfloat16")
 
     y_ref, s_ref = native_op(
         r_ref,
@@ -38,25 +38,18 @@ def test_rwkv6_forward_state(jax_op, native_op, sample_inputs, sample_shape):
         output_final_state=True,
     )
 
-    r_c = _to_jax(r, "bfloat16")
-    k_c = _to_jax(k, "bfloat16")
-    v_c = _to_jax(v, "bfloat16")
-    w_c = _to_jax(w, "bfloat16")
-    u_c = _to_jax(u, "bfloat16")
-    init_c = _to_jax(init, "bfloat16")
-
     y_c, s_c = jax_op(
-        r_c,
-        k_c,
-        v_c,
-        w_c,
-        jnp.reshape(u_c, (-1, N)),
-        initial_state=init_c,
+        r_ref,
+        k_ref,
+        v_ref,
+        w_ref,
+        jnp.reshape(u_ref, (-1, N)),
+        initial_state=init_ref,
         output_final_state=True,
     )
 
-    assert_allclose_with_stats(y_ref, y_c, "y", atol=1.0, rtol=1e-1)
-    assert_allclose_with_stats(s_ref, s_c, "final_state", atol=1.0, rtol=1e-1)
+    assert_allclose_with_stats(y_ref, y_c, "y", atol=1e-2, rtol=1e-2)
+    assert_allclose_with_stats(s_ref, s_c, "final_state", atol=1e-2, rtol=1e-2)
 
 
 @pytest.mark.jax
@@ -64,12 +57,12 @@ def test_rwkv6_state_map(jax_op, native_op, sample_inputs, sample_shape):
     B, _, _, N = sample_shape
     r, k, v, w, u, init = sample_inputs
 
-    r_ref = _to_jax(r, "float32")
-    k_ref = _to_jax(k, "float32")
-    v_ref = _to_jax(v, "float32")
-    w_ref = _to_jax(w, "float32")
-    u_ref = _to_jax(u, "float32")
-    init_map_ref = _to_jax(init[:1], "float32")
+    r_ref = _to_jax(r, "bfloat16")
+    k_ref = _to_jax(k, "bfloat16")
+    v_ref = _to_jax(v, "bfloat16")
+    w_ref = _to_jax(w, "bfloat16")
+    u_ref = _to_jax(u, "bfloat16")
+    init_map_ref = _to_jax(init[:1], "bfloat16")
 
     y_ref, s_ref = native_op(
         r_ref,
@@ -82,26 +75,21 @@ def test_rwkv6_state_map(jax_op, native_op, sample_inputs, sample_shape):
         state_map=jnp.zeros((B,), dtype=jnp.int32),
     )
 
-    r_c = _to_jax(r, "bfloat16")
-    k_c = _to_jax(k, "bfloat16")
-    v_c = _to_jax(v, "bfloat16")
-    w_c = _to_jax(w, "bfloat16")
-    u_c = _to_jax(u, "bfloat16")
-    init_map_c = _to_jax(init[:1], "bfloat16")
-
     y_c, s_c = jax_op(
-        r_c,
-        k_c,
-        v_c,
-        w_c,
-        jnp.reshape(u_c, (-1, N)),
-        initial_state=init_map_c,
+        r_ref,
+        k_ref,
+        v_ref,
+        w_ref,
+        jnp.reshape(u_ref, (-1, N)),
+        initial_state=init_map_ref,
         output_final_state=True,
         state_map=jnp.zeros((B,), dtype=jnp.int32),
     )
 
-    assert_allclose_with_stats(y_ref, y_c, "y_state_map", atol=1.0, rtol=1e-1)
-    assert_allclose_with_stats(s_ref, s_c, "final_state_state_map", atol=1.0, rtol=1e-1)
+    assert_allclose_with_stats(y_ref, y_c, "y_state_map", atol=1e-2, rtol=1e-2)
+    assert_allclose_with_stats(
+        s_ref, s_c, "final_state_state_map", atol=1e-2, rtol=1e-2
+    )
 
 
 @pytest.mark.jax

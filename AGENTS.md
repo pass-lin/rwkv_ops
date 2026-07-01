@@ -12,10 +12,13 @@
 ### 设计约定
 
 - **tau 语义**：CUDA kernel 只接收预处理后的 `tau`，即 `tau = softplus(param) + 1.0`，必须严格大于 1。
-- **padding chunk**：全 padding 的 chunk 必须将对应 `tau` 置 0.0；kernel 内部通过 `tau > 0` 判断是否执行 SN。
-- **无内置 token-level mask**：调用者需在外部保证 padding 位置 `k=0, a=0, w=-inf`。
+- **mask 语义**：SN 的启用/禁用由独立的 `mask` 张量控制，形状 `[B, T//16]`，所有 head 共享。
+  - `mask=1`：在该 chunk 边界执行 `state = tau * tanh(state / tau)`。
+  - `mask=0`：保留原 state（`state = state`）。
+  - 不再使用 `tau=0.0` 兼任 mask；调用者需将全 padding chunk 的 mask 置 0。
+- **padding 处理**：padding 位置仍需保证 `k=0, a=0, w=-inf`，并将对应 chunk 的 `mask` 置 0。
 - **输出与 State 的关系**：输出始终基于 SN **之前** 的 State；SN 只修改传递给下一步/下一 chunk 的 State。
-- **训练版本**：只在 chunk 边界（每 16 tokens）执行 SN；native 用 `ops.cond`，CUDA 在 `(t+1)%16==0` 处分支。
+- **训练版本**：只在 chunk 边界（每 16 tokens）按 `mask` 执行 SN；CUDA kernel 使用 `mask * sn_state + (1 - mask) * state` 的 blend 形式，避免 warp 分支。
 - **单步版本**：每步都计算 SN，再用 `ops.where` / CUDA 分支按 per-sample `do_sn` 选择。
 
 ### CUDA 实现要点

@@ -1,5 +1,6 @@
 """
 JAX 版 RWKV7-SN wkv kernel
+mask 为 [B, T//16] 的显式 chunk-level 标志，0 表示跳过 State Norm，1 表示执行。
 tau 为外部预处理后的 per-head per-chunk 阈值，返回 dtau 供上层 softplus 参数梯度。
 """
 
@@ -19,16 +20,16 @@ _CURRENT_DIR = pathlib.Path(__file__).parent.absolute()
 _NVCC_WRAPPER = _CURRENT_DIR.parents[2] / "cuda_tools" / "nvcc_wrap"
 
 FWD_RULE = (
-    "b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b c h, b h k v -> "
+    "b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b c h, b c, b h k v -> "
     "b t h k, b h c k v, b t h k"
 )
 BWD_RULE = (
-    "b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b c h, b t h k, "
+    "b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b c h, b c, b t h k, "
     "b h c k v, b t h k, b h k v -> b t h k, b t h k, b t h k, b t h k, "
-    "b t h k, b t h k, b c h, b h k v"
+    "b t h k, b t h k, b c h, b c, b h k v"
 )
 INF_RULE = (
-    "b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b c h, b h k v -> "
+    "b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b c h, b c, b h k v -> "
     "b t h k, b h k v"
 )
 
@@ -40,7 +41,7 @@ def _fwd_infer_sharding(arg_shapes, arg_shardings):
 
 def _bwd_infer_sharding(arg_shapes, arg_shardings):
     qs = arg_shardings[1]
-    return (qs, qs, qs, qs, qs, qs, qs, qs)
+    return (qs, qs, qs, qs, qs, qs, qs, qs, qs)
 
 
 def _inf_infer_sharding(arg_shapes, arg_shardings):
@@ -133,7 +134,7 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         return x
 
     # -------------------- 训练前向 --------------------
-    def _wkv7_sn_kernel_impl(w, q, k, v, a, b, tau, h0):
+    def _wkv7_sn_kernel_impl(w, q, k, v, a, b, tau, mask, h0):
         B, T, H, K = q.shape
         dtype = q.dtype
         chunk_num = int(T // CHUNK_LEN)
@@ -143,11 +144,11 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
 
         return jax.ffi.ffi_call(
             "wkv7_sn_fwd", (out_type, s_type, sa_type), vmap_method="broadcast_all"
-        )(w, q, k, v, a, b, tau, h0)
+        )(w, q, k, v, a, b, tau, mask, h0)
 
     @custom_partitioning
-    def _wkv7_sn_kernel(w, q, k, v, a, b, tau, h0):
-        return _wkv7_sn_kernel_impl(w, q, k, v, a, b, tau, h0)
+    def _wkv7_sn_kernel(w, q, k, v, a, b, tau, mask, h0):
+        return _wkv7_sn_kernel_impl(w, q, k, v, a, b, tau, mask, h0)
 
     _wkv7_sn_kernel.def_partition(
         infer_sharding_from_operands=_fwd_infer_sharding,
@@ -155,30 +156,31 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         partition=_create_partition(_wkv7_sn_kernel_impl),
     )
 
-    def _apply_sn_to_final_state(state, tau):
-        # state: [B, H, K, K], tau: [B, T//16, H]
+    def _apply_sn_to_final_state(state, tau, mask):
+        # state: [B, H, K, K]; tau: [B, T//16, H]; mask: [B, T//16]
         last_tau = tau[:, -1][:, :, None, None]
+        last_mask = mask[:, -1][:, None, None, None]
         tau_safe = jnp.maximum(last_tau, 1e-6)
         sn_state = last_tau * jnp.tanh(state / tau_safe)
-        return jnp.where(last_tau > 0, sn_state, state)
+        return jnp.where(last_mask > 0, sn_state, state)
 
-    def _compute_outputs(y, s, tau):
+    def _compute_outputs(y, s, tau, mask):
         final_state = s[:, :, -1]
         final_state = jnp.transpose(final_state, [0, 1, 3, 2])
-        final_state = _apply_sn_to_final_state(final_state, tau)
+        final_state = _apply_sn_to_final_state(final_state, tau, mask)
         return y, final_state
 
     @jax.custom_vjp
-    def wk7_sn_kernel(w, q, k, v, a, b, tau, h0):
-        y, s, sa = _wkv7_sn_kernel(w, q, k, v, a, b, tau, h0)
-        return _compute_outputs(y, s, tau)
+    def wk7_sn_kernel(w, q, k, v, a, b, tau, mask, h0):
+        y, s, sa = _wkv7_sn_kernel(w, q, k, v, a, b, tau, mask, h0)
+        return _compute_outputs(y, s, tau, mask)
 
-    def _fwd(w, q, k, v, a, b, tau, h0):
-        y, s, sa = _wkv7_sn_kernel(w, q, k, v, a, b, tau, h0)
-        y_out, final_state = _compute_outputs(y, s, tau)
-        return (y_out, final_state), (w, q, k, v, a, b, tau, s, sa)
+    def _fwd(w, q, k, v, a, b, tau, mask, h0):
+        y, s, sa = _wkv7_sn_kernel(w, q, k, v, a, b, tau, mask, h0)
+        y_out, final_state = _compute_outputs(y, s, tau, mask)
+        return (y_out, final_state), (w, q, k, v, a, b, tau, mask, s, sa)
 
-    def _wkv7_sn_bwd_kernel_impl(w, q, k, v, a, b, tau, dy, s, sa, dht):
+    def _wkv7_sn_bwd_kernel_impl(w, q, k, v, a, b, tau, mask, dy, s, sa, dht):
         dh0_type = jax.ShapeDtypeStruct(dht.shape, dht.dtype)
         dtau_type = jax.ShapeDtypeStruct(tau.shape, tau.dtype)
         dw_type = jax.ShapeDtypeStruct(w.shape, w.dtype)
@@ -192,12 +194,12 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
             "wkv7_sn_bwd",
             (dh0_type, dtau_type, dw_type, dq_type, dk_type, dv_type, da_type, db_type),
             vmap_method="broadcast_all",
-        )(w, q, k, v, a, b, tau, dy, s, sa, dht)
+        )(w, q, k, v, a, b, tau, mask, dy, s, sa, dht)
         return dw, dq, dk, dv, da, db, dtau, dh0
 
     @custom_partitioning
-    def _wkv7_sn_bwd_kernel(w, q, k, v, a, b, tau, dy, s, sa, dht):
-        return _wkv7_sn_bwd_kernel_impl(w, q, k, v, a, b, tau, dy, s, sa, dht)
+    def _wkv7_sn_bwd_kernel(w, q, k, v, a, b, tau, mask, dy, s, sa, dht):
+        return _wkv7_sn_bwd_kernel_impl(w, q, k, v, a, b, tau, mask, dy, s, sa, dht)
 
     _wkv7_sn_bwd_kernel.def_partition(
         infer_sharding_from_operands=_bwd_infer_sharding,
@@ -206,22 +208,18 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
     )
 
     def _bwd(res, grads):
-        w, q, k, v, a, b, tau, s, sa = res
+        w, q, k, v, a, b, tau, mask, s, sa = res
         dy, dht = grads
         dy = jnp.asarray(dy, jnp.bfloat16)
-        return _wkv7_sn_bwd_kernel(w, q, k, v, a, b, tau, dy, s, sa, dht)
+        dw, dq, dk, dv, da, db, dtau, dh0 = _wkv7_sn_bwd_kernel(
+            w, q, k, v, a, b, tau, mask, dy, s, sa, dht
+        )
+        return dw, dq, dk, dv, da, db, dtau, None, dh0
 
     wk7_sn_kernel.defvjp(_fwd, _bwd)
 
     # -------------------- 推理前向 --------------------
-    # 单独实现推理 kernel 的原因：
-    # 1. 训练 forward 会返回 shape (B, H, T//16, K, K) 的 checkpoint `s` 与
-    #    shape (B, T, H, K) 的 `sa` 供反向使用。即使在 `jax.jit` / 不求梯度场景下，
-    #    这些也是 FFI 的显式输出，XLA 仍需为它们分配显存。
-    # 2. 推理 kernel 只输出 y 与最终 state，可显著降低 prefill 阶段显存占用。
-    # 3. 当前推理 kernel 仍按 chunk 读取 tau，因此 T 仍需被 16 整除；若需任意长度，
-    #    请使用单步 RNN 接口 `generalized_delta_rule_sn_single_step`。
-    def _wkv7_sn_inference_kernel_impl(w, q, k, v, a, b, tau, h0):
+    def _wkv7_sn_inference_kernel_impl(w, q, k, v, a, b, tau, mask, h0):
         B, T, H, K = q.shape
         dtype = q.dtype
         out_type = jax.ShapeDtypeStruct((B, T, H, K), dtype)
@@ -229,12 +227,12 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
 
         y, s = jax.ffi.ffi_call(
             "wkv7_sn_inference", (out_type, s_type), vmap_method="broadcast_all"
-        )(w, q, k, v, a, b, tau, h0)
+        )(w, q, k, v, a, b, tau, mask, h0)
         return y, s
 
     @custom_partitioning
-    def _wkv7_sn_inference_kernel(w, q, k, v, a, b, tau, h0):
-        return _wkv7_sn_inference_kernel_impl(w, q, k, v, a, b, tau, h0)
+    def _wkv7_sn_inference_kernel(w, q, k, v, a, b, tau, mask, h0):
+        return _wkv7_sn_inference_kernel_impl(w, q, k, v, a, b, tau, mask, h0)
 
     _wkv7_sn_inference_kernel.def_partition(
         infer_sharding_from_operands=_inf_infer_sharding,
@@ -251,6 +249,7 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         a: jnp.ndarray,
         b: jnp.ndarray,
         tau: jnp.ndarray,
+        mask: Optional[jnp.ndarray] = None,
         initial_state: Optional[jnp.ndarray] = None,
         output_final_state: bool = True,
         head_first: bool = False,
@@ -263,19 +262,30 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         a = _transpose_head(a, head_first)
         b = _transpose_head(b, head_first)
         tau = jnp.asarray(tau, jnp.float32)
-
         B, T, H, K = r.shape
         if T % CHUNK_LEN:
             raise ValueError(
                 f"Sequence length T={T} must be divisible by chunk_len={CHUNK_LEN}"
             )
+        if tau.shape != (B, T // CHUNK_LEN, H):
+            raise ValueError(
+                f"tau shape {tau.shape} does not match expected (B={B}, T//16={T // CHUNK_LEN}, H={H})"
+            )
+        if mask is None:
+            mask = jnp.ones((B, T // CHUNK_LEN), dtype=jnp.float32)
+        else:
+            mask = jnp.asarray(mask, jnp.float32)
+            if mask.shape != (B, T // CHUNK_LEN):
+                raise ValueError(
+                    f"mask shape {mask.shape} must match (B, T//16) = ({B}, {T // CHUNK_LEN})"
+                )
 
         if initial_state is None:
             h0 = jnp.zeros((B, H, K, K), jnp.float32)
         else:
             h0 = jnp.asarray(initial_state, jnp.float32)
 
-        out, last_state = wk7_sn_kernel(w, r, k, v, a, b, tau, h0)
+        out, last_state = wk7_sn_kernel(w, r, k, v, a, b, tau, mask, h0)
         out = jnp.asarray(out, dtype)
 
         if output_final_state:
@@ -290,6 +300,7 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         a: jnp.ndarray,
         b: jnp.ndarray,
         tau: jnp.ndarray,
+        mask: Optional[jnp.ndarray] = None,
         initial_state: Optional[jnp.ndarray] = None,
         output_final_state: bool = True,
         head_first: bool = False,
@@ -298,7 +309,7 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         State Norm 推理 / prefill 入口（无梯度）。
 
         与训练版本数值等价，但显存占用更低，因为不会分配反向所需的 `s`、`sa`
-        checkpoint。注意当前 CUDA 推理 kernel 仍按 chunk 读取 tau，所以 T 必须
+        checkpoint。注意当前 CUDA 推理 kernel 仍按 chunk 读取 tau/mask，所以 T 必须
         被 16 整除；任意长度请使用单步 RNN 接口。
         """
         dtype = r.dtype
@@ -316,13 +327,25 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
                 f"RWKV-SN inference/prefill requires T divisible by {CHUNK_LEN}, "
                 f"but got T={T}."
             )
+        if tau.shape != (B, T // CHUNK_LEN, H):
+            raise ValueError(
+                f"tau shape {tau.shape} does not match expected (B={B}, T//16={T // CHUNK_LEN}, H={H})"
+            )
+        if mask is None:
+            mask = jnp.ones((B, T // CHUNK_LEN), dtype=jnp.float32)
+        else:
+            mask = jnp.asarray(mask, jnp.float32)
+            if mask.shape != (B, T // CHUNK_LEN):
+                raise ValueError(
+                    f"mask shape {mask.shape} must match (B, T//16) = ({B}, {T // CHUNK_LEN})"
+                )
 
         if initial_state is None:
             h0 = jnp.zeros((B, H, K, K), jnp.float32)
         else:
             h0 = jnp.asarray(initial_state, jnp.float32)
 
-        out, final_state = _wkv7_sn_inference_kernel(w, r, k, v, a, b, tau, h0)
+        out, final_state = _wkv7_sn_inference_kernel(w, r, k, v, a, b, tau, mask, h0)
         out = jnp.asarray(out, dtype)
         return (out, final_state) if output_final_state else out
 

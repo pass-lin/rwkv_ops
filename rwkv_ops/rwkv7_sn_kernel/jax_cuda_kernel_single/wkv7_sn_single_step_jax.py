@@ -128,8 +128,7 @@ def get_jax_generalized_delta_rule_sn_single_step(HEAD_SIZE=64):
         a = a[:, 0, :, :]
         b = b[:, 0, :, :]
 
-        # JAX 默认关闭 x64，do_sn 用 int32 已足够（仅 0/1）。
-        # CUDA 侧已升级为 int64，XLA 会在 FFI 边界自动完成类型转换。
+        # JAX 默认关闭 x64，CUDA 侧也使用 int32（仅 0/1）。
         if isinstance(do_sn, bool):
             do_sn = jnp.full((B,), int(do_sn), dtype=jnp.int32)
         else:

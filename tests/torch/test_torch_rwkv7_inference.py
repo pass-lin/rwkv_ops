@@ -38,14 +38,14 @@ def _call_op(op, tensors, output_final_state=True, mask=None):
 def test_rwkv7_inference_forward_state(
     rwkv7_inference_op, rwkv7_native_op, rwkv7_inputs, device
 ):
-    ref = _make_inputs(rwkv7_inputs, device, "float32")
+    ref = _make_inputs(rwkv7_inputs, device, "bfloat16")
     tgt = _make_inputs(rwkv7_inputs, device, "bfloat16")
 
     y_ref, s_ref = _call_op(rwkv7_native_op, ref, output_final_state=True)
     y_tgt, s_tgt = _call_op(rwkv7_inference_op, tgt, output_final_state=True)
 
-    assert_allclose_with_stats(y_ref, y_tgt, "y", atol=1.0, rtol=1e-1)
-    assert_allclose_with_stats(s_ref, s_tgt, "final_state", atol=1.0, rtol=1e-1)
+    assert_allclose_with_stats(y_ref, y_tgt, "y", atol=1e-5, rtol=1e-2)
+    assert_allclose_with_stats(s_ref, s_tgt, "final_state", atol=1e-5, rtol=1e-3)
 
 
 @pytest.mark.torch
@@ -58,14 +58,14 @@ def test_rwkv7_inference_masked(
     mask_np[freeze] = 0.0
     mask = torch.tensor(mask_np, dtype=torch.float32, device=device)
 
-    ref = _make_inputs(rwkv7_inputs, device, "float32")
+    ref = _make_inputs(rwkv7_inputs, device, "bfloat16")
     tgt = _make_inputs(rwkv7_inputs, device, "bfloat16")
 
     y_ref, s_ref = _call_op(rwkv7_native_op, ref, output_final_state=True, mask=mask)
     y_tgt, s_tgt = _call_op(rwkv7_inference_op, tgt, output_final_state=True, mask=mask)
 
-    assert_allclose_with_stats(y_ref, y_tgt, "y_mask", atol=1.0, rtol=1e-1)
-    assert_allclose_with_stats(s_ref, s_tgt, "final_state_mask", atol=1.0, rtol=1e-1)
+    assert_allclose_with_stats(y_ref, y_tgt, "y_mask", atol=1e-5, rtol=1e-2)
+    assert_allclose_with_stats(s_ref, s_tgt, "final_state_mask", atol=1e-5, rtol=1e-3)
 
 
 @pytest.mark.torch

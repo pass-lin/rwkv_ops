@@ -59,25 +59,28 @@ class RWKVKernelOperator:
                     f"请确保state_map的值域为[0, {state_kinds})"
                 )
             s = ops.take(init_state, state_map, axis=0)
+            s = ops.cast(s, "float32")
 
         else:
             assert state_map is None
-            s = ops.zeros((B, H, self.head_size, self.head_size), dtype=u.dtype)
+            s = ops.zeros((B, H, self.head_size, self.head_size), dtype="float32")
 
-        w = ops.exp(-ops.exp(w))
+        # 为与 CUDA 保持一致，State 全程用 fp32 累加
+        u = ops.cast(u, "float32")
+        w = ops.exp(-ops.exp(ops.cast(w, "float32")))
 
         def cond(i, k, v, w, r, s, y):
             return i < T
 
         def body(i, k, v, w, r, s, y):
-            k_t = ops.take(k, i, 1)
-            v_t = ops.take(v, i, 1)
+            k_t = ops.cast(ops.take(k, i, 1), "float32")
+            v_t = ops.cast(ops.take(v, i, 1), "float32")
             kv_t = k_t @ v_t
             w_t = ops.take(w, i, 1)
 
-            r_t = ops.take(r, i, 1)
+            r_t = ops.cast(ops.take(r, i, 1), "float32")
             y_t = r_t @ (u * kv_t + s)
-            y_t = ops.reshape(y_t, (B, 1, C))
+            y_t = ops.reshape(ops.cast(y_t, r.dtype), (B, 1, C))
             s = kv_t + w_t * s
 
             y = ops.slice_update(y, [0, i, 0], y_t)
