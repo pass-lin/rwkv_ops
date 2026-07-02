@@ -26,7 +26,7 @@ FWD_RULE = (
 BWD_RULE = (
     "b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b c h, b c, b t h k, "
     "b h c k v, b t h k, b h k v -> b t h k, b t h k, b t h k, b t h k, "
-    "b t h k, b t h k, b c h, b c, b h k v"
+    "b t h k, b t h k, b c h, b h k v"
 )
 INF_RULE = (
     "b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b c h, b c, b h k v -> "
@@ -41,7 +41,7 @@ def _fwd_infer_sharding(arg_shapes, arg_shardings):
 
 def _bwd_infer_sharding(arg_shapes, arg_shardings):
     qs = arg_shardings[1]
-    return (qs, qs, qs, qs, qs, qs, qs, qs, qs)
+    return (qs, qs, qs, qs, qs, qs, qs, qs)
 
 
 def _inf_infer_sharding(arg_shapes, arg_shardings):
