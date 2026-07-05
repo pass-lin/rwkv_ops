@@ -325,18 +325,30 @@ def generalized_delta_rule_sn(
     """
     RWKV-7 generalized delta rule with State Norm (training / prefill).
 
+    Dispatch rules:
+    - When ``output_final_state=False``, the internal no-mask operator is used,
+      applying State Norm unconditionally at every chunk boundary to save the
+      mask read/branch overhead.
+    - When ``mask=None`` and ``output_final_state=True``, the no-mask operator is
+      also used, but a warning is raised and the returned ``final_state`` is set
+      to ``None`` to prevent users from accidentally using a state that may be
+      contaminated by padding chunks.
+    - The masked operator is used only when ``output_final_state=True`` and an
+      explicit ``mask`` is provided.
+
     Args:
         r, w, k, v, a, b: [B, T, H, K] or [B, H, T, K], T must be divisible by 16.
         tau: [B, T//16, H], float32, must be > 0.
         mask: [B, T//16], float32, 0/1 per-chunk flag for State Norm;
-              defaults to all ones. Set padded chunks to 0 and keep k=0, a=0, w=-inf.
+              only effective when output_final_state=True and mask is explicitly
+              provided. Set padded chunks to 0 and keep k=0, a=0, w=-inf.
         initial_state: [B, H, K, K] or [1, H, K, K].
         output_final_state: whether to return the final state.
         head_first: whether input is head-first.
 
     Returns:
         out: [B, T, H, K]
-        final_state: [B, H, K, K]
+        final_state: [B, H, K, K] or None (when mask=None and output_final_state=True)
     """
 ```
 

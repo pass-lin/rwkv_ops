@@ -5,6 +5,8 @@ RWKV-7 State Norm JAX CUDA kernel 数值测试。
     KERAS_BACKEND=jax pytest tests/jax/test_rwkv7_sn.py -v
 """
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -261,15 +263,28 @@ def test_rwkv7_sn_rnn(
 
 
 @pytest.mark.jax
-def test_rwkv7_sn_mask_all_one_equivalent(rwkv7_sn_jax_op, rwkv7_sn_inputs):
+def test_rwkv7_sn_no_mask_y_matches_all_one(rwkv7_sn_jax_op, rwkv7_sn_inputs):
+    """无 mask 算子与全 1 mask 算子的 y 应一致；无 mask 路径返回 None state。"""
     B, T, H, K = rwkv7_sn_inputs["r"].shape
     n_chunks = T // 16
     mask = jnp.ones((B, n_chunks), dtype=jnp.float32)
     r, k, v, a, b, w, tau, _, h0 = _prepare_inputs(rwkv7_sn_inputs, head_first=False)
 
-    y_no_mask, s_no_mask = rwkv7_sn_jax_op(
-        r=r, w=w, k=k, v=v, a=a, b=b, tau=tau, initial_state=h0, output_final_state=True
-    )
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        y_no_mask, s_no_mask = rwkv7_sn_jax_op(
+            r=r,
+            w=w,
+            k=k,
+            v=v,
+            a=a,
+            b=b,
+            tau=tau,
+            initial_state=h0,
+            output_final_state=True,
+        )
+        assert len(rec) == 1 and issubclass(rec[-1].category, UserWarning)
+
     y_all_one, s_all_one = rwkv7_sn_jax_op(
         r=r,
         w=w,
@@ -283,10 +298,104 @@ def test_rwkv7_sn_mask_all_one_equivalent(rwkv7_sn_jax_op, rwkv7_sn_inputs):
         output_final_state=True,
     )
 
+    assert s_no_mask is None
     pred_diff = float(jnp.max(jnp.abs(y_all_one - y_no_mask)))
-    state_diff = float(jnp.max(jnp.abs(s_all_one - s_no_mask)))
     assert pred_diff < 1e-5, f"全 1 Mask 输出不一致 (max_diff={pred_diff:.3e})"
-    assert state_diff < 1e-5, f"全 1 Mask 状态不一致 (max_diff={state_diff:.3e})"
+    # 带 mask 全 1 时 state 仍可正常返回
+    assert s_all_one is not None
+
+
+@pytest.mark.jax
+@pytest.mark.parametrize("head_first", [False, True])
+def test_rwkv7_sn_no_mask_forward_state(
+    rwkv7_sn_jax_op, rwkv7_sn_native_op, rwkv7_sn_inputs, head_first
+):
+    """output_final_state=False 时走无 mask 算子，y 与 native 一致且不返回 state。"""
+    r_ref, k_ref, v_ref, a_ref, b_ref, w_ref, tau_ref, _, h0_ref = _prepare_inputs(
+        rwkv7_sn_inputs, head_first, "bfloat16"
+    )
+    r_c, k_c, v_c, a_c, b_c, w_c, tau_c, _, h0_c = _prepare_inputs(
+        rwkv7_sn_inputs, head_first, "bfloat16"
+    )
+
+    y_ref = rwkv7_sn_native_op(
+        r=r_ref,
+        w=w_ref,
+        k=k_ref,
+        v=v_ref,
+        a=a_ref,
+        b=b_ref,
+        tau=tau_ref,
+        initial_state=h0_ref,
+        output_final_state=False,
+        head_first=head_first,
+    )
+    y_c = rwkv7_sn_jax_op(
+        r=r_c,
+        w=w_c,
+        k=k_c,
+        v=v_c,
+        a=a_c,
+        b=b_c,
+        tau=tau_c,
+        initial_state=h0_c,
+        output_final_state=False,
+        head_first=head_first,
+    )
+
+    _test_is_close(
+        f"y_no_mask_head_first={head_first}",
+        y_ref,
+        y_c,
+        atol=1e-4,
+        rtol=1e-2,
+        min_exact_rate=99.0,
+    )
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+@pytest.mark.parametrize("head_first", [False, True])
+def test_rwkv7_sn_no_mask_backward(
+    rwkv7_sn_jax_op, rwkv7_sn_native_op, rwkv7_sn_inputs, head_first
+):
+    """无 mask 路径反向梯度与 native 对比（output_final_state=False，仅对 y 求导）。"""
+    r, k, v, a, b, w, tau, _, h0 = _prepare_inputs(
+        rwkv7_sn_inputs, head_first, "bfloat16"
+    )
+
+    def loss(op, params):
+        w, r, k, v, a, b, tau, h0 = params
+        y = op(
+            r=r,
+            w=w,
+            k=k,
+            v=v,
+            a=a,
+            b=b,
+            tau=tau,
+            initial_state=h0,
+            output_final_state=False,
+            head_first=head_first,
+        )
+        return jnp.mean(jnp.asarray(y, jnp.float32) ** 2)
+
+    ref_grads = jax.grad(lambda *p: loss(rwkv7_sn_native_op, p), argnums=range(8))(
+        w, r, k, v, a, b, tau, h0
+    )
+    cuda_grads = jax.grad(lambda *p: loss(rwkv7_sn_jax_op, p), argnums=range(8))(
+        w, r, k, v, a, b, tau, h0
+    )
+
+    names = ["w", "r", "k", "v", "a", "b", "tau", "h0"]
+    for name, g_ref, g_c in zip(names, ref_grads, cuda_grads):
+        assert_allclose_with_stats(
+            g_ref,
+            g_c,
+            f"grad_no_mask_{name}_head_first={head_first}",
+            atol=7e-3,
+            rtol=1e-3,
+        )
 
 
 @pytest.mark.jax

@@ -5,6 +5,8 @@ RWKV-7 State Norm Torch CUDA kernel 数值测试。
     KERAS_BACKEND=torch pytest tests/torch/test_rwkv7_sn.py -v
 """
 
+import warnings
+
 import numpy as np
 import pytest
 import torch
@@ -32,7 +34,12 @@ def _make_inputs(rwkv7_sn_inputs, device, dtype="bfloat16", grad=False):
     return tensors
 
 
-def _call_op(op, tensors, output_final_state=True, mask=None):
+_UNSET = object()
+
+
+def _call_op(op, tensors, output_final_state=True, mask=_UNSET):
+    if mask is _UNSET:
+        mask = tensors["mask"]
     return op(
         r=tensors["r"],
         k=tensors["k"],
@@ -41,7 +48,7 @@ def _call_op(op, tensors, output_final_state=True, mask=None):
         b=tensors["b"],
         w=tensors["w"],
         tau=tensors["tau"],
-        mask=mask if mask is not None else tensors["mask"],
+        mask=mask,
         initial_state=tensors["h0"],
         output_final_state=output_final_state,
     )
@@ -189,22 +196,90 @@ def test_rwkv7_sn_backward_masked(
 
 
 @pytest.mark.torch
-def test_rwkv7_sn_mask_all_one_equivalent(rwkv7_sn_op, rwkv7_sn_inputs, device):
+def test_rwkv7_sn_no_mask_y_matches_all_one(rwkv7_sn_op, rwkv7_sn_inputs, device):
+    """无 mask 算子与全 1 mask 算子的 y 应一致；无 mask 路径返回 None state。"""
     B, T, H, K = rwkv7_sn_inputs["r"].shape
     n_chunks = T // 16
     mask = torch.ones(B, n_chunks, dtype=torch.float32, device=device)
     tgt = _make_inputs(rwkv7_sn_inputs, device, "bfloat16")
 
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        with torch.no_grad():
+            y_no_mask, s_no_mask = _call_op(
+                rwkv7_sn_op, tgt, output_final_state=True, mask=None
+            )
+        assert len(rec) == 1 and issubclass(rec[-1].category, UserWarning)
+
     with torch.no_grad():
-        y_no_mask, s_no_mask = _call_op(rwkv7_sn_op, tgt, output_final_state=True)
         y_all_one, s_all_one = _call_op(
             rwkv7_sn_op, tgt, output_final_state=True, mask=mask
         )
 
+    assert s_no_mask is None
     pred_diff = (y_all_one - y_no_mask).abs().max().item()
-    state_diff = (s_all_one - s_no_mask).abs().max().item()
-    assert pred_diff < 1e-5, f"全 1 Mask 输出不一致 (max_diff={pred_diff:.3e})"
-    assert state_diff < 1e-5, f"全 1 Mask 状态不一致 (max_diff={state_diff:.3e})"
+    assert pred_diff < 1e-5, (
+        f"无 mask 与全 1 mask 输出不一致 (max_diff={pred_diff:.3e})"
+    )
+    assert s_all_one is not None
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_rwkv7_sn_no_mask_forward_state(
+    rwkv7_sn_op, rwkv7_sn_native_op, rwkv7_sn_inputs, device
+):
+    """output_final_state=False 时走无 mask 算子，y 与 native 一致且不返回 state。"""
+    ref = _make_inputs(rwkv7_sn_inputs, device, "bfloat16")
+    tgt = _make_inputs(rwkv7_sn_inputs, device, "bfloat16")
+
+    with torch.no_grad():
+        y_ref = _call_op(rwkv7_sn_native_op, ref, output_final_state=False)
+        y_tgt = _call_op(rwkv7_sn_op, tgt, output_final_state=False)
+
+    _test_is_close("y_no_mask", y_ref, y_tgt, atol=1e-4, rtol=1e-2, min_exact_rate=99.0)
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_rwkv7_sn_no_mask_backward(
+    rwkv7_sn_op, rwkv7_sn_native_op, rwkv7_sn_inputs, device
+):
+    """无 mask 路径反向梯度与 native 对比（output_final_state=False，仅对 y 求导）。"""
+
+    def grads(op, tensors):
+        t = {
+            k: v.clone().detach().requires_grad_(True)
+            for k, v in tensors.items()
+            if k != "mask"
+        }
+        t["mask"] = tensors["mask"]
+        y = _call_op(op, t, output_final_state=False)
+        loss = (y.float() ** 2).mean()
+        loss.backward()
+        return {k: t[k].grad for k in ["r", "k", "v", "a", "b", "w", "tau", "h0"]}
+
+    ref = _make_inputs(rwkv7_sn_inputs, device, "bfloat16", grad=True)
+    tgt = _make_inputs(rwkv7_sn_inputs, device, "bfloat16", grad=True)
+
+    g_ref = grads(rwkv7_sn_native_op, ref)
+    g_tgt = grads(rwkv7_sn_op, tgt)
+
+    thresholds = {
+        "r": (1e-4, 1e-2, 98.0),
+        "k": (7e-3, 1e-2, 60.0),
+        "v": (7e-3, 1e-2, 35.0),
+        "a": (7e-3, 1e-2, 35.0),
+        "b": (7e-3, 1e-2, 50.0),
+        "w": (7e-3, 1e-2, 50.0),
+        "tau": (7e-3, 1e-2, 0.0),
+        "h0": (1e-5, 1e-3, 85.0),
+    }
+    for name in thresholds:
+        atol, rtol, exact = thresholds[name]
+        _test_is_close(
+            f"grad_no_mask_{name}", g_ref[name], g_tgt[name], atol, rtol, exact
+        )
 
 
 @pytest.mark.torch

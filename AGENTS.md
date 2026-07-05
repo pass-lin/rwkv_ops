@@ -19,6 +19,11 @@
 - **padding 处理**：padding 位置仍需保证 `k=0, a=0, w=-inf`，并将对应 chunk 的 `mask` 置 0。
 - **输出与 State 的关系**：输出始终基于 SN **之前** 的 State；SN 只修改传递给下一步/下一 chunk 的 State。
 - **训练版本**：只在 chunk 边界（每 16 tokens）按 `mask` 执行 SN；CUDA kernel 使用 `mask * sn_state + (1 - mask) * state` 的 blend 形式，避免 warp 分支。
+- **无 mask 算子**：当 `output_final_state=False` 或 `mask=None` 时，调用独立的 no-mask kernel，
+  在 chunk 边界无条件执行 SN，不读取 mask，也不计算 blend。
+  - `mask=None` 且 `output_final_state=True` 时，Python 入口会发出双语警告并把返回的
+    `final_state` 设为 `None`，避免用户误用被 padding 污染的 state。
+  - 只有在 `output_final_state=True` 且显式传入 `mask` 时才使用带 mask 的 kernel。
 - **单步版本**：每步都计算 SN，再用 `ops.where` / CUDA 分支按 per-sample `do_sn` 选择。
 
 ### CUDA 实现要点

@@ -1,4 +1,5 @@
 import os
+import warnings
 import torch
 from torch.utils.cpp_extension import load
 from keras.src.backend.torch.core import cast
@@ -120,6 +121,86 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
                 dh0,
             )
 
+    class WindBacksteppingSNNoMask(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, w, q, k, v, a, b, tau, h0):
+            B, T, H, N = w.shape
+            DTYPE = q.dtype
+            q, k, v, a, b, w = [
+                cast(x, "bfloat16").contiguous() for x in [q, k, v, a, b, w]
+            ]
+            tau = cast(tau, "float32").contiguous()
+
+            if T % CHUNK_LEN != 0:
+                raise ValueError(
+                    "RWKV-SN inputs sequence length must be divisible by 16"
+                )
+
+            y = torch.empty_like(v)
+            s = torch.empty(
+                B, H, T // CHUNK_LEN, N, N, dtype=torch.float32, device=w.device
+            )
+            sa = torch.empty(B, T, H, N, dtype=torch.float32, device=w.device)
+
+            torch.ops.wind_backstepping_sn.forward_sn_no_mask(
+                w, q, k, v, a, b, tau, y, s, sa, h0
+            )
+
+            ctx.save_for_backward(w, q, k, v, a, b, tau, s, sa)
+
+            last_state = torch.empty_like(h0)
+            last_state.copy_(transpose(s[:, :, -1], [0, 1, 3, 2]))
+
+            # 无条件 SN：直接应用
+            last_tau = tau[:, -1].view(B, H, 1, 1)
+            tau_safe = torch.clamp(last_tau, min=1e-6)
+            last_state = last_tau * torch.tanh(last_state / tau_safe)
+
+            return cast(y, DTYPE), last_state
+
+        @staticmethod
+        def backward(ctx, dy, dht):
+            DTYPE = dy.dtype
+            dy = cast(dy, torch.bfloat16).contiguous()
+            dht = cast(dht, "float32").contiguous()
+            w, q, k, v, a, b, tau, s, sa = ctx.saved_tensors
+
+            dh0 = torch.empty(dht.shape, dtype=dht.dtype, device=dht.device)
+            dtau = torch.empty(tau.shape, dtype=tau.dtype, device=tau.device)
+            dw, dq, dk, dv, da, db = [torch.empty_like(x) for x in [w, q, k, v, a, b]]
+
+            torch.ops.wind_backstepping_sn.backward_sn_no_mask(
+                w,
+                q,
+                k,
+                v,
+                a,
+                b,
+                tau,
+                dy,
+                s,
+                sa,
+                dht,
+                dh0,
+                dtau,
+                dw,
+                dq,
+                dk,
+                dv,
+                da,
+                db,
+            )
+            return (
+                cast(dw, DTYPE),
+                cast(dq, DTYPE),
+                cast(dk, DTYPE),
+                cast(dv, DTYPE),
+                cast(da, DTYPE),
+                cast(db, DTYPE),
+                dtau,
+                dh0,
+            )
+
     # 纯推理 / prefill：不保存反向 checkpoint，只输出 y 与最终 state。
     # 因 tau/mask 按 chunk 读取，T 仍需被 16 整除；任意长度请用单步 RNN 接口。
     class Wkv7SnInference(torch.autograd.Function):
@@ -137,6 +218,27 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
             s = torch.empty(B, H, N, N, dtype=torch.float32, device=w.device)
             torch.ops.wind_backstepping_sn.forward_inference_sn(
                 w, q, k, v, a, b, tau, mask, y, s, h0
+            )
+            return cast(y, DTYPE), s
+
+        @staticmethod
+        def backward(ctx, *args):
+            raise NotImplementedError("inference kernel does not support backward")
+
+    class Wkv7SnInferenceNoMask(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, w, q, k, v, a, b, tau, h0):
+            B, T, H, N = w.shape
+            DTYPE = q.dtype
+            q, k, v, a, b, w = [
+                cast(x, "bfloat16").contiguous() for x in [q, k, v, a, b, w]
+            ]
+            tau = cast(tau, "float32").contiguous()
+
+            y = torch.empty_like(v)
+            s = torch.empty(B, H, N, N, dtype=torch.float32, device=w.device)
+            torch.ops.wind_backstepping_sn.forward_inference_sn_no_mask(
+                w, q, k, v, a, b, tau, y, s, h0
             )
             return cast(y, DTYPE), s
 
@@ -189,14 +291,11 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
             )
 
         tau = cast(tau, "float32").contiguous()
-        if mask is None:
-            mask = torch.ones(B, T // CHUNK_LEN, dtype=torch.float32, device=w.device)
-        else:
-            mask = cast(mask, "float32").contiguous()
-            if mask.shape != (B, T // CHUNK_LEN):
-                raise ValueError(
-                    f"mask shape {tuple(mask.shape)} must match (B, T//16) = ({B}, {T // CHUNK_LEN})"
-                )
+        if tau.shape != (B, T // CHUNK_LEN, H):
+            raise ValueError(
+                f"tau shape {tuple(tau.shape)} does not match expected "
+                f"(B={B}, T//16={T // CHUNK_LEN}, H={H})"
+            )
 
         if initial_state is None:
             initial_state = torch.zeros(
@@ -205,10 +304,38 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
         else:
             initial_state = cast(initial_state, "float32")
 
-        out, state = WindBacksteppingSN.apply(
-            w, r, k, v, a, b, tau, mask, initial_state
+        # 当且仅当需要 final_state 且显式提供 mask 时才使用带 mask 算子。
+        use_mask = output_final_state and mask is not None
+
+        if use_mask:
+            mask = cast(mask, "float32").contiguous()
+            if mask.shape != (B, T // CHUNK_LEN):
+                raise ValueError(
+                    f"mask shape {tuple(mask.shape)} must match (B, T//16) = ({B}, {T // CHUNK_LEN})"
+                )
+            out, state = WindBacksteppingSN.apply(
+                w, r, k, v, a, b, tau, mask, initial_state
+            )
+            return (out, state) if output_final_state else out
+
+        out, state = WindBacksteppingSNNoMask.apply(
+            w, r, k, v, a, b, tau, initial_state
         )
-        return (out, state) if output_final_state else out
+        if not output_final_state:
+            return out
+
+        # mask is None 且 output_final_state=True：警告并返回 None state。
+        warnings.warn(
+            "[rwkv7_sn] mask is None: 使用无条件 State Norm 算子。"
+            "由于未提供 padding mask，返回的 final_state 可能被污染，"
+            "因此已将其设为 None。如需 final_state 请提供显式 mask。\n"
+            "[rwkv7_sn] mask is None: using unconditional State Norm. "
+            "The returned final_state is set to None because padding chunks "
+            "may contaminate the state. Provide an explicit mask to obtain final_state.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return out, None
 
     def generalized_delta_rule_sn_inference(
         r,
@@ -241,14 +368,11 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
             )
 
         tau = cast(tau, "float32").contiguous()
-        if mask is None:
-            mask = torch.ones(B, T // CHUNK_LEN, dtype=torch.float32, device=w.device)
-        else:
-            mask = cast(mask, "float32").contiguous()
-            if mask.shape != (B, T // CHUNK_LEN):
-                raise ValueError(
-                    f"mask shape {tuple(mask.shape)} must match (B, T//16) = ({B}, {T // CHUNK_LEN})"
-                )
+        if tau.shape != (B, T // CHUNK_LEN, H):
+            raise ValueError(
+                f"tau shape {tuple(tau.shape)} does not match expected "
+                f"(B={B}, T//16={T // CHUNK_LEN}, H={H})"
+            )
 
         if initial_state is None:
             initial_state = torch.zeros(
@@ -257,7 +381,33 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
         else:
             initial_state = cast(initial_state, "float32")
 
-        out, state = Wkv7SnInference.apply(w, r, k, v, a, b, tau, mask, initial_state)
-        return (out, state) if output_final_state else out
+        use_mask = output_final_state and mask is not None
+
+        if use_mask:
+            mask = cast(mask, "float32").contiguous()
+            if mask.shape != (B, T // CHUNK_LEN):
+                raise ValueError(
+                    f"mask shape {tuple(mask.shape)} must match (B, T//16) = ({B}, {T // CHUNK_LEN})"
+                )
+            out, state = Wkv7SnInference.apply(
+                w, r, k, v, a, b, tau, mask, initial_state
+            )
+            return (out, state) if output_final_state else out
+
+        out, state = Wkv7SnInferenceNoMask.apply(w, r, k, v, a, b, tau, initial_state)
+        if not output_final_state:
+            return out
+
+        warnings.warn(
+            "[rwkv7_sn] mask is None: 使用无条件 State Norm 算子。"
+            "由于未提供 padding mask，返回的 final_state 可能被污染，"
+            "因此已将其设为 None。如需 final_state 请提供显式 mask。\n"
+            "[rwkv7_sn] mask is None: using unconditional State Norm. "
+            "The returned final_state is set to None because padding chunks "
+            "may contaminate the state. Provide an explicit mask to obtain final_state.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return out, None
 
     return [generalized_delta_rule_sn, generalized_delta_rule_sn_inference]

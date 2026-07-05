@@ -11,6 +11,8 @@ RWKV-7 State Norm (Adaptive Tanh Clipping) — 半线性 Chunkwise 训练与单�
   并把全 padding chunk 的 mask 置 0。
 """
 
+import warnings
+
 import keras
 from keras import ops
 
@@ -34,7 +36,7 @@ def transpose_head(x, head_first):
 
 def _apply_state_norm_cond(state, t, tau, mask):
     """
-    训练用：只在 chunk 边界执行 State Norm，使用 ops.cond 避免冗余计算。
+    训练用：只在 chunk 边界按 mask 执行 State Norm，使用 ops.cond 避免冗余计算。
 
     参数:
         state: [B, H, N, N]，float32
@@ -75,6 +77,40 @@ def _apply_state_norm_cond(state, t, tau, mask):
     return ops.cond(is_boundary, _true_fn, _false_fn)
 
 
+def _apply_state_norm_uncond(state, t, tau):
+    """
+    训练用无 mask 版本：在 chunk 边界无条件执行 State Norm。
+
+    参数:
+        state: [B, H, N, N]，float32
+        t:     scalar Tensor，当前 token 索引
+        tau:   [B, T//16, H]，float32，必须 > 0
+
+    返回:
+        [B, H, N, N]
+    """
+    is_boundary = ops.equal(ops.mod(t + 1, 16), 0)
+
+    def _true_fn():
+        chunk_idx = ops.maximum((t + 1) // 16 - 1, 0)
+        chunk_idx = ops.reshape(chunk_idx, [1])
+
+        tau_t = ops.take(tau, chunk_idx, axis=1)
+        tau_t = ops.squeeze(tau_t, axis=1)
+
+        tau_calc = ops.maximum(tau_t, 1e-6)
+        tau_calc = ops.reshape(
+            tau_calc,
+            [ops.shape(tau_calc)[0], ops.shape(tau_calc)[1], 1, 1],
+        )
+        return tau_calc * ops.tanh(state / tau_calc)
+
+    def _false_fn():
+        return state
+
+    return ops.cond(is_boundary, _true_fn, _false_fn)
+
+
 def generalized_delta_rule_sn(
     r,
     w,
@@ -105,7 +141,8 @@ def generalized_delta_rule_sn(
             [B, T//16, H]，float32。阈值，必须 > 0。
         mask:
             [B, T//16]，float32/bool。>0 表示该 chunk 边界执行 SN。
-            若未提供，默认全 1（所有 chunk 边界都执行 SN）。
+            只有 ``output_final_state=True`` 且显式提供 mask 时才会被使用；
+            其他情况下将调用无 mask 算子（chunk 边界无条件执行 SN）。
         initial_state:
             [B, H, N, N] 或 [1, H, N, N]，可选。
         output_final_state:
@@ -114,7 +151,9 @@ def generalized_delta_rule_sn(
             bool，输入输出是否 head 维度优先。
 
     返回:
-        out 或 (out, final_state)。
+        - output_final_state=False 时返回 out。
+        - output_final_state=True 且 mask 显式提供时返回 (out, final_state)。
+        - output_final_state=True 且 mask=None 时返回 (out, None)，并弹出警告。
     """
     DTYPE = r.dtype
 
@@ -134,14 +173,20 @@ def generalized_delta_rule_sn(
         )
 
     tau = ops.cast(tau, "float32")
-    if mask is None:
-        mask = ops.ones((B, T // 16), dtype="float32")
-    else:
+
+    # 当且仅当需要 final_state 且用户显式提供了 mask 时才使用带 mask 算子。
+    use_mask = output_final_state and mask is not None
+
+    if use_mask:
         mask = ops.cast(mask, "float32")
         if ops.shape(mask) != (B, T // 16):
             raise ValueError(
                 f"mask shape {ops.shape(mask)} must match (B, T//16) = ({B}, {T // 16})"
             )
+    elif mask is not None and output_final_state:
+        # mask 被显式提供但 output_final_state=False：为节省算力将忽略 mask。
+        # 这里不抛错，但也不使用 mask。
+        pass
 
     if initial_state is not None:
         state = initial_state
@@ -152,6 +197,8 @@ def generalized_delta_rule_sn(
     state = ops.cast(state, "float32")
 
     keras_backend = keras.config.backend()
+
+    apply_state_norm = _apply_state_norm_cond if use_mask else _apply_state_norm_uncond
 
     def step(t, inputs):
         state, out = inputs
@@ -174,7 +221,10 @@ def generalized_delta_rule_sn(
         else:
             out = ops.slice_update(out, [0, 0, t, 0], ops.reshape(o, (B, H, 1, N)))
 
-        state = _apply_state_norm_cond(state, t, tau, mask)
+        if use_mask:
+            state = apply_state_norm(state, t, tau, mask)
+        else:
+            state = apply_state_norm(state, t, tau)
         return [state, out]
 
     if keras_backend == "tensorflow":
@@ -192,9 +242,24 @@ def generalized_delta_rule_sn(
     # 与 CUDA 后端保持一致：输出统一为 [B, T, H, N]（时间步优先）。
     out = ops.transpose(out, (0, 2, 1, 3))
 
-    if output_final_state:
-        return ops.cast(out, DTYPE), state
-    return ops.cast(out, DTYPE)
+    out = ops.cast(out, DTYPE)
+    if not output_final_state:
+        return out
+
+    if mask is None:
+        warnings.warn(
+            "[rwkv7_sn] mask is None: 使用无条件 State Norm 算子。"
+            "由于未提供 padding mask，返回的 final_state 可能被污染，"
+            "因此已将其设为 None。如需 final_state 请提供显式 mask。\n"
+            "[rwkv7_sn] mask is None: using unconditional State Norm. "
+            "The returned final_state is set to None because padding chunks "
+            "may contaminate the state. Provide an explicit mask to obtain final_state.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return out, None
+
+    return out, state
 
 
 def rwkv7_step_sn(
