@@ -474,8 +474,9 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         State Norm 推理 / prefill 入口（无梯度）。
 
         与训练版本数值等价，但显存占用更低，因为不会分配反向所需的 `s`、`sa`
-        checkpoint。注意当前 CUDA 推理 kernel 仍按 chunk 读取 tau，所以 T 必须
-        被 16 整除；任意长度请使用单步 RNN 接口。
+        checkpoint。推理 kernel 按 chunk 读取 tau/mask，因此 `tau` 长度只需与
+        `T // 16` 一致，T 不需要被 16 整除；若需要任意长度 prefill，也可使用单步
+        RNN 接口。
         """
         dtype = r.dtype
         r = _transpose_head(r, head_first)
@@ -487,11 +488,6 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         tau = jnp.asarray(tau, jnp.float32)
 
         B, T, H, K = r.shape
-        if T % CHUNK_LEN:
-            raise ValueError(
-                f"RWKV-SN inference/prefill requires T divisible by {CHUNK_LEN}, "
-                f"but got T={T}."
-            )
         if tau.shape != (B, T // CHUNK_LEN, H):
             raise ValueError(
                 f"tau shape {tau.shape} does not match expected (B={B}, T//16={T // CHUNK_LEN}, H={H})"

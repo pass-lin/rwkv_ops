@@ -283,6 +283,58 @@ def test_rwkv7_sn_no_mask_backward(
 
 
 @pytest.mark.torch
+def test_rwkv7_sn_inference_arbitrary_length(
+    rwkv7_sn_op, rwkv7_sn_inference_op, rwkv7_sn_inputs, device
+):
+    """推理入口支持 T 不被 16 整除，此时 tau 长度只需等于 T // 16。"""
+    B, T, H, K = rwkv7_sn_inputs["r"].shape
+    actual_len = 34
+
+    tensors = {
+        name: _to_torch(rwkv7_sn_inputs[name][:, :actual_len], "bfloat16", device)
+        for name in ["r", "k", "v", "a", "b", "w"]
+    }
+    tensors["tau"] = _to_torch(
+        rwkv7_sn_inputs["tau"][:, : actual_len // 16], "float32", device
+    )
+    tensors["h0"] = _to_torch(rwkv7_sn_inputs["h0"], "float32", device)
+
+    with torch.no_grad():
+        y = rwkv7_sn_inference_op(
+            r=tensors["r"],
+            w=tensors["w"],
+            k=tensors["k"],
+            v=tensors["v"],
+            a=tensors["a"],
+            b=tensors["b"],
+            tau=tensors["tau"],
+            initial_state=tensors["h0"],
+            output_final_state=False,
+            head_first=False,
+        )
+    assert y.shape == (B, actual_len, H, K)
+
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        with torch.no_grad():
+            y2, s = rwkv7_sn_inference_op(
+                r=tensors["r"],
+                w=tensors["w"],
+                k=tensors["k"],
+                v=tensors["v"],
+                a=tensors["a"],
+                b=tensors["b"],
+                tau=tensors["tau"],
+                initial_state=tensors["h0"],
+                output_final_state=True,
+                head_first=False,
+            )
+    assert y2.shape == (B, actual_len, H, K)
+    assert s is None
+    assert len(rec) == 1 and issubclass(rec[-1].category, UserWarning)
+
+
+@pytest.mark.torch
 def test_rwkv7_sn_irregular_padding(
     rwkv7_sn_op, rwkv7_sn_native_op, rwkv7_sn_rnn_native_op, rwkv7_sn_inputs, device
 ):

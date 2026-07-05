@@ -338,7 +338,8 @@ def generalized_delta_rule_sn(
 ```
 
 `generalized_delta_rule_sn_inference` 与 `generalized_delta_rule_sn` 接口一致，但**不计算梯度**，可节省显存。
-注意：当前推理 kernel 仍按 chunk 读取 `tau`，所以 **T 仍需被 16 整除**；若需要任意长度 prefill，请使用下方的单步 RNN 接口。
+注意：推理 kernel 按 chunk 读取 `tau`，因此 `tau` 的长度只需等于 `T // 16`，
+**T 不再强制要求被 16 整除**；若需要任意长度 prefill，也可使用下方的单步 RNN 接口。
 
 <a id="rwkv7op_sn-实现状态"></a>
 ### rwkv7op_sn 实现状态

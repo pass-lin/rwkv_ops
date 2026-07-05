@@ -350,6 +350,12 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
         output_final_state=True,
         head_first=False,
     ):
+        """
+        State Norm 推理 / prefill 入口（无梯度）。
+
+        与训练版本数值等价，但显存占用更低。推理 kernel 按 chunk 读取 tau/mask，
+        因此 `tau` 长度只需与 `T // 16` 一致，T 不需要被 16 整除。
+        """
         if w.device.type != "cuda":
             raise NotImplementedError("Inference kernel only supports CUDA")
 
@@ -361,11 +367,6 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
         w = transpose_head(w, head_first)
 
         B, T, H, N = w.shape
-        if T % CHUNK_LEN != 0:
-            raise ValueError(
-                f"RWKV-SN inference/prefill requires T divisible by {CHUNK_LEN}, "
-                f"but got T={T}."
-            )
 
         tau = cast(tau, "float32").contiguous()
         if tau.shape != (B, T // CHUNK_LEN, H):

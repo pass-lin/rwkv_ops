@@ -38,8 +38,9 @@
 - 训练 kernel 返回的 `s` / `sa` 是为反向传播保留的 checkpoint；即使外层不做梯度，
   在 FFI/CUDA 层这些仍是显式输出并占用显存。
 - 推理 / prefill kernel（`generalized_delta_rule_sn_inference`）只输出 `y` 与最终 state，
-  可显著降低显存，但当前实现仍按 chunk 读取 `tau`，因此 **T 仍需被 16 整除**。
-- 若需要任意长度 prefill，请使用单步 RNN 接口 `generalized_delta_rule_sn_single_step`。
+  可显著降低显存；推理 kernel 按 chunk 读取 `tau`，因此 `tau` 长度只需等于
+  `T // 16`，**T 不再强制要求被 16 整除**。
+- 若需要任意长度 prefill，也可使用单步 RNN 接口 `generalized_delta_rule_sn_single_step`。
 
 ### 测试
 

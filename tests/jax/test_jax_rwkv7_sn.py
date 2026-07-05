@@ -399,6 +399,55 @@ def test_rwkv7_sn_no_mask_backward(
 
 
 @pytest.mark.jax
+def test_rwkv7_sn_inference_arbitrary_length(
+    rwkv7_sn_jax_op, rwkv7_sn_inference_op, rwkv7_sn_inputs
+):
+    """推理入口支持 T 不被 16 整除，此时 tau 长度只需等于 T // 16。"""
+    B, T, H, K = rwkv7_sn_inputs["r"].shape
+    actual_len = 34
+    pre_inputs = {k: v[:, :actual_len] for k, v in rwkv7_sn_inputs.items()}
+    pre_inputs["tau"] = rwkv7_sn_inputs["tau"][:, : actual_len // 16]
+
+    r, k, v, a, b, w, tau, _, h0 = _prepare_inputs(
+        pre_inputs, head_first=False, dtype="bfloat16"
+    )
+
+    # output_final_state=False 时不警告，也不返回 state。
+    y = rwkv7_sn_inference_op(
+        r=r,
+        w=w,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        tau=tau,
+        initial_state=h0,
+        output_final_state=False,
+        head_first=False,
+    )
+    assert y.shape == (B, actual_len, H, K)
+
+    # output_final_state=True 且 mask=None 时返回 None state 并警告。
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        y2, s = rwkv7_sn_inference_op(
+            r=r,
+            w=w,
+            k=k,
+            v=v,
+            a=a,
+            b=b,
+            tau=tau,
+            initial_state=h0,
+            output_final_state=True,
+            head_first=False,
+        )
+    assert y2.shape == (B, actual_len, H, K)
+    assert s is None
+    assert len(rec) == 1 and issubclass(rec[-1].category, UserWarning)
+
+
+@pytest.mark.jax
 def test_rwkv7_sn_irregular_padding(
     rwkv7_sn_jax_op, rwkv7_sn_native_op, rwkv7_sn_rnn_native_op, rwkv7_sn_inputs
 ):

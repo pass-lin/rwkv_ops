@@ -353,7 +353,7 @@ def generalized_delta_rule_sn(
 ```
 
 `generalized_delta_rule_sn_inference` has the same interface but **does not compute gradients**, saving memory.
-Note: the inference kernel still reads `tau` per chunk, so **T must still be divisible by 16**; for arbitrary-length prefill, use the single-step RNN interface below.
+Note: the inference kernel reads `tau` per chunk, so `tau` only needs to have length `T // 16`; **T is no longer required to be divisible by 16**. For arbitrary-length prefill, you can also use the single-step RNN interface below.
 
 <a id="rwkv7op_sn-implementation-status"></a>
 ### rwkv7op_sn implementation status
