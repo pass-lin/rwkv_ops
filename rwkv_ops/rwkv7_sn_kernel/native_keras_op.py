@@ -1,11 +1,11 @@
 """
-RWKV-7 State Norm (Adaptive Tanh Clipping) — 半线性 Chunkwise 训练与单步推理
+RWKV-7 State Neutralization (Adaptive Tanh Clipping) — 半线性 Chunkwise 训练与单步推理
 
 设计要点：
-- 训练时只在 chunk 边界（每 16 token）执行 State Norm，使用 ops.cond 避免非边界
+- 训练时只在 chunk 边界（每 16 token）执行 State Neutralization，使用 ops.cond 避免非边界
   步的冗余计算与梯度传播。
 - 单步推理时每步都计算 SN，再用 ops.where 根据 per-sample mask 选择。
-- `tau` 仅作为 State Norm 的阈值（必须 > 0）；是否执行 SN 由同 batch-chunk 维度的
+- `tau` 仅作为 State Neutralization 的阈值（必须 > 0）；是否执行 SN 由同 batch-chunk 维度的
   `mask` 决定，形状为 [B, T//16]。
 - 不再内置 token-level mask。调用者需在外部保证 padding 位置 k=0, a=0, w=-inf，
   并把全 padding chunk 的 mask 置 0。
@@ -36,7 +36,7 @@ def transpose_head(x, head_first):
 
 def _apply_state_norm_cond(state, t, tau, mask):
     """
-    训练用：只在 chunk 边界按 mask 执行 State Norm，使用 ops.cond 避免冗余计算。
+    训练用：只在 chunk 边界按 mask 执行 State Neutralization，使用 ops.cond 避免冗余计算。
 
     参数:
         state: [B, H, N, N]，float32
@@ -79,7 +79,7 @@ def _apply_state_norm_cond(state, t, tau, mask):
 
 def _apply_state_norm_uncond(state, t, tau):
     """
-    训练用无 mask 版本：在 chunk 边界无条件执行 State Norm。
+    训练用无 mask 版本：在 chunk 边界无条件执行 State Neutralization。
 
     参数:
         state: [B, H, N, N]，float32
@@ -125,7 +125,7 @@ def generalized_delta_rule_sn(
     head_first=False,
 ):
     """
-    带 State Norm 的 RWKV-7 广义 Delta 规则（Chunkwise 训练版本）。
+    带 State Neutralization 的 RWKV-7 广义 Delta 规则（Chunkwise 训练版本）。
 
     说明：
     - 训练版本会保存反向传播所需的中间量；纯推理请使用后端对应的 inference
@@ -248,10 +248,10 @@ def generalized_delta_rule_sn(
 
     if mask is None:
         warnings.warn(
-            "[rwkv7_sn] mask is None: 使用无条件 State Norm 算子。"
+            "[rwkv7_sn] mask is None: 使用无条件 State Neutralization 算子。"
             "由于未提供 padding mask，返回的 final_state 可能被污染，"
             "因此已将其设为 None。如需 final_state 请提供显式 mask。\n"
-            "[rwkv7_sn] mask is None: using unconditional State Norm. "
+            "[rwkv7_sn] mask is None: using unconditional State Neutralization. "
             "The returned final_state is set to None because padding chunks "
             "may contaminate the state. Provide an explicit mask to obtain final_state.",
             UserWarning,
@@ -274,7 +274,7 @@ def rwkv7_step_sn(
     do_sn,
 ):
     """
-    RWKV-7 单步推理（RNN 模式），带 State Norm。
+    RWKV-7 单步推理（RNN 模式），带 State Neutralization。
 
     参数:
         r, w, k, v, a, b:
@@ -336,7 +336,7 @@ def generalized_delta_rule_sn_single_step(
     head_first=False,
 ):
     """
-    带 State Norm 的 RWKV-7 单步推理（native 入口）。
+    带 State Neutralization 的 RWKV-7 单步推理（native 入口）。
 
     参数:
         r, w, k, v, a, b:

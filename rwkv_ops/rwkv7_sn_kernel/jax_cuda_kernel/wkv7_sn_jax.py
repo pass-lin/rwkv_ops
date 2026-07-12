@@ -1,12 +1,12 @@
 """
 JAX 版 RWKV7-SN wkv kernel
 
-mask 为 [B, T//16] 的显式 chunk-level 标志，0 表示跳过 State Norm，1 表示执行。
+mask 为 [B, T//16] 的显式 chunk-level 标志，0 表示跳过 State Neutralization，1 表示执行。
 tau 为外部预处理后的 per-head per-chunk 阈值，返回 dtau 供上层 softplus 参数梯度。
 
 调度规则：
 - 当 ``output_final_state=False`` 或 ``mask=None`` 时，使用无 mask 算子（chunk 边界无条件
-  执行 State Norm），可节省 mask 读取/分支开销。
+  执行 State Neutralization），可节省 mask 读取/分支开销。
 - ``mask=None`` 且 ``output_final_state=True`` 时，会触发警告并返回 ``None`` 作为
   final_state，避免用户误用可能被 padding 污染的 state。
 """
@@ -22,6 +22,7 @@ import jax.tree_util as jtu
 from typing import Optional, Tuple, Union
 
 from jax.experimental.custom_partitioning import custom_partitioning
+from jax.sharding import NamedSharding, PartitionSpec
 
 CHUNK_LEN = 16
 _CURRENT_DIR = pathlib.Path(__file__).parent.absolute()
@@ -56,19 +57,75 @@ INF_NO_MASK_RULE = (
 )
 
 
+def _q_spec(qs):
+    spec = getattr(qs, "spec", None)
+    if spec is None or len(spec) != 4:
+        return None
+    return spec
+
+
+def _sharding_like_q(qs):
+    spec = _q_spec(qs)
+    if spec is None:
+        return qs
+    return NamedSharding(qs.mesh, PartitionSpec(*spec))
+
+
+def _sharding_for_state(qs):
+    """为 s / sa 之外的 State checkpoint (B, H, C, K, K) 构造 sharding。"""
+    spec = _q_spec(qs)
+    if spec is None:
+        return qs
+    return NamedSharding(
+        qs.mesh, PartitionSpec(spec[0], spec[2], None, spec[3], spec[3])
+    )
+
+
+def _sharding_for_final_state(qs):
+    """为最终 State (B, H, K, K) 构造 sharding。"""
+    spec = _q_spec(qs)
+    if spec is None:
+        return qs
+    return NamedSharding(qs.mesh, PartitionSpec(spec[0], spec[2], spec[3], spec[3]))
+
+
+def _sharding_for_tau(qs):
+    """为 tau / dtau (B, T//16, H) 构造 sharding。"""
+    spec = _q_spec(qs)
+    if spec is None:
+        return qs
+    return NamedSharding(qs.mesh, PartitionSpec(spec[0], None, spec[2]))
+
+
 def _fwd_infer_sharding(arg_shapes, arg_shardings):
     qs = arg_shardings[1]
-    return (qs, qs, qs)
+    return (
+        _sharding_like_q(qs),
+        _sharding_for_state(qs),
+        _sharding_like_q(qs),
+    )
 
 
 def _bwd_infer_sharding(arg_shapes, arg_shardings):
     qs = arg_shardings[1]
-    return (qs, qs, qs, qs, qs, qs, qs, qs)
+    q_like = _sharding_like_q(qs)
+    tau_like = _sharding_for_tau(qs)
+    h0_like = _sharding_for_final_state(qs)
+    return (
+        q_like,
+        q_like,
+        q_like,
+        q_like,
+        q_like,
+        q_like,
+        tau_like,
+        h0_like,
+    )
 
 
 def _inf_infer_sharding(arg_shapes, arg_shardings):
     qs = arg_shardings[1]
-    return (qs, qs)
+    return (_sharding_like_q(qs), _sharding_for_final_state(qs))
 
 
 def _create_partition(impl_fn):
@@ -437,7 +494,7 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
             out = jnp.asarray(out, dtype)
             return out, last_state
 
-        # 无 mask 路径：chunk 边界无条件执行 State Norm。
+        # 无 mask 路径：chunk 边界无条件执行 State Neutralization。
         out, last_state = wk7_sn_kernel_no_mask(w, r, k, v, a, b, tau, h0)
         out = jnp.asarray(out, dtype)
 
@@ -446,10 +503,10 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
 
         # mask is None 且 output_final_state=True：警告并返回 None state。
         warnings.warn(
-            "[rwkv7_sn] mask is None: 使用无条件 State Norm 算子。"
+            "[rwkv7_sn] mask is None: 使用无条件 State Neutralization 算子。"
             "由于未提供 padding mask，返回的 final_state 可能被污染，"
             "因此已将其设为 None。如需 final_state 请提供显式 mask。\n"
-            "[rwkv7_sn] mask is None: using unconditional State Norm. "
+            "[rwkv7_sn] mask is None: using unconditional State Neutralization. "
             "The returned final_state is set to None because padding chunks "
             "may contaminate the state. Provide an explicit mask to obtain final_state.",
             UserWarning,
@@ -471,7 +528,7 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         head_first: bool = False,
     ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
         """
-        State Norm 推理 / prefill 入口（无梯度）。
+        State Neutralization 推理 / prefill 入口（无梯度）。
 
         与训练版本数值等价，但显存占用更低，因为不会分配反向所需的 `s`、`sa`
         checkpoint。推理 kernel 按 chunk 读取 tau/mask，因此 `tau` 长度只需与
@@ -519,10 +576,10 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
             return out
 
         warnings.warn(
-            "[rwkv7_sn] mask is None: 使用无条件 State Norm 算子。"
+            "[rwkv7_sn] mask is None: 使用无条件 State Neutralization 算子。"
             "由于未提供 padding mask，返回的 final_state 可能被污染，"
             "因此已将其设为 None。如需 final_state 请提供显式 mask。\n"
-            "[rwkv7_sn] mask is None: using unconditional State Norm. "
+            "[rwkv7_sn] mask is None: using unconditional State Neutralization. "
             "The returned final_state is set to None because padding chunks "
             "may contaminate the state. Provide an explicit mask to obtain final_state.",
             UserWarning,

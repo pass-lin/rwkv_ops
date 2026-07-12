@@ -323,11 +323,11 @@ def generalized_delta_rule_sn(
     head_first: bool = False,
 ):
     """
-    RWKV-7 generalized delta rule with State Norm (training / prefill).
+    RWKV-7 generalized delta rule with State Neutralization (training / prefill).
 
     Dispatch rules:
     - When ``output_final_state=False``, the internal no-mask operator is used,
-      applying State Norm unconditionally at every chunk boundary to save the
+      applying State Neutralization unconditionally at every chunk boundary to save the
       mask read/branch overhead.
     - When ``mask=None`` and ``output_final_state=True``, the no-mask operator is
       also used, but a warning is raised and the returned ``final_state`` is set
@@ -339,7 +339,7 @@ def generalized_delta_rule_sn(
     Args:
         r, w, k, v, a, b: [B, T, H, K] or [B, H, T, K], T must be divisible by 16.
         tau: [B, T//16, H], float32, must be > 0.
-        mask: [B, T//16], float32, 0/1 per-chunk flag for State Norm;
+        mask: [B, T//16], float32, 0/1 per-chunk flag for State Neutralization;
               only effective when output_final_state=True and mask is explicitly
               provided. Set padded chunks to 0 and keep k=0, a=0, w=-inf.
         initial_state: [B, H, K, K] or [1, H, K, K].
@@ -381,13 +381,13 @@ def rwkv7_op_sn_rnn(
     a,
     b,
     tau,                  # [B, H], float32
-    do_sn,                # bool or [B] bool, True -> apply State Norm after this step
+    do_sn,                # bool or [B] bool, True -> apply State Neutralization after this step
     initial_state=None,
     output_final_state: bool = True,
     head_first: bool = False,
 ):
     """
-    RWKV-7 single-step inference with State Norm (RNN mode).
+    RWKV-7 single-step inference with State Neutralization (RNN mode).
     Output is computed from the pre-SN state; state_out has SN applied when do_sn is True.
     """
 ```

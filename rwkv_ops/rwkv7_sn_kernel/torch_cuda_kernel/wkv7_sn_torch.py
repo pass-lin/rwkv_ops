@@ -326,10 +326,10 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
 
         # mask is None 且 output_final_state=True：警告并返回 None state。
         warnings.warn(
-            "[rwkv7_sn] mask is None: 使用无条件 State Norm 算子。"
+            "[rwkv7_sn] mask is None: 使用无条件 State Neutralization 算子。"
             "由于未提供 padding mask，返回的 final_state 可能被污染，"
             "因此已将其设为 None。如需 final_state 请提供显式 mask。\n"
-            "[rwkv7_sn] mask is None: using unconditional State Norm. "
+            "[rwkv7_sn] mask is None: using unconditional State Neutralization. "
             "The returned final_state is set to None because padding chunks "
             "may contaminate the state. Provide an explicit mask to obtain final_state.",
             UserWarning,
@@ -351,7 +351,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
         head_first=False,
     ):
         """
-        State Norm 推理 / prefill 入口（无梯度）。
+        State Neutralization 推理 / prefill 入口（无梯度）。
 
         与训练版本数值等价，但显存占用更低。推理 kernel 按 chunk 读取 tau/mask，
         因此 `tau` 长度只需与 `T // 16` 一致，T 不需要被 16 整除。
@@ -400,10 +400,10 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
             return out
 
         warnings.warn(
-            "[rwkv7_sn] mask is None: 使用无条件 State Norm 算子。"
+            "[rwkv7_sn] mask is None: 使用无条件 State Neutralization 算子。"
             "由于未提供 padding mask，返回的 final_state 可能被污染，"
             "因此已将其设为 None。如需 final_state 请提供显式 mask。\n"
-            "[rwkv7_sn] mask is None: using unconditional State Norm. "
+            "[rwkv7_sn] mask is None: using unconditional State Neutralization. "
             "The returned final_state is set to None because padding chunks "
             "may contaminate the state. Provide an explicit mask to obtain final_state.",
             UserWarning,

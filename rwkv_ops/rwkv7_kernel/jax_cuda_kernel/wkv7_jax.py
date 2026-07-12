@@ -14,6 +14,7 @@ from typing import Optional, Tuple, Union
 
 # 引入自定义分区器 (适配 JAX 新版 Shardy 引擎)
 from jax.experimental.custom_partitioning import custom_partitioning
+from jax.sharding import NamedSharding, PartitionSpec
 
 CHUNK_LEN = 16  # 这是一个常数
 # ---------- 延迟编译（改到当前目录） ----------
@@ -38,20 +39,57 @@ INF_RULE = (
 INF_MASK_RULE = "b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b h k v, b t -> b t h k, b h k v"
 
 
-# 保留给老版本 JAX 兼容使用的回调函数
+def _q_spec(qs):
+    spec = getattr(qs, "spec", None)
+    if spec is None or len(spec) != 4:
+        return None
+    return spec
+
+
+def _sharding_like_q(qs):
+    spec = _q_spec(qs)
+    if spec is None:
+        return qs
+    return NamedSharding(qs.mesh, PartitionSpec(*spec))
+
+
+def _sharding_for_state(qs):
+    """为 State checkpoint (B, H, C, K, K) 构造 sharding。"""
+    spec = _q_spec(qs)
+    if spec is None:
+        return qs
+    return NamedSharding(
+        qs.mesh, PartitionSpec(spec[0], spec[2], None, spec[3], spec[3])
+    )
+
+
+def _sharding_for_final_state(qs):
+    """为最终 State (B, H, K, K) 构造 sharding。"""
+    spec = _q_spec(qs)
+    if spec is None:
+        return qs
+    return NamedSharding(qs.mesh, PartitionSpec(spec[0], spec[2], spec[3], spec[3]))
+
+
 def _fwd_infer_sharding(arg_shapes, arg_shardings):
     qs = arg_shardings[1]
-    return (qs, qs, qs)
+    return (
+        _sharding_like_q(qs),
+        _sharding_for_state(qs),
+        _sharding_like_q(qs),
+    )
 
 
 def _bwd_infer_sharding(arg_shapes, arg_shardings):
     qs = arg_shardings[1]
-    return (qs, qs, qs, qs, qs, qs, qs)
+    q_like = _sharding_like_q(qs)
+    h0_like = _sharding_for_final_state(qs)
+    return (q_like, q_like, q_like, q_like, q_like, q_like, h0_like)
 
 
 def _inf_infer_sharding(arg_shapes, arg_shardings):
     qs = arg_shardings[1]
-    return (qs, qs)
+    return (_sharding_like_q(qs), _sharding_for_final_state(qs))
 
 
 # =========================================================================

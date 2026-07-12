@@ -16,7 +16,7 @@ __device__ inline bf to_bf(const float &u) {
 typedef bf *__restrict__ F_;
 
 /* -------------------- 训练前向 Kernel --------------------
- * mask: [B, T//16]，>0 表示在该 chunk 边界执行 State Norm。
+ * mask: [B, T//16]，>0 表示在该 chunk 边界执行 State Neutralization。
  * tau 只作为阈值，必须 > 0。
  * -------------------- */
 template<int C> __launch_bounds__(C, 2)
@@ -411,7 +411,7 @@ static ffi::Error WKV7SnInferenceHost(
 }
 
 /* -------------------- 训练前向 Kernel（无 mask） --------------------
- * 在 chunk 边界无条件执行 State Norm。
+ * 在 chunk 边界无条件执行 State Neutralization。
  * -------------------- */
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_kernel_sn_no_mask(int T, int H,

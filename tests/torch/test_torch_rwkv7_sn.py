@@ -1,5 +1,5 @@
 """
-RWKV-7 State Norm Torch CUDA kernel 数值测试。
+RWKV-7 State Neutralization Torch CUDA kernel 数值测试。
 
 运行方式：
     KERAS_BACKEND=torch pytest tests/torch/test_rwkv7_sn.py -v
@@ -24,7 +24,7 @@ def _make_inputs(rwkv7_sn_inputs, device, dtype="bfloat16", grad=False):
         for name in ["r", "k", "v", "a", "b", "w"]
     }
     tensors["tau"] = _to_torch(rwkv7_sn_inputs["tau"], "float32", device)
-    # mask 默认全 1：每个 chunk 边界都执行 State Norm
+    # mask 默认全 1：每个 chunk 边界都执行 State Neutralization
     B, n_chunks, _ = rwkv7_sn_inputs["tau"].shape
     tensors["mask"] = torch.ones(B, n_chunks, dtype=torch.float32, device=device)
     tensors["h0"] = _to_torch(rwkv7_sn_inputs["h0"], "float32", device)

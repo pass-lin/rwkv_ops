@@ -311,11 +311,11 @@ def generalized_delta_rule_sn(
     head_first: bool = False,
 ):
     """
-    带 State Norm 的 RWKV-7 广义 Delta 规则（训练 / prefill 通用）。
+    带 State Neutralization 的 RWKV-7 广义 Delta 规则（训练 / prefill 通用）。
 
     调度规则：
     - 当 ``output_final_state=False`` 时，内部调用无 mask 算子，chunk 边界无条件
-      执行 State Norm，以节省 mask 读取/分支开销。
+      执行 State Neutralization，以节省 mask 读取/分支开销。
     - 当 ``mask=None`` 且 ``output_final_state=True`` 时，同样调用无 mask 算子，
       但会弹出警告并把返回的 ``final_state`` 设为 ``None``，避免用户误用可能被
       padding 污染的 state。
@@ -324,7 +324,7 @@ def generalized_delta_rule_sn(
     Args:
         r, w, k, v, a, b: [B, T, H, K] 或 [B, H, T, K]，T 必须被 16 整除。
         tau: [B, T//16, H]，float32，必须 > 0。
-        mask: [B, T//16]，float32，0/1 标记每个 chunk 是否执行 State Norm；
+        mask: [B, T//16]，float32，0/1 标记每个 chunk 是否执行 State Neutralization；
               只有需要返回 final_state 且显式提供时才生效。padding chunk 请置 0，
               并配合 k=0, a=0, w=-inf。
         initial_state: [B, H, K, K] 或 [1, H, K, K]。
@@ -365,13 +365,13 @@ def rwkv7_op_sn_rnn(
     a,
     b,
     tau,                  # [B, H]，float32
-    do_sn,                # bool 或 [B] bool，True 表示本步后执行 State Norm
+    do_sn,                # bool 或 [B] bool，True 表示本步后执行 State Neutralization
     initial_state=None,
     output_final_state: bool = True,
     head_first: bool = False,
 ):
     """
-    带 State Norm 的 RWKV-7 单步推理（RNN 模式）。
+    带 State Neutralization 的 RWKV-7 单步推理（RNN 模式）。
     输出基于 SN 前的 State，state_out 已按 do_sn 应用 SN。
     """
 ```

@@ -7,7 +7,7 @@
 - 禁止给 lambda 赋值（`grid = lambda ...`），改用 `def`。
 - 函数式风格：每个 kernel 的 Python 入口都返回 `out` 或 `(out, final_state)`。
 
-## RWKV-7 State Norm (`rwkv7_sn_kernel`)
+## RWKV-7 State Neutralization (`rwkv7_sn_kernel`)
 
 ### 设计约定
 
@@ -24,6 +24,14 @@
   - `mask=None` 且 `output_final_state=True` 时，Python 入口会发出双语警告并把返回的
     `final_state` 设为 `None`，避免用户误用被 padding 污染的 state。
   - 只有在 `output_final_state=True` 且显式传入 `mask` 时才使用带 mask 的 kernel。
+- **分片与并行**：
+  - JAX `custom_partitioning` 的 sharding rule 已经用同一字母 `h` 标记所有 head 维度，
+    因此支持沿 head 轴做 Tensor Parallelism（TP）。
+  - `infer_sharding_from_operands` 会按输出张量的实际维度重新构造 `NamedSharding`，
+    保证 `y`/`sa` 与输入同维度同分片，State checkpoint/final_state 与 `tau` 的 head 维度
+    分片一致。
+  - mask 为 `[B, T//16]`，不携带 head 维度，因此会在 head 轴上自动复制（replicate）。
+  - Torch 侧 kernel 本身按 head 独立 launch，只要调用者把输入张量在 head 维度切好即可支持 TP。
 - **单步版本**：每步都计算 SN，再用 `ops.where` / CUDA 分支按 per-sample `do_sn` 选择。
 
 ### CUDA 实现要点

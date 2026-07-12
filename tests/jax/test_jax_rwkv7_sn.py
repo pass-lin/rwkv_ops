@@ -1,5 +1,5 @@
 """
-RWKV-7 State Norm JAX CUDA kernel 数值测试。
+RWKV-7 State Neutralization JAX CUDA kernel 数值测试。
 
 运行方式：
     KERAS_BACKEND=jax pytest tests/jax/test_rwkv7_sn.py -v
@@ -11,6 +11,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from tests.conftest import assert_allclose_with_stats
 
@@ -561,3 +562,56 @@ def test_rwkv7_sn_irregular_padding(
         rtol=1e-3,
         min_exact_rate=5.0,
     )
+
+
+@pytest.mark.jax
+def test_rwkv7_sn_head_sharding(rwkv7_sn_jax_op, rwkv7_sn_inputs):
+    """验证 head 维度可以沿 'h' 轴分片（TP）。单 GPU 下用 1-device mesh 模拟。"""
+    devices = jax.devices()
+    mesh = Mesh(devices, ("h",))
+
+    q_spec = PartitionSpec(None, None, "h", None)
+    tau_spec = PartitionSpec(None, None, "h")
+    h0_spec = PartitionSpec(None, "h", None, None)
+    mask_spec = PartitionSpec(None, None)
+
+    r, k, v, a, b, w, tau, mask, h0 = _prepare_inputs(
+        rwkv7_sn_inputs, head_first=False, dtype="bfloat16"
+    )
+
+    in_shardings = (
+        NamedSharding(mesh, q_spec),  # r
+        NamedSharding(mesh, q_spec),  # w
+        NamedSharding(mesh, q_spec),  # k
+        NamedSharding(mesh, q_spec),  # v
+        NamedSharding(mesh, q_spec),  # a
+        NamedSharding(mesh, q_spec),  # b
+        NamedSharding(mesh, tau_spec),  # tau
+        NamedSharding(mesh, mask_spec),  # mask
+        NamedSharding(mesh, h0_spec),  # h0
+    )
+
+    def run(r, w, k, v, a, b, tau, mask, h0):
+        return rwkv7_sn_jax_op(
+            r=r,
+            w=w,
+            k=k,
+            v=v,
+            a=a,
+            b=b,
+            tau=tau,
+            mask=mask,
+            initial_state=h0,
+            output_final_state=True,
+            head_first=False,
+        )
+
+    run_sharded = jax.jit(run, in_shardings=in_shardings)
+    y_ref, s_ref = run(r, w, k, v, a, b, tau, mask, h0)
+    y_s, s_s = run_sharded(r, w, k, v, a, b, tau, mask, h0)
+
+    _test_is_close("y_head_tp", y_ref, y_s, atol=1e-4, rtol=1e-2)
+    _test_is_close("final_state_head_tp", s_ref, s_s, atol=1e-5, rtol=1e-3)
+
+    # 输出 y 的 head 维度应当与输入一致沿 'h' 分片。
+    assert y_s.sharding.mesh.axis_names == ("h",)

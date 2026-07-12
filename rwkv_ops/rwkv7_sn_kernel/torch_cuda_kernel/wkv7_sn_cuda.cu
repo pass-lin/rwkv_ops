@@ -13,7 +13,7 @@ __device__ inline bf to_bf(const float &u) {
 }
 typedef bf * __restrict__ F_;
 
-/* mask: [B, T//16]; m > 0 means apply State Norm at chunk boundary. */
+/* mask: [B, T//16]; m > 0 means apply State Neutralization at chunk boundary. */
 
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_kernel_sn(int T, int H,
