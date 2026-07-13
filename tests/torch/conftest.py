@@ -110,3 +110,13 @@ def rwkv7_sn_rnn_op(rwkv7_shape):
 
     _, _, _, K = rwkv7_shape
     return get_rnn_generalized_delta_rule_sn(HEAD_SIZE=K, KERNEL_TYPE="cuda")
+
+
+@pytest.fixture(scope="session")
+def rwkv7_sn_triton_op(rwkv7_shape):
+    pytest.importorskip("triton")
+    from rwkv_ops import get_generalized_delta_rule_sn
+
+    _, _, _, K = rwkv7_shape
+    op, _ = get_generalized_delta_rule_sn(HEAD_SIZE=K, KERNEL_TYPE="triton")
+    return op

@@ -360,8 +360,8 @@ Note: the inference kernel reads `tau` per chunk, so `tau` only needs to have le
 
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
-| PyTorch     | ✅   | ❌     | ✅     |
-| JAX         | ✅   | ❌     | ✅     |
+| PyTorch     | ✅   | ✅     | ✅     |
+| JAX         | ✅   | ✅     | ✅     |
 | TensorFlow  | ❌    | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 

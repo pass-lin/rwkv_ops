@@ -22,6 +22,10 @@ def get_generalized_delta_rule_sn(HEAD_SIZE=64, KERNEL_TYPE="cuda"):
                 )
 
                 return get_jax_generalized_delta_rule_sn(HEAD_SIZE)
+            elif KERNEL_TYPE == "triton":
+                from .jax_triton_kernel import get_jax_generalized_delta_rule_sn
+
+                return get_jax_generalized_delta_rule_sn(HEAD_SIZE)
     elif keras.config.backend() == "torch":
         import torch
 
@@ -30,6 +34,10 @@ def get_generalized_delta_rule_sn(HEAD_SIZE=64, KERNEL_TYPE="cuda"):
                 from .torch_cuda_kernel.wkv7_sn_torch import (
                     get_torch_generalized_delta_rule_sn,
                 )
+
+                return get_torch_generalized_delta_rule_sn(HEAD_SIZE)
+            elif KERNEL_TYPE == "triton":
+                from .torch_triton_kernel import get_torch_generalized_delta_rule_sn
 
                 return get_torch_generalized_delta_rule_sn(HEAD_SIZE)
 
