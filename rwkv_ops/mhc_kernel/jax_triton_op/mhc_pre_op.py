@@ -250,6 +250,9 @@ def mhc_pre_op_fused(x, h_res_in, h_pre_in, num_iters=20, eps=1e-8):
     """
     通过闭包捕获静态参数 num_iters 和 eps，确保它们不进入 custom_vjp 的追踪范围。
     """
+    C = x.shape[-1]
+    if C % 128 != 0:
+        raise ValueError(f"mhc_pre_op_fused (triton) requires C % 128 == 0, got C={C}")
 
     @jax.custom_vjp
     def _internal_op(x_arr, hr_arr, hp_arr):

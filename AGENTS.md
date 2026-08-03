@@ -120,7 +120,8 @@ ground truth）+ 若干加速后端（CUDA / Triton / Pallas）。
 
 ### mHC（`mhc_kernel`）
 
-- **`C` 必须被 128 整除**（代码无 assert，不满足直接 kernel 报错）。
+- **`C` 必须被 128 整除**（四个 Triton 公开入口已加显式校验，不满足时
+  `raise ValueError`）。
 - 只支持 `native` / `triton`；triton 只替换 `mhc_pre_op_fused` 与 `mhc_post_op`
   两个底层符号，高层封装始终共用 native 的 `linear_and_reshape`。
 - **显存优化靠手写 VJP 重计算**：pre_op 反向在 kernel 内重跑 sinkhorn，前向只

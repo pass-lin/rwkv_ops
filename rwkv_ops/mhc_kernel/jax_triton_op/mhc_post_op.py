@@ -234,6 +234,9 @@ mhc_post_op_bwd_spmd.def_partition(
 
 @jax.custom_vjp
 def mhc_post_op(layer_out, x_expanded, h_post_raw, H_res):
+    C = layer_out.shape[-1]
+    if C % 128 != 0:
+        raise ValueError(f"mhc_post_op (triton) requires C % 128 == 0, got C={C}")
     # 【修改】：调用切分规则封装后的 FWD
     return mhc_post_op_fwd_spmd(
         layer_out.astype(jnp.bfloat16),

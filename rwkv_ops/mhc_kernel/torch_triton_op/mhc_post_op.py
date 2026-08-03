@@ -177,6 +177,9 @@ def mhc_post_op(
         C: Channel Size (Hidden Dimension)
         n: Head Size (State Dimension, 通常为 4 或 8)
     """
+    C = layer_out.shape[-1]
+    if C % 128 != 0:
+        raise ValueError(f"mhc_post_op (triton) requires C % 128 == 0, got C={C}")
     return MHCPostOpFunction.apply(
         layer_out.to(torch.bfloat16),
         x_expanded.to(torch.bfloat16),

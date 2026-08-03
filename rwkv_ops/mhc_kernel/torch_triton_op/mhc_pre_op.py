@@ -172,5 +172,8 @@ def mhc_pre_op_fused(
         out: [B, T, C] (BF16) - 聚合后的层输入
         H_res_out: [B, T, n, n] (FP32) - 双随机残差矩阵
     """
+    C = x.shape[-1]
+    if C % 128 != 0:
+        raise ValueError(f"mhc_pre_op_fused (triton) requires C % 128 == 0, got C={C}")
     n = x.shape[-2]
     return MHCFusedPreOp.apply(x, h_res_in, h_pre_in, n, num_iters, eps)
