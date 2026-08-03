@@ -63,7 +63,10 @@ pip install rwkv_ops
 |---------------|---------|--------|---------|----------|
 | `KERAS_BACKEND` | Keras backend | `jax` / `torch` / `tensorflow` / `numpy` | — | Low |
 | `KERNEL_BACKEND` | Operator backend | `jax` / `torch` / `tensorflow` / `numpy` | `torch` | **High** |
-| `KERNEL_TYPE` | Implementation type | `triton` / `cuda` / `native` | `cuda` | — |
+| `KERNEL_TYPE` | Implementation type | `triton` / `cuda` / `native` / `pallas` | `cuda` | — |
+| `RWKV_OPS_PALLAS_AUTOTUNE` | Pallas autotune switch | `1` / `0` | `1` | — |
+
+> With the JAX backend, when `KERNEL_TYPE=native` or `pallas` and the platform is GPU/TPU, rwkv7/rwkv7_sn use the Pallas kernel by default (CPU falls back to native XLA). The Pallas kernels only use public Pallas APIs, and autotune picks the fastest compilable backend among the triton/mgpu candidates.
 
 > If `KERNEL_BACKEND` is set, it is used directly; if not, `KERAS_BACKEND` is used. If both are unset, `torch` is the default.
 
@@ -234,13 +237,13 @@ if padding_mask is not None:
 <a id="rwkv7op-implementation-status"></a>
 ### rwkv7op implementation status
 
-| Framework   | cuda | triton | native |
-|-------------|------|--------|--------|
-| PyTorch     | ✅   | ❌     | ✅     |
-| JAX         | ✅   | ❌     | ✅     |
-| TensorFlow  | ❌    | ❌     | ✅     |
-| NumPy       | ❌   | ❌     | ✅     |
-| MLX         | ❌   | ❌     | ❌     |
+| Framework   | cuda | triton | native | pallas |
+|-------------|------|--------|--------|--------|
+| PyTorch     | ✅   | ❌     | ✅     | ❌     |
+| JAX         | ✅   | ❌     | ✅     | ✅     |
+| TensorFlow  | ❌    | ❌     | ✅     | ❌     |
+| NumPy       | ❌   | ❌     | ✅     | ❌     |
+
 
 ---
 
@@ -358,12 +361,12 @@ Note: the inference kernel reads `tau` per chunk, so `tau` only needs to have le
 <a id="rwkv7op_sn-implementation-status"></a>
 ### rwkv7op_sn implementation status
 
-| Framework   | cuda | triton | native |
-|-------------|------|--------|--------|
-| PyTorch     | ✅   | ✅     | ✅     |
-| JAX         | ✅   | ✅     | ✅     |
-| TensorFlow  | ❌    | ❌     | ✅     |
-| NumPy       | ❌   | ❌     | ✅     |
+| Framework   | cuda | triton | native | pallas |
+|-------------|------|--------|--------|--------|
+| PyTorch     | ✅   | ✅     | ✅     | ❌     |
+| JAX         | ✅   | ✅     | ✅     | ✅     |
+| TensorFlow  | ❌    | ❌     | ✅     | ❌     |
+| NumPy       | ❌   | ❌     | ✅     | ❌     |
 
 ---
 

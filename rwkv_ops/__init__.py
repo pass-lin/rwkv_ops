@@ -16,7 +16,7 @@ else:
     BACKEND = "torch"
     os.environ["KERAS_BACKEND"] = BACKEND
     keras.config.set_backend("torch")
-assert KERNEL_TYPE in ["triton", "cuda", "native"]
+assert KERNEL_TYPE in ["triton", "cuda", "native", "pallas"]
 assert BACKEND in ["torch", "jax", "numpy", "tensorflow"]
 from .rwkv7_kernel import (  # noqa: E402
     get_generalized_delta_rule,

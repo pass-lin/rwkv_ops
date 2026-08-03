@@ -175,3 +175,31 @@ def rwkv7_sn_jax_triton_op(rwkv7_shape):
     _, _, _, K = rwkv7_shape
     op, _ = get_generalized_delta_rule_sn(HEAD_SIZE=K, KERNEL_TYPE="triton")
     return op
+
+
+@pytest.fixture(scope="session")
+def rwkv7_jax_pallas_op(rwkv7_shape):
+    pytest.importorskip("jax.experimental.pallas")
+    import jax
+
+    if jax.devices()[0].platform not in ("gpu", "tpu"):
+        pytest.skip("pallas 后端仅用于 GPU/TPU")
+    from rwkv_ops import get_generalized_delta_rule
+
+    _, _, _, K = rwkv7_shape
+    op, _ = get_generalized_delta_rule(HEAD_SIZE=K, KERNEL_TYPE="pallas")
+    return op
+
+
+@pytest.fixture(scope="session")
+def rwkv7_sn_jax_pallas_op(rwkv7_shape):
+    pytest.importorskip("jax.experimental.pallas")
+    import jax
+
+    if jax.devices()[0].platform not in ("gpu", "tpu"):
+        pytest.skip("pallas 后端仅用于 GPU/TPU")
+    from rwkv_ops import get_generalized_delta_rule_sn
+
+    _, _, _, K = rwkv7_shape
+    op, _ = get_generalized_delta_rule_sn(HEAD_SIZE=K, KERNEL_TYPE="pallas")
+    return op

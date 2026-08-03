@@ -11,29 +11,15 @@ def get_torch_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
     current_file_path = os.path.abspath(__file__)
     current_dir_path = os.path.dirname(current_file_path)
 
-    use_rocm = os.environ.get("RWKV_USE_ROCM", "0") == "1"
-
-    if use_rocm:
-        extra_cuda_cflags = [
-            "-fopenmp",
-            "-ffast-math",
-            "-munsafe-fp-atomics",
-            "--gpu-max-threads-per-block=120",
-            "-enable-vectorize-compares",
-            f"-D_N_={head_size}",
-            f"-D_T_={max_sequence_length}",
-        ]
-    else:
-        extra_cuda_cflags = [
-            "-res-usage",
-            "--use_fast_math",
-            "-O3",
-            "-Xptxas",
-            "-O3",
-            "--extra-device-vectorization",
-            f"-D_N_={head_size}",
-            f"-D_T_={max_sequence_length}",
-        ]
+    extra_cuda_cflags = [
+        "-fopenmp",
+        "-ffast-math",
+        "-munsafe-fp-atomics",
+        "--gpu-max-threads-per-block=120",
+        "-enable-vectorize-compares",
+        f"-D_N_={head_size}",
+        f"-D_T_={max_sequence_length}",
+    ]
 
     load(
         name="wkv6",

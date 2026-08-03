@@ -16,7 +16,8 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
     if keras.config.backend() == "jax":
         import jax
 
-        if jax.devices()[0].platform == "gpu":
+        platform = jax.devices()[0].platform
+        if platform == "gpu":
             if KERNEL_TYPE == "cuda":
                 from .jax_cuda_kernel.wkv7_jax import get_jax_generalized_delta_rule
 
@@ -25,6 +26,10 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                 from .jax_triton_kernel import generalized_delta_rule as jax_kernel
 
                 return jax_kernel, generalized_delta_rule
+        if platform in ("gpu", "tpu") and KERNEL_TYPE in ("native", "pallas"):
+            from .jax_pallas_kernel import get_jax_generalized_delta_rule
+
+            return get_jax_generalized_delta_rule(HEAD_SIZE)
     elif keras.config.backend() == "torch":
         import torch
 
