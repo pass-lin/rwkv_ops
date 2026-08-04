@@ -1,6 +1,8 @@
 import keras
 from keras import ops
 
+from ..rwkv7_kernel import _use_pallas
+
 
 def transpose_head(x, head_first):
     if head_first:
@@ -27,7 +29,7 @@ def get_generalized_delta_rule_sn(HEAD_SIZE=64, KERNEL_TYPE="cuda"):
                 from .jax_triton_kernel import get_jax_generalized_delta_rule_sn
 
                 return get_jax_generalized_delta_rule_sn(HEAD_SIZE)
-        if platform in ("gpu", "tpu") and KERNEL_TYPE in ("native", "pallas"):
+        if _use_pallas(KERNEL_TYPE):
             from .jax_pallas_kernel import get_jax_generalized_delta_rule_sn
 
             return get_jax_generalized_delta_rule_sn(HEAD_SIZE)

@@ -63,10 +63,11 @@ pip install rwkv_ops
 |---------------|---------|--------|---------|----------|
 | `KERAS_BACKEND` | Keras backend | `jax` / `torch` / `tensorflow` / `numpy` / `openvino` | — | Low |
 | `KERNEL_BACKEND` | Operator backend | `jax` / `torch` / `tensorflow` / `numpy` / `openvino` | `torch` | **High** |
-| `KERNEL_TYPE` | Implementation type | `triton` / `cuda` / `native` / `pallas` | `cuda` | — |
+| `KERNEL_TYPE` | Implementation type | `triton` / `cuda` / `native` | `cuda` | — |
 | `RWKV_OPS_PALLAS_AUTOTUNE` | Pallas autotune switch | `1` / `0` | `1` | — |
+| `RWKV_OPS_JAX_NATIVE` | jax native impl choice | `pallas` (default) / `xla` | — | — |
 
-> With the JAX backend, when `KERNEL_TYPE=native` or `pallas` and the platform is GPU/TPU, rwkv7/rwkv7_sn use the Pallas kernel by default (CPU falls back to native XLA). The Pallas kernels only use public Pallas APIs, and autotune picks the fastest compilable backend among the triton/mgpu candidates.
+> With the JAX backend, when `KERNEL_TYPE=native` and the platform is GPU/TPU, the `native` implementation of rwkv7/rwkv7_sn is the Pallas kernel (pure Keras ops on other platforms, including CPU). The Pallas kernels only use public Pallas APIs, and autotune picks the fastest compilable backend candidate.
 
 > If `KERNEL_BACKEND` is set, it is used directly; if not, `KERAS_BACKEND` is used. If both are unset, `torch` is the default.
 
@@ -238,13 +239,15 @@ if padding_mask is not None:
 <a id="rwkv7op-implementation-status"></a>
 ### rwkv7op implementation status
 
-| Framework   | cuda | triton | native | pallas |
-|-------------|------|--------|--------|--------|
-| PyTorch     | ✅   | ❌     | ✅     | ❌     |
-| JAX         | ✅   | ❌     | ✅     | ✅     |
-| TensorFlow  | ❌    | ❌     | ✅     | ❌     |
-| NumPy       | ❌   | ❌     | ✅     | ❌     |
-| OpenVINO    | ❌   | ❌     | ✅     | ❌     |
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ✅   | ❌     | ✅     |
+| JAX         | ✅   | ❌     | ✅¹    |
+| TensorFlow  | ❌    | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
+
+> ¹ With the JAX backend, `native` on GPU/TPU is the Pallas implementation (`jax_pallas_kernel.py`); on other platforms it is pure Keras ops.
 
 
 ---
@@ -364,13 +367,13 @@ Note: the inference kernel reads `tau` per chunk, so `tau` only needs to have le
 <a id="rwkv7op_sn-implementation-status"></a>
 ### rwkv7op_sn implementation status
 
-| Framework   | cuda | triton | native | pallas |
-|-------------|------|--------|--------|--------|
-| PyTorch     | ✅   | ✅     | ✅     | ❌     |
-| JAX         | ✅   | ✅     | ✅     | ✅     |
-| TensorFlow  | ❌    | ❌     | ✅     | ❌     |
-| NumPy       | ❌   | ❌     | ✅     | ❌     |
-| OpenVINO    | ❌   | ❌     | ✅     | ❌     |
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ✅   | ✅     | ✅     |
+| JAX         | ✅   | ✅     | ✅¹    |
+| TensorFlow  | ❌    | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
 
 ---
 

@@ -58,8 +58,10 @@ MANIFEST.in                  # 源码分发清单
 |---|---|---|---|---|
 | `KERNEL_BACKEND` | 算子后端 | `jax` / `torch` / `tensorflow` / `numpy` / `openvino` | `torch` | **最高** |
 | `KERAS_BACKEND` | Keras 后端 | `jax` / `torch` / `tensorflow` / `numpy` / `openvino` | — | 低 |
-| `KERNEL_TYPE` | 实现类型 | `triton` / `cuda` / `native` / `pallas` | `cuda` | — |
+| `KERNEL_TYPE` | 实现类型 | `triton` / `cuda` / `native` | `cuda` | — |
 | `RWKV_OPS_PALLAS_AUTOTUNE` | Pallas autotune 开关 | `1` / `0` | `1` | — |
+| `RWKV_OPS_JAX_NATIVE` | jax 端 native 实现选择 | `pallas`（默认）/ `xla` | — | — |
+| `RWKV_OPS_PALLAS_BACKEND` | Pallas 后端强制覆盖 | `default` / `mgpu` / `triton` | — | — |
 
 选择逻辑（见 `rwkv_ops/__init__.py`）：
 
@@ -69,33 +71,33 @@ MANIFEST.in                  # 源码分发清单
 
 `KERNEL_TYPE` 决定具体实现：
 
-- `native`：纯 Keras ops 实现，所有后端可用，速度最慢，作为 ground truth。
+- `native`：可移植实现。CPU/非 jax 后端 = 纯 Keras ops（ground truth）；
+  **jax + GPU/TPU = Pallas kernel**（jax 平台上的可移植实现，见 §4.5）。
+  设 `RWKV_OPS_JAX_NATIVE=xla` 可强制 jax 端也用纯 keras ops（调试/对照用）。
 - `cuda`：手写 CUDA kernel（Torch C++ 扩展 / JAX FFI）。
 - `triton`：Triton 实现（rwkv7 / rwkv7_sn / mhc）。
-- `pallas`：Pallas 实现（仅 JAX 的 rwkv7 / rwkv7_sn）。
-
-**Pallas 默认规则**：`jax` 后端 + `KERNEL_TYPE ∈ {native, pallas}` + 平台为
-GPU/TPU 时，rwkv7/rwkv7_sn 默认使用 `jax_pallas_kernel.py`；CPU 回落 native。
-单步 RNN 没有 pallas 版本。
 
 **缺硬件静默回退**：各工厂在硬件/库不可用时不报错，直接回退 native
-（例如 torch 无 CUDA、jax 不在 GPU/TPU 上）。
+（例如 torch 无 CUDA、jax 不在 GPU/TPU 上时回到纯 keras ops）。
 
 ### 2.2 各算子的后端支持矩阵
 
 #### RWKV-7 `generalized_delta_rule`
 
-| Framework | cuda | triton | native | pallas |
-|-----------|------|--------|--------|--------|
-| PyTorch   | ✅   | ✅     | ✅     | ❌     |
-| JAX       | ✅   | ✅     | ✅     | ✅     |
-| TensorFlow| ❌   | ❌     | ✅     | ❌     |
-| NumPy     | ❌   | ❌     | ✅     | ❌     |
-| OpenVINO  | ❌   | ❌     | ✅     | ❌     |
+| Framework | cuda | triton | native |
+|-----------|------|--------|--------|
+| PyTorch   | ✅   | ✅     | ✅     |
+| JAX       | ✅   | ✅     | ✅¹    |
+| TensorFlow| ❌   | ❌     | ✅     |
+| NumPy     | ❌   | ❌     | ✅     |
+| OpenVINO  | ❌   | ❌     | ✅     |
 
 #### RWKV-7-SN `generalized_delta_rule_sn`
 
 同 rwkv7op（PyTorch/JAX 全后端 ✅，其余仅 native）。
+
+> ¹ JAX 后端的 `native` 在 GPU/TPU 上为 Pallas 实现（`jax_pallas_kernel.py`），
+> 其余平台为纯 Keras ops；单步 RNN 无 pallas 版本。
 
 #### RWKV-7 `rwkv7_op_rnn` / SN `rwkv7_op_sn_rnn` (T=1)
 

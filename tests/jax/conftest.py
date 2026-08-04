@@ -187,7 +187,7 @@ def rwkv7_jax_pallas_op(rwkv7_shape):
     from rwkv_ops import get_generalized_delta_rule
 
     _, _, _, K = rwkv7_shape
-    op, _ = get_generalized_delta_rule(HEAD_SIZE=K, KERNEL_TYPE="pallas")
+    op, _ = get_generalized_delta_rule(HEAD_SIZE=K, KERNEL_TYPE="native")
     return op
 
 
@@ -201,5 +201,5 @@ def rwkv7_sn_jax_pallas_op(rwkv7_shape):
     from rwkv_ops import get_generalized_delta_rule_sn
 
     _, _, _, K = rwkv7_shape
-    op, _ = get_generalized_delta_rule_sn(HEAD_SIZE=K, KERNEL_TYPE="pallas")
+    op, _ = get_generalized_delta_rule_sn(HEAD_SIZE=K, KERNEL_TYPE="native")
     return op

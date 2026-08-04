@@ -63,10 +63,11 @@ pip install rwkv_ops
 |---|---|---|---|---|
 | `KERAS_BACKEND` | Keras 后端 | `jax` / `torch` / `tensorflow` / `numpy` / `openvino` | — | 低 |
 | `KERNEL_BACKEND` | 算子后端 | `jax` / `torch` / `tensorflow` / `numpy` / `openvino` | `torch` | **高** |
-| `KERNEL_TYPE` | 实现类型 | `triton` / `cuda` / `native` / `pallas` | `cuda` | — |
+| `KERNEL_TYPE` | 实现类型 | `triton` / `cuda` / `native` | `cuda` | — |
 | `RWKV_OPS_PALLAS_AUTOTUNE` | Pallas autotune 开关 | `1` / `0` | `1` | — |
+| `RWKV_OPS_JAX_NATIVE` | jax 端 native 实现选择 | `pallas`（默认）/ `xla` | — | — |
 
-> JAX 后端下，`KERNEL_TYPE=native` 或 `pallas` 且平台为 GPU/TPU 时，rwkv7/rwkv7_sn 默认使用 Pallas kernel（CPU 回落 native XLA）。Pallas kernel 只使用公开 Pallas API，autotune 会在 triton/mgpu 候选后端中自动挑选可编译且最快者。
+> JAX 后端下，`KERNEL_TYPE=native` 且平台为 GPU/TPU 时，rwkv7/rwkv7_sn 的 `native` 实现为 Pallas kernel（其余平台为纯 Keras ops，CPU 同）。Pallas kernel 只使用公开 Pallas API，autotune 会在候选后端中自动挑选可编译且最快者。
 
 > 若 `KERNEL_BACKEND` 有值，直接采用；若为空，则用 `KERAS_BACKEND`；两者皆空则默认 `torch`。  
 
@@ -235,13 +236,15 @@ if padding_mask is not None:
 <a id="rwkv7op-实现状态"></a>
 ### rwkv7op 实现状态
 
-| Framework   | cuda | triton | native | pallas |
-|-------------|------|--------|--------|--------|
-| PyTorch     | ✅   | ✅     | ✅     | ❌     |
-| JAX         | ✅   | ✅     | ✅     | ✅     |
-| TensorFlow  | ❌    | ❌     | ✅     | ❌     |
-| NumPy       | ❌   | ❌     | ✅     | ❌     |
-| OpenVINO    | ❌   | ❌     | ✅     | ❌     |
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ✅   | ✅     | ✅     |
+| JAX         | ✅   | ✅     | ✅¹    |
+| TensorFlow  | ❌    | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
+
+> ¹ JAX 后端的 `native` 在 GPU/TPU 上为 Pallas 实现（`jax_pallas_kernel.py`），其余平台为纯 Keras ops。
 
 
 ---
@@ -350,13 +353,13 @@ def generalized_delta_rule_sn(
 <a id="rwkv7op_sn-实现状态"></a>
 ### rwkv7op_sn 实现状态
 
-| Framework   | cuda | triton | native | pallas |
-|-------------|------|--------|--------|--------|
-| PyTorch     | ✅   | ✅     | ✅     | ❌     |
-| JAX         | ✅   | ✅     | ✅     | ✅     |
-| TensorFlow  | ❌    | ❌     | ✅     | ❌     |
-| NumPy       | ❌   | ❌     | ✅     | ❌     |
-| OpenVINO    | ❌   | ❌     | ✅     | ❌     |
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ✅   | ✅     | ✅     |
+| JAX         | ✅   | ✅     | ✅¹    |
+| TensorFlow  | ❌    | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
 
 <a id="rwkv7_op_sn_rnn-使用方法"></a>
 ## rwkv7_op_sn_rnn 使用方法

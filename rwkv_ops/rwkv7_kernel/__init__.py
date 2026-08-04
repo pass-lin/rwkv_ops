@@ -1,3 +1,5 @@
+import os
+
 import keras
 from keras import ops
 
@@ -7,6 +9,20 @@ def transpose_head(x, head_first):
         return ops.transpose(x, (0, 2, 1, 3))
     else:
         return x
+
+
+def _use_pallas(KERNEL_TYPE):
+    """jax + 非 CPU 平台时，native 默认使用 pallas kernel。
+
+    可用 RWKV_OPS_JAX_NATIVE=xla 强制回退纯 keras ops（调试用）。
+    """
+    if KERNEL_TYPE != "native":
+        return False
+    if os.environ.get("RWKV_OPS_JAX_NATIVE", "").lower() == "xla":
+        return False
+    import jax
+
+    return jax.devices()[0].platform in ("gpu", "tpu")
 
 
 def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
@@ -26,7 +42,7 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                 from .jax_triton_kernel import generalized_delta_rule as jax_kernel
 
                 return jax_kernel, generalized_delta_rule
-        if platform in ("gpu", "tpu") and KERNEL_TYPE in ("native", "pallas"):
+        if _use_pallas(KERNEL_TYPE):
             from .jax_pallas_kernel import get_jax_generalized_delta_rule
 
             return get_jax_generalized_delta_rule(HEAD_SIZE)
