@@ -37,6 +37,7 @@
 - [Usage of `rwkv7_op_sn_rnn`](#usage-of-rwkv7_op_sn_rnn)
   - [Implementation Status of `rwkv7_op_sn_rnn`](#implementation-status-of-rwkv7_op_sn_rnn)
 - [Usage of `rwkv6op`](#usage-of-rwkv6op)
+- [Distributed Parallelism (JAX)](#distributed-parallelism)
   - [PyTorch Usage Notes](#pytorch-usage-notes)
   - [JAX Usage Notes](#jax-usage-notes)
   - [TensorFlow Usage Notes](#tensorflow-usage-notes)
@@ -426,6 +427,54 @@ for step in range(seq_len):
 
 1. Single-step operator **has no gradient support**.
 2. The CUDA version casts inputs to bfloat16 internally, same as `rwkv7_op_rnn`.
+
+---
+
+<a id="distributed-parallelism"></a>
+## Distributed Parallelism (JAX)
+
+All accelerated JAX operators declare sharding propagation rules via
+`custom_partitioning` + einsum-style `sharding_rule`, so they partition
+correctly under `jax.jit` + `NamedSharding`, supporting **DP (data parallel
+over batch)** and **TP (tensor parallel over heads)**:
+
+| Operator (jax) | DP (batch) | TP (head) |
+|---|---|---|
+| rwkv7 cuda / triton / pallas | ✅ | ✅ |
+| rwkv7_sn cuda / triton / pallas | ✅ | ✅ |
+| rwkv7 / rwkv7_sn single-step cuda | ✅ | ✅ |
+| rwkv6 cuda | ✅ | ❌ |
+
+> rwkv6 fuses the channel dim (C = H × N) into a single rule dimension, so the
+> head axis is not exposed to the partitioner; only batch parallelism is
+> supported. Use rwkv7 / rwkv7_sn if you need TP.
+
+**Only shard the batch or head dims**; sharding time or head_size dims yields
+wrong results (the scan needs the full T, and each state needs the full
+head_size). SN's `tau` carries a head dim (TP-shardable), while `mask` has no
+head dim (replicated automatically under TP).
+
+Example (TP over heads):
+
+```python
+import jax
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+
+mesh = Mesh(jax.devices(), ("h",))
+with jax.set_mesh(mesh):
+    q_shd = NamedSharding(mesh, PartitionSpec(None, None, "h", None))
+    s_shd = NamedSharding(mesh, PartitionSpec(None, "h", None, None))
+    y, state = jax.jit(
+        lambda *x: rwkv7_op(r=x[0], w=x[1], k=x[2], v=x[3], a=x[4], b=x[5],
+                            initial_state=x[6]),
+        in_shardings=(q_shd,) * 6 + (s_shd,),
+    )(r, w, k, v, a, b, h0)
+```
+
+For DP, shard the batch dim onto the mesh axis (the rules also cover the
+backward pass and the sharding propagation of state checkpoints / final_state).
+Inference-side DP is usually process-level replication and does not go through
+a mesh; the single-step TP rules target TP inference deployments.
 
 ---
 

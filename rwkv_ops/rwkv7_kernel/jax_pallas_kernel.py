@@ -25,6 +25,8 @@ from jax.experimental.custom_partitioning import custom_partitioning
 
 from ..pallas_utils import create_partition, ensure_config, launch
 
+from jax.sharding import NamedSharding, PartitionSpec
+
 CHUNK_LEN = 16
 
 
@@ -39,14 +41,50 @@ FWD_MASK_RULE = "b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n h m, 
 BWD_MASK_RULE = "b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b t, b n t h, b n t h, b n c h m, b n h m -> b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n h m"
 
 
+def _q_spec(qs):
+    spec = getattr(qs, "spec", None)
+    if spec is None or len(spec) != 4:
+        return None
+    return spec
+
+
+def _sharding_like_q(qs):
+    """为 y / sa (B, N, T, H) 构造与输入一致的 sharding。"""
+    spec = _q_spec(qs)
+    if spec is None:
+        return qs
+    return NamedSharding(qs.mesh, PartitionSpec(*spec))
+
+
+def _sharding_for_state(qs):
+    """为 State checkpoint (B, N, C, H, H) 构造 sharding。"""
+    spec = _q_spec(qs)
+    if spec is None:
+        return qs
+    return NamedSharding(
+        qs.mesh, PartitionSpec(spec[0], spec[1], None, spec[3], spec[3])
+    )
+
+
+def _sharding_for_final_state(qs):
+    """为最终 State / dh0 (B, N, H, H) 构造 sharding。"""
+    spec = _q_spec(qs)
+    if spec is None:
+        return qs
+    return NamedSharding(qs.mesh, PartitionSpec(spec[0], spec[1], spec[3], spec[3]))
+
+
 def _fwd_infer_sharding(arg_shapes, arg_shardings):
     qs = arg_shardings[0]
-    return (qs, qs, qs)
+    q_like = _sharding_like_q(qs)
+    return (q_like, q_like, _sharding_for_state(qs))
 
 
 def _bwd_infer_sharding(arg_shapes, arg_shardings):
     qs = arg_shardings[0]
-    return (qs, qs, qs, qs, qs, qs, qs)
+    q_like = _sharding_like_q(qs)
+    h0_like = _sharding_for_final_state(qs)
+    return (q_like, q_like, q_like, q_like, q_like, q_like, h0_like)
 
 
 def _transpose_head(x: jnp.ndarray, head_first: bool) -> jnp.ndarray:

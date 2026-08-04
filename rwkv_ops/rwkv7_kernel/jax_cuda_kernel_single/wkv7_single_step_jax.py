@@ -9,13 +9,64 @@ import subprocess
 import ctypes
 import jax
 import jax.numpy as jnp
+import jax.tree_util as jtu
 from typing import Optional, Tuple, Union
+
+from jax.experimental.custom_partitioning import custom_partitioning
+from jax.sharding import NamedSharding, PartitionSpec
 
 # ---------- 延迟编译（改到当前目录） ----------
 _CURRENT_DIR = pathlib.Path(__file__).parent.absolute()
 
 # 用于绕过 glibc 2.41+ 与 CUDA 13.1 的 rsqrt noexcept 冲突
 _NVCC_WRAPPER = _CURRENT_DIR.parents[1] / "cuda_tools" / "nvcc_wrap"
+
+# =========================================================================
+# SPMD 切分规则 (Einsum 风格)
+# b=Batch, h=Head, k/m=HeadDim
+# 支持 DP（batch 维切分）与 TP（head 维切分）
+# =========================================================================
+FWD_RULE = "b h k, b h k, b h k, b h k, b h k, b h k, b h k m -> b h k, b h k m"
+
+
+def _q_spec(qs):
+    spec = getattr(qs, "spec", None)
+    if spec is None or len(spec) != 3:
+        return None
+    return spec
+
+
+def _sharding_like_q(qs):
+    """为 y (B, H, K) 构造与输入一致的 sharding。"""
+    spec = _q_spec(qs)
+    if spec is None:
+        return qs
+    return NamedSharding(qs.mesh, PartitionSpec(*spec))
+
+
+def _sharding_for_state(qs):
+    """为最终 State (B, H, K, K) 构造 sharding。"""
+    spec = _q_spec(qs)
+    if spec is None:
+        return qs
+    return NamedSharding(qs.mesh, PartitionSpec(spec[0], spec[1], spec[2], spec[2]))
+
+
+def _fwd_infer_sharding(arg_shapes, arg_shardings):
+    qs = arg_shardings[1]  # q
+    return (_sharding_like_q(qs), _sharding_for_state(qs))
+
+
+def _create_partition(impl_fn):
+    def partition(mesh, arg_shapes, result_shape):
+        def lower_fn(*args):
+            return impl_fn(*args)
+
+        result_shardings = jtu.tree_map(lambda x: x.sharding, result_shape)
+        arg_shardings = jtu.tree_map(lambda x: x.sharding, arg_shapes)
+        return mesh, lower_fn, result_shardings, arg_shardings
+
+    return partition
 
 
 def get_jax_generalized_delta_rule_single_step(HEAD_SIZE=64):
@@ -92,7 +143,7 @@ def get_jax_generalized_delta_rule_single_step(HEAD_SIZE=64):
         return x
 
     # ---------- 前向 kernel ----------
-    def _wkv7_single_step_kernel(
+    def _wkv7_single_step_impl(
         w: jnp.ndarray,
         q: jnp.ndarray,
         k: jnp.ndarray,
@@ -117,6 +168,16 @@ def get_jax_generalized_delta_rule_single_step(HEAD_SIZE=64):
 
         return y, s
 
+    @custom_partitioning
+    def _wkv7_single_step_spmd(w, q, k, v, a, b, h0):
+        return _wkv7_single_step_impl(w, q, k, v, a, b, h0)
+
+    _wkv7_single_step_spmd.def_partition(
+        infer_sharding_from_operands=_fwd_infer_sharding,
+        sharding_rule=FWD_RULE,
+        partition=_create_partition(_wkv7_single_step_impl),
+    )
+
     def wk7_single_step_kernel(
         w: jnp.ndarray,
         q: jnp.ndarray,
@@ -127,7 +188,7 @@ def get_jax_generalized_delta_rule_single_step(HEAD_SIZE=64):
         h0: jnp.ndarray,
     ):
         """前向计算函数"""
-        y, s = _wkv7_single_step_kernel(w, q, k, v, a, b, h0)
+        y, s = _wkv7_single_step_spmd(w, q, k, v, a, b, h0)
         final_state = s  # 单步后直接返回状态
         return (y, final_state)
 

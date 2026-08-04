@@ -143,6 +143,31 @@ MANIFEST.in                  # 源码分发清单
 > ² Torch 后端的 `native` 在非 CPU 平台默认为 Triton 实现；jax 侧 `native`
 > 保持纯 Keras ops（jax triton 桥接依赖额外的 jax-triton 包）。
 
+### 2.3 分布式分片（jax）
+
+jax 侧所有加速算子都用 `custom_partitioning` + einsum 风格 `sharding_rule`
+声明分片传播，支持 **DP（batch 维并行）** 与 **TP（head 维并行）**：
+
+| 算子（jax） | DP (batch) | TP (head) |
+|---|---|---|
+| rwkv7 cuda / triton / pallas | ✅ | ✅ |
+| rwkv7_sn cuda / triton / pallas | ✅ | ✅（含 1-device TP 结构测试） |
+| rwkv7 / rwkv7_sn 单步 cuda | ✅ | ✅ |
+| rwkv6 cuda | ✅ | ❌（channel 融合为 `c`，head 维未暴露） |
+
+- 规则字母：`b`=batch、`n`/`h`=head、`t`=time、`k`/`m`/`n`=head_size、
+  `c`=chunk（rwkv6 的 `c` 是融合 channel）。
+- **只允许切 batch 或 head 维**；切 time 或 head_size 维会静默算错
+  （扫描需要完整 T，state 需要完整 head_size）。
+- SN 的 `tau`/`mask` 已按规则覆盖：tau 带 head 维（TP 可切）、mask 无 head 维
+  （TP 下自动 replicate）；单步的 `do_sn` 仅 batch 维。
+- `infer_sharding_from_operands` 按输出实际维度重建 `NamedSharding`
+  （state checkpoint / final_state / dtau 等不是输入同形张量）。
+- 单卡可用 1-device mesh 做结构验证（编译通过 + 输出 spec 正确传播 +
+  数值一致），真正的多卡行为需在多卡环境复核。
+- 推理侧的 DP 通常是进程级副本（不经 mesh），所以 DP 规则主要服务于
+  单进程 SPMD 训练；单步算子的 TP 规则服务于 TP 推理部署。
+
 ---
 
 ## 3. 代码组织约定
@@ -211,6 +236,9 @@ y_t = state_t @ r_t
 - `triton` 后端固定支持 `HEAD_SIZE == 64`；其他 head_size 用 `cuda`
   （`head_size` 经 `-D_C_` 编译进内核，按 head_size 懒编译）。
 - 单步 `get_rnn_generalized_delta_rule` 只支持 cuda，其余 KERNEL_TYPE 回退 native。
+- 单步 cuda 桥接（rwkv7/sn）带 `custom_partitioning` 分片规则，支持 DP（batch）
+  与 TP（head）：`b h k ... b h k m -> b h k, b h k m`；SN 单步的 tau 为
+  `[B, H]`（per-head）、`do_sn` 为 `[B]`（per-sample），规则同样覆盖。
 
 ### 4.2 RWKV-7 State Neutralization（`rwkv7_sn_kernel`）
 

@@ -39,6 +39,7 @@
 - [rwkv7_op_sn_rnn 使用方法](#rwkv7_op_sn_rnn-使用方法)
   - [rwkv7_op_sn_rnn 实现状态](#rwkv7_op_sn_rnn-实现状态)
 - [rwkv6op 使用方法](#rwkv6op-使用方法)
+- [分布式并行（JAX）](#分布式并行)
   - [PyTorch 使用注意事项](#pytorch-使用注意事项)
   - [JAX 使用注意事项](#jax-使用注意事项)
   - [TensorFlow 使用注意事项](#tensorflow-使用注意事项)
@@ -410,6 +411,50 @@ for step in range(seq_len):
 
 1. 单步算子**没有梯度**。
 2. CUDA 版本会强制把输入 cast 到 bfloat16，与 rwkv7_op_rnn 行为一致。
+
+<a id="分布式并行"></a>
+## 分布式并行（JAX）
+
+JAX 侧所有加速算子都通过 `custom_partitioning` + einsum 风格 `sharding_rule`
+声明了分片传播规则，可在 `jax.jit` + `NamedSharding` 下自动正确分区，支持
+**DP（batch 维并行）** 与 **TP（head 维并行）**：
+
+| 算子（jax） | DP (batch) | TP (head) |
+|---|---|---|
+| rwkv7 cuda / triton / pallas | ✅ | ✅ |
+| rwkv7_sn cuda / triton / pallas | ✅ | ✅ |
+| rwkv7 / rwkv7_sn 单步 cuda | ✅ | ✅ |
+| rwkv6 cuda | ✅ | ❌ |
+
+> rwkv6 的 channel 维（C = H × N）在分片规则中是一个整体，head 维未暴露，
+> 因此只支持按 batch 的数据并行；需要 TP 请使用 rwkv7 / rwkv7_sn。
+
+**只允许切 batch 或 head 维**；切 time 或 head_size 维会得到错误结果
+（扫描需要完整 T，state 需要完整 head_size）。SN 的 `tau` 带 head 维
+（TP 可切）、`mask` 无 head 维（TP 下自动复制）。
+
+使用示例（TP：沿 head 维切分）：
+
+```python
+import jax
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+
+mesh = Mesh(jax.devices(), ("h",))
+with jax.set_mesh(mesh):
+    q_shd = NamedSharding(mesh, PartitionSpec(None, None, "h", None))
+    s_shd = NamedSharding(mesh, PartitionSpec(None, "h", None, None))
+    y, state = jax.jit(
+        lambda *x: rwkv7_op(r=x[0], w=x[1], k=x[2], v=x[3], a=x[4], b=x[5],
+                            initial_state=x[6]),
+        in_shardings=(q_shd,) * 6 + (s_shd,),
+    )(r, w, k, v, a, b, h0)
+```
+
+DP 时把输入的 batch 维切到 mesh 轴上即可（规则同样覆盖反向传播与
+state checkpoint / final_state 的分片传播）。推理侧的 DP 通常是进程级
+副本，不经 mesh；单步算子的 TP 规则面向 TP 推理部署。
+
+---
 
 <a id="rwkv6op-使用方法"></a>
 ## rwkv6op 使用方法
