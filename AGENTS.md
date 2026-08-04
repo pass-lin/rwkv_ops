@@ -269,11 +269,16 @@ sn_state = tau * tanh(state / tau)      # 软裁剪到 [-tau, tau]
   `fori_loop` 遍历 chunk、内层静态展开 16 步；数学与 `triton_kernel.py`
   逐行对应（MINI_BSZ=1 的角色由 grid 取代，kernel 内无需 batch mask 与
   64 位指针运算）。
-- **autotune**（`pallas_utils`）：候选 = triton `num_warps × num_stages` 网格 +
-  mgpu 默认；eager 下对新 shape key 计时选最快并缓存，**无法 lowering 的候选
-  自动跳过**（兼任后端能力探测：jax 0.10.x 的 MGPU lowering 对逐行动态索引有
-  128 元素向量约束，会被自动跳过而落回 triton lowering）。
-  `RWKV_OPS_PALLAS_AUTOTUNE=0` 时取首个可编译候选。
+- **后端选择是确定性能力探测，不做计时择优**：按偏好顺序（默认后端 →
+  triton 后端）逐个编译探测，第一个能 lowering 的即为本机后端。jax < 0.9
+  的 GPU pallas 只有 triton lowering，探测自然落到 triton；未来 triton 后端
+  被移除后自然落到默认后端。可用 `RWKV_OPS_PALLAS_BACKEND=default|mgpu|triton`
+  强制覆盖（调试用）。
+- **autotune 只调已选定后端的性能参数**（按 shape key 缓存最优）：triton
+  后端调 `num_warps × num_stages`；MGPU 调 `lowering_semantics` /
+  `reduction_scratch_bytes`。`RWKV_OPS_PALLAS_AUTOTUNE=0` 关闭后用默认参数。
+  （jax 0.10.x 的 MGPU lowering 对逐行动态索引有 128 元素向量约束，探测会
+  失败并落回 triton lowering。）
 - **warmup 约定（重要）**：`custom_partitioning` 即使在 eager 调用下也会 trace
   内层函数，因此每个 custom_vjp 入口（primal / `_fwd` / `_bwd`）必须先用真实
   数组调用对应 warmup（`ensure_config`）解析配置；被 trace 的路径只查缓存，
