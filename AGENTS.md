@@ -582,9 +582,17 @@ __global__ void wkv7_forward(...)
   `triton_kernel.py`。
 - Pallas 内核只用公开 API（见 §4.5）。
 
-### 7.3 提交前检查清单
+### 7.4 C/C++ 代码格式化
+
+- C/CUDA 源文件（`.cu`、`.cuh`、`.cpp`、`.h`）使用 **clang-format** 以 LLVM style 格式化。
+- 统一入口：`scripts/format_cpp.sh`（依赖 `clang-format`，可 `pip install clang-format`）。
+- 提交/修改这些文件前，运行 `./scripts/format_cpp.sh`；IDE 可通过仓库根目录的 `.clang-format` 自动采用 LLVM style。
+- 注意：`clang-format` 只控制排版，不改变注释内容与命名规范；注释仍须遵守 §7.2 的约束。
+
+### 7.5 提交前检查清单
 
 - [ ] `ruff check .` 与 `ruff format --check .` 全绿。
+- [ ] `.cu/.cuh/.cpp/.h` 文件已运行 `./scripts/format_cpp.sh`（LLVM style）。
 - [ ] 版本号两处同步（`pyproject.toml` + `rwkv_ops/__init__.py`）。
 - [ ] 新增编译产物已加入 `.gitignore` 排除 / `MANIFEST.in` 包含规则。
 - [ ] 新增/修改的算子已在 `rwkv_ops/__init__.py` 正确暴露。
