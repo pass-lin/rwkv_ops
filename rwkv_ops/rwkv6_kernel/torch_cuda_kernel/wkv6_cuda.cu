@@ -255,7 +255,6 @@ __global__ void kernel_backward_103(
 }
 
 // RWKV-6 反向：计算 gw。沿时间双向扫描：先逆序累加 sbbbb 缓存，再正序组合得到
-// gw。
 template <typename F_in, typename F_out>
 __global__ void kernel_backward_201(
     const int B, const int T, const int C, const int H,
