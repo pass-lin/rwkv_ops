@@ -61,8 +61,8 @@ pip install rwkv_ops
 
 | 变量名 | 含义 | 取值 | 默认值 | 优先级 |
 |---|---|---|---|---|
-| `KERAS_BACKEND` | Keras 后端 | `jax` / `torch` / `tensorflow` / `numpy` | — | 低 |
-| `KERNEL_BACKEND` | 算子后端 | `jax` / `torch` / `tensorflow` / `numpy` | `torch` | **高** |
+| `KERAS_BACKEND` | Keras 后端 | `jax` / `torch` / `tensorflow` / `numpy` / `openvino` | — | 低 |
+| `KERNEL_BACKEND` | 算子后端 | `jax` / `torch` / `tensorflow` / `numpy` / `openvino` | `torch` | **高** |
 | `KERNEL_TYPE` | 实现类型 | `triton` / `cuda` / `native` / `pallas` | `cuda` | — |
 | `RWKV_OPS_PALLAS_AUTOTUNE` | Pallas autotune 开关 | `1` / `0` | `1` | — |
 
@@ -156,6 +156,7 @@ x_next = mhc_post_op(x_layer_out, x, h_post, h_res)
 | JAX       | ❌   | ✅     | ✅      |
 | TensorFlow| ❌   | ❌     | ✅      |
 | NumPy     | ❌   | ❌     | ✅      |
+| OpenVINO  | ❌   | ❌     | ✅      |
 
 > **实现备注：**
 > 1. **Torch 用户建议必开**：在 A100 上，`mhc_post_op` 相比 `torch.compile` 有约 3 倍提速，`mhc_pre_op` 约 8 倍。
@@ -240,6 +241,7 @@ if padding_mask is not None:
 | JAX         | ✅   | ✅     | ✅     | ✅     |
 | TensorFlow  | ❌    | ❌     | ✅     | ❌     |
 | NumPy       | ❌   | ❌     | ✅     | ❌     |
+| OpenVINO    | ❌   | ❌     | ✅     | ❌     |
 
 
 ---
@@ -290,6 +292,7 @@ def rwkv7_op_rnn(
 | JAX         | ✅   | ❌     | ✅     |
 | TensorFlow  | ❌    | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
 
 1. native实现我们直接复用了rwkv7_op的native实现
 2. **这个算子没有梯度**
@@ -353,6 +356,7 @@ def generalized_delta_rule_sn(
 | JAX         | ✅   | ✅     | ✅     | ✅     |
 | TensorFlow  | ❌    | ❌     | ✅     | ❌     |
 | NumPy       | ❌   | ❌     | ✅     | ❌     |
+| OpenVINO    | ❌   | ❌     | ✅     | ❌     |
 
 <a id="rwkv7_op_sn_rnn-使用方法"></a>
 ## rwkv7_op_sn_rnn 使用方法
@@ -399,6 +403,7 @@ for step in range(seq_len):
 | JAX         | ✅   | ❌     | ✅     |
 | TensorFlow  | ❌    | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
 
 1. 单步算子**没有梯度**。
 2. CUDA 版本会强制把输入 cast 到 bfloat16，与 rwkv7_op_rnn 行为一致。

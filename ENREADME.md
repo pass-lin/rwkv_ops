@@ -61,8 +61,8 @@ pip install rwkv_ops
 
 | Variable Name | Meaning | Values | Default | Priority |
 |---------------|---------|--------|---------|----------|
-| `KERAS_BACKEND` | Keras backend | `jax` / `torch` / `tensorflow` / `numpy` | — | Low |
-| `KERNEL_BACKEND` | Operator backend | `jax` / `torch` / `tensorflow` / `numpy` | `torch` | **High** |
+| `KERAS_BACKEND` | Keras backend | `jax` / `torch` / `tensorflow` / `numpy` / `openvino` | — | Low |
+| `KERNEL_BACKEND` | Operator backend | `jax` / `torch` / `tensorflow` / `numpy` / `openvino` | `torch` | **High** |
 | `KERNEL_TYPE` | Implementation type | `triton` / `cuda` / `native` / `pallas` | `cuda` | — |
 | `RWKV_OPS_PALLAS_AUTOTUNE` | Pallas autotune switch | `1` / `0` | `1` | — |
 
@@ -159,6 +159,7 @@ Distributes the core layer output back to multiple streams using gated weights a
 | JAX       | ❌   | ✅     | ✅      |
 | TensorFlow| ❌   | ❌     | ✅      |
 | NumPy     | ❌   | ❌     | ✅      |
+| OpenVINO  | ❌   | ❌     | ✅      |
 
 > **Implementation Notes:**
 > 1. **Recommended for Torch**: On A100, `mhc_post_op` is ~3x faster than `torch.compile`, and `mhc_pre_op` is ~8x faster.
@@ -243,6 +244,7 @@ if padding_mask is not None:
 | JAX         | ✅   | ❌     | ✅     | ✅     |
 | TensorFlow  | ❌    | ❌     | ✅     | ❌     |
 | NumPy       | ❌   | ❌     | ✅     | ❌     |
+| OpenVINO    | ❌   | ❌     | ✅     | ❌     |
 
 
 ---
@@ -300,6 +302,7 @@ def rwkv7_op_rnn(
 | JAX         | ✅   | ❌     | ✅     |
 | TensorFlow  | ❌    | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
 
 1. Native implementation reuses `rwkv7_op`’s native code.
 2. **This operator has no gradient support**.
@@ -367,6 +370,7 @@ Note: the inference kernel reads `tau` per chunk, so `tau` only needs to have le
 | JAX         | ✅   | ✅     | ✅     | ✅     |
 | TensorFlow  | ❌    | ❌     | ✅     | ❌     |
 | NumPy       | ❌   | ❌     | ✅     | ❌     |
+| OpenVINO    | ❌   | ❌     | ✅     | ❌     |
 
 ---
 
@@ -415,6 +419,7 @@ for step in range(seq_len):
 | JAX         | ✅   | ❌     | ✅     |
 | TensorFlow  | ❌    | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
 
 1. Single-step operator **has no gradient support**.
 2. The CUDA version casts inputs to bfloat16 internally, same as `rwkv7_op_rnn`.
@@ -501,6 +506,7 @@ y, final_state = rwkv6_op(
 | JAX         | ✅   | ❌     | ✅     |
 | TensorFlow  | ❌   | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
 
 JAX `cuda` backend is based on `jax.ffi` and supports JAX >= 0.4.31 (including 0.6.x). The CUDA path only accelerates `bfloat16`; non-`bfloat16` inputs trigger a warning and are cast to `bfloat16`, no longer falling back to `native`.
 

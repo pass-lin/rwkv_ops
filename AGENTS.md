@@ -56,8 +56,8 @@ MANIFEST.in                  # 源码分发清单
 
 | 变量 | 含义 | 可取值 | 默认值 | 优先级 |
 |---|---|---|---|---|
-| `KERNEL_BACKEND` | 算子后端 | `jax` / `torch` / `tensorflow` / `numpy` | `torch` | **最高** |
-| `KERAS_BACKEND` | Keras 后端 | `jax` / `torch` / `tensorflow` / `numpy` | — | 低 |
+| `KERNEL_BACKEND` | 算子后端 | `jax` / `torch` / `tensorflow` / `numpy` / `openvino` | `torch` | **最高** |
+| `KERAS_BACKEND` | Keras 后端 | `jax` / `torch` / `tensorflow` / `numpy` / `openvino` | — | 低 |
 | `KERNEL_TYPE` | 实现类型 | `triton` / `cuda` / `native` / `pallas` | `cuda` | — |
 | `RWKV_OPS_PALLAS_AUTOTUNE` | Pallas autotune 开关 | `1` / `0` | `1` | — |
 
@@ -91,6 +91,7 @@ GPU/TPU 时，rwkv7/rwkv7_sn 默认使用 `jax_pallas_kernel.py`；CPU 回落 na
 | JAX       | ✅   | ✅     | ✅     | ✅     |
 | TensorFlow| ❌   | ❌     | ✅     | ❌     |
 | NumPy     | ❌   | ❌     | ✅     | ❌     |
+| OpenVINO  | ❌   | ❌     | ✅     | ❌     |
 
 #### RWKV-7-SN `generalized_delta_rule_sn`
 
@@ -104,6 +105,7 @@ GPU/TPU 时，rwkv7/rwkv7_sn 默认使用 `jax_pallas_kernel.py`；CPU 回落 na
 | JAX       | ✅   | ❌     | ✅     |
 | TensorFlow| ❌   | ❌     | ✅     |
 | NumPy     | ❌   | ❌     | ✅     |
+| OpenVINO  | ❌   | ❌     | ✅     |
 
 #### RWKV-6 `rwkv6_op`
 
@@ -113,6 +115,7 @@ GPU/TPU 时，rwkv7/rwkv7_sn 默认使用 `jax_pallas_kernel.py`；CPU 回落 na
 | JAX       | ✅   | ❌     | ✅     |
 | TensorFlow| ❌   | ❌     | ✅     |
 | NumPy     | ❌   | ❌     | ✅     |
+| OpenVINO  | ❌   | ❌     | ✅     |
 
 > JAX `cuda` 后端通过 `jax.ffi` 实现，需要 JAX >= 0.4.31。
 > RWKV-6 的 `KERNEL_TYPE="triton"` 未实现，**静默回退 native**。
@@ -126,6 +129,7 @@ GPU/TPU 时，rwkv7/rwkv7_sn 默认使用 `jax_pallas_kernel.py`；CPU 回落 na
 | JAX       | ❌   | ✅     | ✅     |
 | TensorFlow| ❌   | ❌     | ✅     |
 | NumPy     | ❌   | ❌     | ✅     |
+| OpenVINO  | ❌   | ❌     | ✅     |
 
 ---
 
@@ -343,6 +347,7 @@ pytest tests/torch -v
 pytest tests/jax -v
 pytest tests/numpy -v
 pytest tests/tensorflow -v
+pytest tests/openvino -v
 
 # 跳过较重的 slow 测试
 pytest tests/jax -v -m "not slow"
@@ -352,7 +357,7 @@ pytest tests/jax -v -m "not slow"
   `tests.conftest`）。
 - 子目录 conftest 用 `setdefault` 设 `KERAS_BACKEND` 与 `CUDA_VISIBLE_DEVICES`，
   无需手动设环境变量；`KERNEL_TYPE` 不进环境变量，全经 fixture 显式传参。
-- markers：`torch` / `jax` / `numpy` / `tensorflow` / `slow`（编译类慢测试）。
+- markers：`torch` / `jax` / `numpy` / `tensorflow` / `openvino` / `slow`（编译类慢测试）。
 - **文件名唯一性**：`tests/` 各子目录无 `__init__.py`，跨目录同名文件会
   `import file mismatch`；统一带后端前缀（`test_jax_*` / `test_torch_*` 等）。
 

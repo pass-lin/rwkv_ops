@@ -25,6 +25,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "jax: require JAX")
     config.addinivalue_line("markers", "numpy: require Keras numpy backend")
     config.addinivalue_line("markers", "tensorflow: require TensorFlow")
+    config.addinivalue_line("markers", "openvino: require OpenVINO")
     config.addinivalue_line("markers", "slow: slow tests (e.g. compilation)")
 
 
