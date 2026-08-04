@@ -12,11 +12,7 @@ def get_torch_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
     current_dir_path = os.path.dirname(current_file_path)
 
     extra_cuda_cflags = [
-        "-fopenmp",
-        "-ffast-math",
-        "-munsafe-fp-atomics",
-        "--gpu-max-threads-per-block=120",
-        "-enable-vectorize-compares",
+        "--use_fast_math",
         f"-D_N_={head_size}",
         f"-D_T_={max_sequence_length}",
     ]
