@@ -1,12 +1,4 @@
-"""
-OpenVINO 后端 smoke 测试：验证各算子的 native 实现能在 OpenVINO 上运行。
-
-只检查"能否运行"（形状正确、无 NaN），不做逐元素数值对拍
-（数值基准由其它后端的 native 测试覆盖，同一套 keras.ops 代码）。
-
-运行方式：
-    pytest tests/openvino/ -v
-"""
+"""OpenVINO 后端 smoke 测试。"""
 
 import numpy as np
 import pytest

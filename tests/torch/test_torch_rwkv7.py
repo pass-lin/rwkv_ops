@@ -1,9 +1,4 @@
-"""
-RWKV-7 Torch CUDA kernel 数值测试。
-
-运行方式：
-    KERAS_BACKEND=torch pytest tests/torch/test_rwkv7.py -v
-"""
+"""RWKV-7 Torch CUDA kernel 数值测试。"""
 
 import numpy as np
 import pytest

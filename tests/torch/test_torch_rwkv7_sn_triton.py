@@ -1,9 +1,4 @@
-"""
-RWKV-7 State Neutralization Torch Triton kernel 数值测试。
-
-运行方式：
-    KERAS_BACKEND=torch pytest tests/torch/test_torch_rwkv7_sn_triton.py -v
-"""
+"""RWKV-7 State Neutralization Torch Triton kernel 数值测试。"""
 
 import warnings
 

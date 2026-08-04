@@ -226,7 +226,7 @@ def mhc_pre_op_fused(x, h_res_in, h_pre_in, num_iters=20, eps=1e-8):
         x: [B, T, n, C], bfloat16。多流输入。
         h_res_in: [B, T, n, n], float32。未归一化残差矩阵。
         h_pre_in: [B, T, n], float32。未激活聚合权重。
-        num_iters: int，默认 20。Sinkhorn-Knopp 迭代次数。
+        num_iters: int，默认 20。Sinkhorn-Knopp 轮数。
         eps: float，默认 1e-8。数值稳定常数。
 
     Returns:

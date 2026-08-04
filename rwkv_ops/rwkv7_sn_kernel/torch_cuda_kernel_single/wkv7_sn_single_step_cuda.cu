@@ -1,3 +1,4 @@
+// RWKV-7 State Neutralization PyTorch 单步 CUDA kernel。
 #include <cuda_bf16.h>
 #include <assert.h>
 #include <cstdint>
@@ -14,6 +15,20 @@ __device__ inline bf to_bf(const float &u) {
 
 typedef bf *__restrict__ F_;
 
+// RWKV-7-SN 单步前向 kernel（T=1），按 do_sn 选择是否执行 State Neutralization。
+//
+// 每个 block 处理一个 (batch, head)。
+//
+// Args:
+//   w_, q_, k_, v_, a_, b_: [B, H, C], bfloat16, row-major。
+//   tau_:  [B, H], float32。SN 阈值。
+//   do_sn_: [B], int8。非零表示对该 sample 执行 SN。
+//   h0_: [B, H, C, C], float32, row-major。初始状态。
+//   y_:  [B, H, C], bfloat16, row-major。输出 y。
+//   h1_: [B, H, C, C], float32, row-major。输出状态。
+//
+// Grid/block: grid (H, B)，block (C, 1)。
+// 编译期宏: _C_ 为 head_size。
 template<int C>
 __launch_bounds__(C, 2)
 __global__ void forward_single_step_sn_kernel(
@@ -85,6 +100,15 @@ __global__ void forward_single_step_sn_kernel(
     }
 }
 
+// PyTorch SN 单步前向 C 接口。
+//
+// Args:
+//   w, q, k, v, a, b: [B, H, C], bfloat16, row-major。
+//   tau:  [B, H], float32。
+//   do_sn: [B], int8。
+//   h0: [B, H, C, C], float32, row-major。初始状态。
+//   y:  [B, H, C], bfloat16, row-major。输出 y。
+//   h1: [B, H, C, C], float32, row-major。输出状态。
 void cuda_forward_single_step_sn(
     int B, int H,
     bf* w, bf* q, bf* k, bf* v, bf* a, bf* b,

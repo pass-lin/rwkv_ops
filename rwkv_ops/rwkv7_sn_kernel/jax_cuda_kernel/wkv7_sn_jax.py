@@ -1,15 +1,4 @@
-"""
-JAX 版 RWKV7-SN wkv kernel
-
-mask 为 [B, T//16] 的显式 chunk-level 标志，0 表示跳过 State Neutralization，1 表示执行。
-tau 为外部预处理后的 per-head per-chunk 阈值，返回 dtau 供上层 softplus 参数梯度。
-
-调度规则：
-- 当 ``output_final_state=False`` 或 ``mask=None`` 时，使用无 mask 算子（chunk 边界无条件
-  执行 State Neutralization），可节省 mask 读取/分支开销。
-- ``mask=None`` 且 ``output_final_state=True`` 时，会触发警告并返回 ``None`` 作为
-  final_state，避免用户误用可能被 padding 污染的 state。
-"""
+"""JAX 版 RWKV7-SN CUDA kernel 封装。"""
 
 from __future__ import annotations
 import pathlib
@@ -227,7 +216,7 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
             return jnp.transpose(x, (0, 2, 1, 3))
         return x
 
-    # -------------------- 训练前向（带 mask） --------------------
+    # 训练前向（带 mask）
     def _wkv7_sn_kernel_impl(w, q, k, v, a, b, tau, mask, h0):
         B, T, H, K = q.shape
         dtype = q.dtype
@@ -250,7 +239,7 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         partition=_create_partition(_wkv7_sn_kernel_impl),
     )
 
-    # -------------------- 训练前向（无 mask） --------------------
+    # 训练前向（无 mask）
     def _wkv7_sn_kernel_no_mask_impl(w, q, k, v, a, b, tau, h0):
         B, T, H, K = q.shape
         dtype = q.dtype
@@ -349,7 +338,7 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
 
     wk7_sn_kernel.defvjp(_fwd, _bwd)
 
-    # -------------------- 训练前向/反向（无 mask） --------------------
+    # 训练前向/反向（无 mask）
     @jax.custom_vjp
     def wk7_sn_kernel_no_mask(w, q, k, v, a, b, tau, h0):
         y, s, sa = _wkv7_sn_kernel_no_mask(w, q, k, v, a, b, tau, h0)
@@ -398,7 +387,7 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
 
     wk7_sn_kernel_no_mask.defvjp(_fwd_no_mask, _bwd_no_mask)
 
-    # -------------------- 推理前向（带 mask） --------------------
+    # 推理前向（带 mask）
     def _wkv7_sn_inference_kernel_impl(w, q, k, v, a, b, tau, mask, h0):
         B, T, H, K = q.shape
         dtype = q.dtype
@@ -420,7 +409,7 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         partition=_create_partition(_wkv7_sn_inference_kernel_impl),
     )
 
-    # -------------------- 推理前向（无 mask） --------------------
+    # 推理前向（无 mask）
     def _wkv7_sn_inference_kernel_no_mask_impl(w, q, k, v, a, b, tau, h0):
         B, T, H, K = q.shape
         dtype = q.dtype
@@ -444,7 +433,7 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         partition=_create_partition(_wkv7_sn_inference_kernel_no_mask_impl),
     )
 
-    # -------------------- 公共 API --------------------
+    # 公共 API
     def generalized_delta_rule_sn(
         r: jnp.ndarray,
         w: jnp.ndarray,
@@ -458,6 +447,27 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         output_final_state: bool = True,
         head_first: bool = False,
     ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
+        """带 State Neutralization 的 RWKV-7 广义 delta 规则（训练版）。
+
+        当 mask=None 且 output_final_state=True 时，会发出 UserWarning 并将
+        final_state 设为 None，避免 padding chunk 污染 state。
+
+        Args:
+            r, w, k, v, a, b: [B, T, H, K], bfloat16。T 必须被 16 整除。
+            tau: [B, T//16, H], float32。阈值，必须严格 > 1。
+            mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SN。
+            initial_state: [B, H, K, K], float32, 可选。None 则零初始化。
+            output_final_state: bool, 是否返回最终 state。
+            head_first: bool, 输入是否 head 维优先 ([B, H, T, K])。
+
+        Returns:
+            out: [B, T, H, K]，与输入同 dtype。
+            final_state: [B, H, K, K], float32。
+                output_final_state=False 或 mask=None 时不返回。
+
+        Raises:
+            ValueError: T 不被 16 整除，或 tau/mask 形状不匹配。
+        """
         dtype = r.dtype
         r = _transpose_head(r, head_first)
         w = _transpose_head(w, head_first)
@@ -527,13 +537,26 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         output_final_state: bool = True,
         head_first: bool = False,
     ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
-        """
-        State Neutralization 推理 / prefill 入口（无梯度）。
+        """带 State Neutralization 的 RWKV-7 推理入口（无梯度）。
 
-        与训练版本数值等价，但显存占用更低，因为不会分配反向所需的 `s`、`sa`
-        checkpoint。推理 kernel 按 chunk 读取 tau/mask，因此 `tau` 长度只需与
-        `T // 16` 一致，T 不需要被 16 整除；若需要任意长度 prefill，也可使用单步
-        RNN 接口。
+        与训练版本数值等价，但不保存反向 checkpoint，显存占用更低。
+        tau/mask 按 chunk 读取，T 不必被 16 整除。
+
+        Args:
+            r, w, k, v, a, b: [B, T, H, K], bfloat16。
+            tau: [B, T//16, H], float32。
+            mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SN。
+            initial_state: [B, H, K, K], float32, 可选。
+            output_final_state: bool, 是否返回最终 state。
+            head_first: bool, 输入是否 head 维优先 ([B, H, T, K])。
+
+        Returns:
+            out: [B, T, H, K]，与输入同 dtype。
+            final_state: [B, H, K, K], float32。
+                output_final_state=False 或 mask=None 时不返回。
+
+        Raises:
+            ValueError: tau/mask 形状不匹配。
         """
         dtype = r.dtype
         r = _transpose_head(r, head_first)

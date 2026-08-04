@@ -1,3 +1,4 @@
+// RWKV-7 PyTorch 单步 CUDA kernel。
 #include <cuda_bf16.h>
 #include <assert.h>
 #include <cstdint>
@@ -14,15 +15,30 @@ __device__ inline bf to_bf(const float &u) {
 
 typedef bf *__restrict__ F_;
 
-// Single-step forward kernel for T=1
-template<int C>  
+// RWKV-7 单步前向 kernel（T=1）。
+//
+// 每个 block 处理一个 (batch, head)，计算单步 delta rule 并输出 y 与下一状态。
+//
+// Args:
+//   w_, q_, k_, v_, a_, b_: [B, H, C], bfloat16, row-major。
+//   h0_: [B, H, C, C], float32, row-major。初始状态。
+//   y_:  [B, H, C], bfloat16, row-major。输出 y。
+//   h1_: [B, H, C, C], float32, row-major。输出状态。
+//
+// Grid/block:
+//   grid  (H, B)，每个 block 对应一个 (head, batch)。
+//   block (C, 1)，C 为 head_size。
+//
+// 编译期宏:
+//   _C_: head_size，必须被 4 整除。
+template<int C>
 __launch_bounds__(C, 2)
 __global__ void forward_single_step_kernel(
-    int H,  // Number of heads
+    int H,
     F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
-    float *h0_,  // (B, H, C, C) - input state
-    bf *y_,      // (B, H, C) - output
-    float *h1_   // (B, H, C, C) - output state
+    float *h0_,
+    bf *y_,
+    float *h1_
 ) {
 
     int bb = blockIdx.y;  // Batch index
@@ -87,13 +103,23 @@ __global__ void forward_single_step_kernel(
 }
 
 
+// PyTorch 单步前向 C 接口。
+//
+// Args:
+//   w, q, k, v, a, b: [B, H, C], bfloat16, row-major。
+//   h0: [B, H, C, C], float32, row-major。初始状态。
+//   y:  [B, H, C], bfloat16, row-major。输出 y。
+//   h1: [B, H, C, C], float32, row-major。输出状态。
+//
+// 编译期宏:
+//   _C_: head_size。
 void cuda_forward_single_step(
     int B, int H,
     bf *w, bf *q, bf *k, bf *v, bf *a, bf *b,
     float *h0, bf *y, float *h1
 ) {
-    dim3 blocks(H, B);  // (num_heads, batch_size)
-    dim3 threads(_C_);  // HEAD_SIZE
+    dim3 blocks(H, B);
+    dim3 threads(_C_);
 
     forward_single_step_kernel<_C_><<<blocks, threads>>>(
         H, w, q, k, v, a, b, h0, y, h1

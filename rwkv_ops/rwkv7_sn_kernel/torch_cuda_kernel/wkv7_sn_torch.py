@@ -1,3 +1,5 @@
+"""PyTorch 版 RWKV-7 State Neutralization CUDA kernel 封装。"""
+
 import os
 import warnings
 import torch
@@ -259,6 +261,28 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
         output_final_state=True,
         head_first=False,
     ):
+        """带 State Neutralization 的 RWKV-7 广义 delta 规则（训练版）。
+
+        非 CUDA 设备自动回退到 native 实现。
+        当 mask=None 且 output_final_state=True 时，会发出 UserWarning 并将
+        final_state 设为 None，避免 padding chunk 污染 state。
+
+        Args:
+            r, w, k, v, a, b: [B, T, H, K], bfloat16。T 必须被 16 整除。
+            tau: [B, T//16, H], float32。阈值，必须严格 > 1。
+            mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SN。
+            initial_state: [B, H, K, K], float32, 可选。
+            output_final_state: bool, 是否返回最终 state。
+            head_first: bool, 输入是否 head 维优先 ([B, H, T, K])。
+
+        Returns:
+            out: [B, T, H, K]，与输入同 dtype。
+            final_state: [B, H, K, K], float32。
+                output_final_state=False 或 mask=None 时不返回。
+
+        Raises:
+            ValueError: T 不被 16 整除，或 tau/mask 形状不匹配。
+        """
         if w.device.type != "cuda":
             from ..native_keras_op import generalized_delta_rule_sn
 
@@ -350,11 +374,27 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
         output_final_state=True,
         head_first=False,
     ):
-        """
-        State Neutralization 推理 / prefill 入口（无梯度）。
+        """带 State Neutralization 的 RWKV-7 推理入口（无梯度）。
 
-        与训练版本数值等价，但显存占用更低。推理 kernel 按 chunk 读取 tau/mask，
-        因此 `tau` 长度只需与 `T // 16` 一致，T 不需要被 16 整除。
+        仅支持 CUDA；不保存反向 checkpoint，显存占用低于训练版。
+        tau/mask 按 chunk 读取，T 不必被 16 整除。
+
+        Args:
+            r, w, k, v, a, b: [B, T, H, K], bfloat16。
+            tau: [B, T//16, H], float32。
+            mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SN。
+            initial_state: [B, H, K, K], float32, 可选。
+            output_final_state: bool, 是否返回最终 state。
+            head_first: bool, 输入是否 head 维优先 ([B, H, T, K])。
+
+        Returns:
+            out: [B, T, H, K]，与输入同 dtype。
+            final_state: [B, H, K, K], float32。
+                output_final_state=False 或 mask=None 时不返回。
+
+        Raises:
+            NotImplementedError: 非 CUDA 设备。
+            ValueError: tau/mask 形状不匹配。
         """
         if w.device.type != "cuda":
             raise NotImplementedError("Inference kernel only supports CUDA")

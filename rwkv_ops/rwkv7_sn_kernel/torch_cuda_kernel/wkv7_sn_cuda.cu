@@ -1,3 +1,5 @@
+// RWKV-7 State Neutralization PyTorch CUDA 训练/推理 kernel。
+
 #include <cuda_bf16.h>
 #include <assert.h>
 #include <cstdint>
@@ -13,8 +15,30 @@ __device__ inline bf to_bf(const float &u) {
 }
 typedef bf * __restrict__ F_;
 
-/* mask: [B, T//16]; m > 0 means apply State Neutralization at chunk boundary. */
+// mask: [B, T//16]，>0 表示在该 chunk 边界执行 State Neutralization。
 
+// RWKV-7-SN 带 mask 前向训练 kernel。
+//
+// 每个 block 处理一个 (batch, head)，顺序扫描 T 步；在每个 chunk 边界按 mask
+// 对 state 执行 State Neutralization（state = tau * tanh(state / tau)）。
+// 输出始终基于 SN 之前的 state。
+//
+// Args:
+//   w_, q_, k_, v_, a_, b_: [B, T, H, K], bfloat16, row-major。
+//   tau_: [B, T//16, H], float32, row-major。阈值，>1。
+//   mask_: [B, T//16], float32, row-major。>0 执行 SN。
+//   y_: [B, T, H, K], bfloat16, row-major。输出。
+//   s_: [B, T//16, H, K, K], float32, row-major。SN 之前的 state checkpoint。
+//   sa_: [B, T, H, K], float32, row-major。中间量 sa 供反向使用。
+//   h0_: [B, H, K, K], float32, row-major。初始 state。
+//
+// Grid / Block:
+//   grid  (H, B)，每个 block 对应一个 (head, batch)。
+//   block (_C_,)，每个线程处理 head_size 中一个位置。
+//
+// 编译期宏:
+//   _C_: head_size。
+//   _CHUNK_LEN_: chunk 长度，固定 16。
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_kernel_sn(int T, int H,
      F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
@@ -73,6 +97,29 @@ __global__ void forward_kernel_sn(int T, int H,
     }
 }
 
+// RWKV-7-SN 带 mask 反向训练 kernel。
+//
+// 每个 block 处理一个 (batch, head)，从 T-1 倒序扫描到 0；在 chunk 边界先对
+// dstate 乘 sech2 完成 SN 梯度回传，并规约得到 dtau。
+//
+// Args:
+//   w_, q_, k_, v_, a_, b_: [B, T, H, K], bfloat16, row-major。
+//   tau_: [B, T//16, H], float32, row-major。
+//   mask_: [B, T//16], float32, row-major。
+//   dy_: [B, T, H, K], bfloat16, row-major。输出梯度。
+//   s_: [B, T//16, H, K, K], float32, row-major。前向保存的 SN 之前 state checkpoint。
+//   sa_: [B, T, H, K], float32, row-major。前向保存的中间量 sa。
+//   dht_, dh0_: [B, H, K, K], float32, row-major。最终/初始 state 梯度。
+//   dtau_: [B, T//16, H], float32, row-major。tau 梯度。
+//   dw_, dq_, dk_, dv_, da_, db_: [B, T, H, K], bfloat16, row-major。各输入梯度。
+//
+// Grid / Block:
+//   grid  (H, B)，每个 block 对应一个 (head, batch)。
+//   block (_C_,)，每个线程处理 head_size 中一个位置。
+//
+// 编译期宏:
+//   _C_: head_size。
+//   _CHUNK_LEN_: chunk 长度，固定 16。
 template<int C> __launch_bounds__(C, 2)
 __global__ void backward_kernel_sn(int T, int H,
     F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
@@ -194,6 +241,26 @@ __global__ void backward_kernel_sn(int T, int H,
     }
 }
 
+// RWKV-7-SN 带 mask 前向推理 kernel。
+//
+// 每个 block 处理一个 (batch, head)，顺序扫描 T 步；在每个 chunk 边界按 mask
+// 对 state 执行 State Neutralization，只输出 y 与最终 state。
+//
+// Args:
+//   w_, q_, k_, v_, a_, b_: [B, T, H, K], bfloat16, row-major。
+//   tau_: [B, T//16, H], float32, row-major。
+//   mask_: [B, T//16], float32, row-major。>0 执行 SN。
+//   y_: [B, T, H, K], bfloat16, row-major。输出。
+//   s_: [B, H, K, K], float32, row-major。最终 state。
+//   h0_: [B, H, K, K], float32, row-major。初始 state。
+//
+// Grid / Block:
+//   grid  (H, B)，每个 block 对应一个 (head, batch)。
+//   block (_C_,)，每个线程处理 head_size 中一个位置。
+//
+// 编译期宏:
+//   _C_: head_size。
+//   _CHUNK_LEN_: chunk 长度，固定 16。
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_inference_kernel_sn(int T, int H,
                                              F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
@@ -248,7 +315,26 @@ __global__ void forward_inference_kernel_sn(int T, int H,
     for (int j = 0; j < C; ++j) s_[base + j] = state[j];
 }
 
-/*  无 mask 训练前向 Kernel  */
+// RWKV-7-SN 无 mask 前向训练 kernel。
+//
+// 每个 block 处理一个 (batch, head)，顺序扫描 T 步；在每个 chunk 边界无条件对
+// state 执行 State Neutralization。输出始终基于 SN 之前的 state。
+//
+// Args:
+//   w_, q_, k_, v_, a_, b_: [B, T, H, K], bfloat16, row-major。
+//   tau_: [B, T//16, H], float32, row-major。
+//   y_: [B, T, H, K], bfloat16, row-major。输出。
+//   s_: [B, T//16, H, K, K], float32, row-major。SN 之前的 state checkpoint。
+//   sa_: [B, T, H, K], float32, row-major。中间量 sa 供反向使用。
+//   h0_: [B, H, K, K], float32, row-major。初始 state。
+//
+// Grid / Block:
+//   grid  (H, B)，每个 block 对应一个 (head, batch)。
+//   block (_C_,)，每个线程处理 head_size 中一个位置。
+//
+// 编译期宏:
+//   _C_: head_size。
+//   _CHUNK_LEN_: chunk 长度，固定 16。
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_kernel_sn_no_mask(int T, int H,
                                           F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
@@ -305,7 +391,28 @@ __global__ void forward_kernel_sn_no_mask(int T, int H,
     }
 }
 
-/*  无 mask 训练反向 Kernel  */
+// RWKV-7-SN 无 mask 反向训练 kernel。
+//
+// 每个 block 处理一个 (batch, head)，从 T-1 倒序扫描到 0；在 chunk 边界无条件对
+// dstate 乘 sech2 完成 SN 梯度回传，并规约得到 dtau。
+//
+// Args:
+//   w_, q_, k_, v_, a_, b_: [B, T, H, K], bfloat16, row-major。
+//   tau_: [B, T//16, H], float32, row-major。
+//   dy_: [B, T, H, K], bfloat16, row-major。输出梯度。
+//   s_: [B, T//16, H, K, K], float32, row-major。前向保存的 SN 之前 state checkpoint。
+//   sa_: [B, T, H, K], float32, row-major。前向保存的中间量 sa。
+//   dht_, dh0_: [B, H, K, K], float32, row-major。
+//   dtau_: [B, T//16, H], float32, row-major。tau 梯度。
+//   dw_, dq_, dk_, dv_, da_, db_: [B, T, H, K], bfloat16, row-major。各输入梯度。
+//
+// Grid / Block:
+//   grid  (H, B)，每个 block 对应一个 (head, batch)。
+//   block (_C_,)，每个线程处理 head_size 中一个位置。
+//
+// 编译期宏:
+//   _C_: head_size。
+//   _CHUNK_LEN_: chunk 长度，固定 16。
 template<int C> __launch_bounds__(C, 2)
 __global__ void backward_kernel_sn_no_mask(int T, int H,
                                            F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
@@ -425,7 +532,25 @@ __global__ void backward_kernel_sn_no_mask(int T, int H,
     }
 }
 
-/*  无 mask 推理 Kernel  */
+// RWKV-7-SN 无 mask 前向推理 kernel。
+//
+// 每个 block 处理一个 (batch, head)，顺序扫描 T 步；在每个 chunk 边界无条件对
+// state 执行 State Neutralization，只输出 y 与最终 state。
+//
+// Args:
+//   w_, q_, k_, v_, a_, b_: [B, T, H, K], bfloat16, row-major。
+//   tau_: [B, T//16, H], float32, row-major。
+//   y_: [B, T, H, K], bfloat16, row-major。输出。
+//   s_: [B, H, K, K], float32, row-major。最终 state。
+//   h0_: [B, H, K, K], float32, row-major。初始 state。
+//
+// Grid / Block:
+//   grid  (H, B)，每个 block 对应一个 (head, batch)。
+//   block (_C_,)，每个线程处理 head_size 中一个位置。
+//
+// 编译期宏:
+//   _C_: head_size。
+//   _CHUNK_LEN_: chunk 长度，固定 16。
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_inference_kernel_sn_no_mask(int T, int H,
                                                     F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
@@ -478,7 +603,16 @@ __global__ void forward_inference_kernel_sn_no_mask(int T, int H,
 }
 
 
-/*  Host 接口  */
+// RWKV-7-SN 带 mask 前向训练 host 包装函数。
+//
+// Args:
+//   w, q, k, v, a, b: [B, T, H, K], bfloat16。
+//   tau: [B, T//16, H], float32。
+//   mask: [B, T//16], float32。
+//   y, s, sa, h0: 形状/dtype 见对应 kernel。
+//
+// 编译期宏:
+//   _C_: head_size；_CHUNK_LEN_: chunk 长度，固定 16。
 void cuda_forward_sn(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, bf* a, bf* b,
                      const float* tau, const float* mask,
                      bf* y, float* s, float* sa, float* h0) {
@@ -488,6 +622,16 @@ void cuda_forward_sn(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, bf* a, bf*
     forward_kernel_sn<C><<<blocks, threads>>>(T, H, w, q, k, v, a, b, tau, mask, y, s, sa, h0);
 }
 
+// RWKV-7-SN 带 mask 反向训练 host 包装函数。
+//
+// Args:
+//   w, q, k, v, a, b, dy: [B, T, H, K], bfloat16。
+//   tau: [B, T//16, H], float32；mask: [B, T//16], float32。
+//   s, sa, dht, dh0, dtau: float32，形状见对应 kernel。
+//   dw, dq, dk, dv, da, db: [B, T, H, K], bfloat16。
+//
+// 编译期宏:
+//   _C_: head_size；_CHUNK_LEN_: chunk 长度，固定 16。
 void cuda_backward_sn(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, bf* a, bf* b,
                       const float* tau, const float* mask, bf* dy, float* s, float* sa,
                       float* dht, float* dh0, float* dtau,
@@ -500,6 +644,15 @@ void cuda_backward_sn(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, bf* a, bf
         dw, dq, dk, dv, da, db);
 }
 
+// RWKV-7-SN 带 mask 前向推理 host 包装函数。
+//
+// Args:
+//   w, q, k, v, a, b: [B, T, H, K], bfloat16。
+//   tau: [B, T//16, H], float32；mask: [B, T//16], float32。
+//   y: [B, T, H, K], bfloat16；s, h0: [B, H, K, K], float32。
+//
+// 编译期宏:
+//   _C_: head_size；_CHUNK_LEN_: chunk 长度，固定 16。
 void cuda_forward_inference_sn(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, bf* a, bf* b,
                                const float* tau, const float* mask,
                                bf* y, float* s, float* h0) {
@@ -509,7 +662,15 @@ void cuda_forward_inference_sn(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, 
     forward_inference_kernel_sn<C><<<blocks, threads>>>(T, H, w, q, k, v, a, b, tau, mask, y, s, h0);
 }
 
-/*  Host 接口（无 mask）  */
+// RWKV-7-SN 无 mask 前向训练 host 包装函数。
+//
+// Args:
+//   w, q, k, v, a, b: [B, T, H, K], bfloat16。
+//   tau: [B, T//16, H], float32。
+//   y, s, sa, h0: 形状/dtype 见对应 kernel。
+//
+// 编译期宏:
+//   _C_: head_size；_CHUNK_LEN_: chunk 长度，固定 16。
 void cuda_forward_sn_no_mask(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, bf* a, bf* b,
                              const float* tau,
                              bf* y, float* s, float* sa, float* h0) {
@@ -519,6 +680,16 @@ void cuda_forward_sn_no_mask(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, bf
     forward_kernel_sn_no_mask<C><<<blocks, threads>>>(T, H, w, q, k, v, a, b, tau, y, s, sa, h0);
 }
 
+// RWKV-7-SN 无 mask 反向训练 host 包装函数。
+//
+// Args:
+//   w, q, k, v, a, b, dy: [B, T, H, K], bfloat16。
+//   tau: [B, T//16, H], float32。
+//   s, sa, dht, dh0, dtau: float32，形状见对应 kernel。
+//   dw, dq, dk, dv, da, db: [B, T, H, K], bfloat16。
+//
+// 编译期宏:
+//   _C_: head_size；_CHUNK_LEN_: chunk 长度，固定 16。
 void cuda_backward_sn_no_mask(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, bf* a, bf* b,
                               const float* tau, bf* dy, float* s, float* sa,
                               float* dht, float* dh0, float* dtau,
@@ -531,6 +702,15 @@ void cuda_backward_sn_no_mask(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, b
         dw, dq, dk, dv, da, db);
 }
 
+// RWKV-7-SN 无 mask 前向推理 host 包装函数。
+//
+// Args:
+//   w, q, k, v, a, b: [B, T, H, K], bfloat16。
+//   tau: [B, T//16, H], float32。
+//   y: [B, T, H, K], bfloat16；s, h0: [B, H, K, K], float32。
+//
+// 编译期宏:
+//   _C_: head_size；_CHUNK_LEN_: chunk 长度，固定 16。
 void cuda_forward_inference_sn_no_mask(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, bf* a, bf* b,
                                        const float* tau,
                                        bf* y, float* s, float* h0) {

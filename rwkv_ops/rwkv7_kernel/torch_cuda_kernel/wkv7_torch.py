@@ -1,3 +1,5 @@
+"""PyTorch 版 RWKV-7 chunkwise CUDA kernel 封装。"""
+
 import os
 import torch
 from torch.utils.cpp_extension import load
@@ -38,9 +40,7 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
         extra_cuda_cflags=flags,
     )
 
-    # ============================================================
     # 原版无 Mask Autograd Function（内部使用）
-    # ============================================================
     class WindBackstepping(torch.autograd.Function):
         @staticmethod
         def forward(ctx, w, q, k, v, a, b, h0):
@@ -92,9 +92,7 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
                 dh0,
             )
 
-    # ============================================================
     # 带 Mask Autograd Function（内部使用）
-    # ============================================================
     class WindBacksteppingWithMask(torch.autograd.Function):
         @staticmethod
         def forward(ctx, w, q, k, v, a, b, mask, h0):
@@ -151,9 +149,7 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
                 dh0,  # mask的梯度为None
             )
 
-    # ============================================================
     # 统一对外接口：Training（根据mask自动选择）
-    # ============================================================
     def generalized_delta_rule(
         r,
         w,
@@ -166,10 +162,24 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
         head_first: bool = False,
         mask=None,
     ):
-        """
-        统一的RWKV7 Delta Rule前向/反向接口
+        """RWKV-7 chunkwise 广义 delta 规则（训练版）。
+
+        非 CUDA 设备自动回退到 native 实现。
+
         Args:
-            mask: None时使用无mask版本，否则使用mask版本（自动转换为fp32）
+            r, w, k, v, a, b: [B, T, H, K], bfloat16。T 必须被 16 整除。
+            initial_state: [B, H, K, K], float32, 可选。None 则零初始化。
+            output_final_state: bool, 是否返回最终 state。
+            head_first: bool, 输入是否 head 维优先 ([B, H, T, K])。
+            mask: [B, T], float32 或 None。>0 更新状态、0 冻结状态。
+
+        Returns:
+            out: [B, T, H, K]，与输入同 dtype。
+            final_state: [B, H, K, K], float32。
+                output_final_state=False 时不返回。
+
+        Raises:
+            ValueError: T 不被 16 整除。
         """
         # CPU回退
         if w.device.type != "cuda":
@@ -218,9 +228,7 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
 
         return (out, state) if output_final_state else out
 
-    # ============================================================
     # 原版推理（内部）
-    # ============================================================
     class Wkv7Inference(torch.autograd.Function):
         @staticmethod
         def forward(ctx, w, q, k, v, a, b, h0):
@@ -238,9 +246,8 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
         def backward(ctx, *args):
             raise NotImplementedError
 
-    # ============================================================
     # 带Mask推理（内部）
-    # ============================================================
+
     class Wkv7InferenceWithMask(torch.autograd.Function):
         @staticmethod
         def forward(ctx, w, q, k, v, a, b, mask, h0):
@@ -273,6 +280,25 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
         output_final_state: bool = True,
         mask=None,
     ):
+        """RWKV-7 chunkwise 广义 delta 规则推理入口（无梯度）。
+
+        仅支持 CUDA；不保存反向 checkpoint，因此显存低于训练版。
+
+        Args:
+            r, w, k, v, a, b: [B, T, H, K], bfloat16。
+            initial_state: [B, H, K, K], float32, 可选。None 则零初始化。
+            head_first: bool, 输入是否 head 维优先 ([B, H, T, K])。
+            output_final_state: bool, 是否返回最终 state。
+            mask: [B, T], float32 或 None。>0 更新状态、0 冻结状态。
+
+        Returns:
+            out: [B, T, H, K]，与输入同 dtype。
+            final_state: [B, H, K, K], float32。
+                output_final_state=False 时不返回。
+
+        Raises:
+            NotImplementedError: 非 CUDA 设备。
+        """
         if w.device.type != "cuda":
             raise NotImplementedError("Inference kernel only supports CUDA")
 

@@ -190,7 +190,6 @@ def sinkhorn_aggregate_bwd_kernel(
     x_ptr,  # [Total_BT, n, C]
     h_res_in_ptr,  # [Total_BT, n, n]
     h_pre_in_ptr,  # [Total_BT, n]
-    # --- 2. 输出指针 ---
     grad_x_ptr,  # [Total_BT, n, C]
     grad_h_res_in_ptr,  # [Total_BT, n, n]
     grad_h_pre_in_ptr,  # [Total_BT, n]

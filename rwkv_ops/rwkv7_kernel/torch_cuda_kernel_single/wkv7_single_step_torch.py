@@ -1,3 +1,5 @@
+"""PyTorch 版 RWKV-7 单步 CUDA kernel 封装。"""
+
 import os
 import torch
 from torch.utils.cpp_extension import load
@@ -62,11 +64,23 @@ def get_torch_generalized_delta_rule_single_step(HEAD_SIZE=64):
         output_final_state: bool = True,
         head_first: bool = False,
     ):
-        """
-        单步 RWKV7 前向，输入形状：
-          head_first=False  -> (B, 1, H, K)   **默认**
-          head_first=True   -> (B, H, 1, K)
-        输出形状与输入保持一致。
+        """RWKV-7 单步广义 delta 规则（仅前向）。
+
+        仅支持 CUDA；非 CUDA 设备自动回退到 native 实现。
+
+        Args:
+            r, w, k, v, a, b: [B, 1, H, K] 或 [B, H, 1, K]，bfloat16。
+            initial_state: [B, H, K, K], float32, 可选。None 则零初始化。
+            output_final_state: bool, 是否返回最终 state。
+            head_first: bool, 输入是否 head 维优先 ([B, H, 1, K])。
+
+        Returns:
+            out: [B, 1, H, K]，与输入同 dtype。
+            final_state: [B, H, K, K], float32。
+                output_final_state=False 时不返回。
+
+        Raises:
+            NotImplementedError: 单步 kernel 不支持反向。
         """
         if w.device.type != "cuda":
             from ..native_keras_op import generalized_delta_rule
@@ -81,7 +95,7 @@ def get_torch_generalized_delta_rule_single_step(HEAD_SIZE=64):
                 initial_state=initial_state,
                 output_final_state=output_final_state,
             )
-        # 1. 统一先转成 (B, H, K)
+        # 统一转成 (B, H, K) 以调用单步 kernel
         if head_first:  # (B, H, 1, K) -> (B, H, K)
             r = r.squeeze(2)
             w = w.squeeze(2)
@@ -103,7 +117,7 @@ def get_torch_generalized_delta_rule_single_step(HEAD_SIZE=64):
                 B, H, K, K, dtype=torch.float32, device=r.device
             )
 
-        # 2. 计算
+        # 调用单步 kernel 并恢复 T 维度
         y, h1 = run_single_step(w, r, k, v, a, b, initial_state)  # y:(B,H,K)
         y = y.unsqueeze(1)  # (B, 1, H, K)
 

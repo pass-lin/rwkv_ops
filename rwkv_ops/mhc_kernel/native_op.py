@@ -207,7 +207,7 @@ def mhc_pre_op_fused(
         x: [B, T, n, C]，任意实 dtype。
         h_res_reshaped: [B, T, n, n]，任意实 dtype。未归一化残差矩阵。
         h_pre_raw: [B, T, n]，任意实 dtype。未激活聚合权重。
-        num_iters: int，默认 20。Sinkhorn-Knopp 迭代次数。
+        num_iters: int，默认 20。Sinkhorn-Knopp 轮数。
         eps: float，默认 1e-8。数值稳定常数。
 
     Returns:

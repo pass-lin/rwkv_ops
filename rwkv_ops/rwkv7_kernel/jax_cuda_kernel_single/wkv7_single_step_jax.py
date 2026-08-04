@@ -1,7 +1,4 @@
-"""
-JAX 版 RWKV7 单步 wkv kernel（仅前向传播）
-延迟编译 CUDA 扩展，专为 T=1 场景优化
-"""
+"""JAX 版 RWKV7 单步 CUDA kernel 封装。"""
 
 from __future__ import annotations
 import pathlib
@@ -15,17 +12,16 @@ from typing import Optional, Tuple, Union
 from jax.experimental.custom_partitioning import custom_partitioning
 from jax.sharding import NamedSharding, PartitionSpec
 
-# ---------- 延迟编译（改到当前目录） ----------
+# 延迟编译
 _CURRENT_DIR = pathlib.Path(__file__).parent.absolute()
 
 # 用于绕过 glibc 2.41+ 与 CUDA 13.1 的 rsqrt noexcept 冲突
 _NVCC_WRAPPER = _CURRENT_DIR.parents[1] / "cuda_tools" / "nvcc_wrap"
 
-# =========================================================================
+
 # SPMD 切分规则 (Einsum 风格)
 # b=Batch, h=Head, k/m=HeadDim
 # 支持 DP（batch 维切分）与 TP（head 维切分）
-# =========================================================================
 FWD_RULE = "b h k, b h k, b h k, b h k, b h k, b h k, b h k m -> b h k, b h k m"
 
 
@@ -134,7 +130,7 @@ def get_jax_generalized_delta_rule_single_step(HEAD_SIZE=64):
         platform="CUDA",
     )
 
-    # ---------- 工具 ----------
+    # 工具
     def _transpose_head(x: jnp.ndarray, head_first: bool) -> jnp.ndarray:
         """(B, 1, H, K) <-> (B, H, 1, K)"""
         if head_first:
@@ -142,7 +138,7 @@ def get_jax_generalized_delta_rule_single_step(HEAD_SIZE=64):
         x = jnp.asarray(x, dtype=jnp.bfloat16)
         return x
 
-    # ---------- 前向 kernel ----------
+    # 前向 kernel
     def _wkv7_single_step_impl(
         w: jnp.ndarray,
         q: jnp.ndarray,
@@ -192,7 +188,7 @@ def get_jax_generalized_delta_rule_single_step(HEAD_SIZE=64):
         final_state = s  # 单步后直接返回状态
         return (y, final_state)
 
-    # ---------- 主接口 ----------
+    # 主接口
     def generalized_delta_rule_single_step(
         r: jnp.ndarray,
         w: jnp.ndarray,
@@ -204,16 +200,23 @@ def get_jax_generalized_delta_rule_single_step(HEAD_SIZE=64):
         output_final_state: bool = True,
         head_first: bool = False,
     ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
-        """
-        单步广义 delta 规则（仅前向）
-        参数:
-            r,w,k,v,a,b: 输入张量，形状必须为 (B, 1, H, K) 或 (B, H, 1, K)
-            initial_state: 可选 (B, H, K, K) 初始状态，None 则零初始化
-            output_final_state: 是否同时返回最后状态
-            head_first: 是否将 head 维提前
-        返回:
-            out: (B, 1, H, K)  与输入 dtype 一致
-            last_state: (B, H, K, K) 当 output_final_state=True
+        """RWKV-7 单步广义 delta 规则（仅前向）。
+
+        仅支持 CUDA；非 CUDA 后端请使用 native 实现。
+
+        Args:
+            r, w, k, v, a, b: [B, 1, H, K] 或 [B, H, 1, K]，bfloat16。
+            initial_state: [B, H, K, K], float32, 可选。None 则零初始化。
+            output_final_state: bool, 是否返回最终 state。
+            head_first: bool, 输入是否 head 维优先 ([B, H, 1, K])。
+
+        Returns:
+            out: [B, 1, H, K]，与输入同 dtype。
+            last_state: [B, H, K, K], float32。
+                output_final_state=False 时不返回。
+
+        Raises:
+            ValueError: T 不等于 1。
         """
         # 统一转 (B, 1, H, K) 并验证 T=1
         r = _transpose_head(r, head_first)

@@ -1,12 +1,4 @@
-"""
-RWKV-6 Torch CUDA kernel 数值测试。
-
-运行方式：
-    KERAS_BACKEND=torch pytest tests/torch/test_rwkv6.py -v
-
-注意：CUDA kernel 只支持 bfloat16 加速，native 参考实现也统一使用 bfloat16，
-      因此所有输入均为 bfloat16，按 bf16 精度对比。
-"""
+"""RWKV-6 Torch CUDA kernel 数值测试。"""
 
 import pytest
 import torch

@@ -3,10 +3,10 @@ project(wkv7_sn LANGUAGES CXX CUDA)
 
 find_package(CUDAToolkit REQUIRED)
 
-# ---------- 1. 找到 Python ----------
+# 找到 Python 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
-# ---------- 2. 取 XLA 头文件路径 ----------
+# 取 XLA 头文件路径 
 execute_process(
   COMMAND "${Python3_EXECUTABLE}" -c "from jax import ffi; print(ffi.include_dir())"
   OUTPUT_VARIABLE XLA_INCLUDE_DIR
@@ -17,16 +17,16 @@ if(NOT XLA_INCLUDE_DIR)
 endif()
 message(STATUS "XLA include directory: ${XLA_INCLUDE_DIR}")
 
-# ---------- 3. 生成共享库 ----------
+# 生成共享库 
 add_library(wkv7_sn SHARED wkv7_sn_ffi.cu)
 
-# 3-1. 头文件搜索路径
+# 头文件搜索路径
 target_include_directories(wkv7_sn PRIVATE ${XLA_INCLUDE_DIR})
 
-# 3-2. 链接 CUDA 运行时
+# 链接 CUDA 运行时
 target_link_libraries(wkv7_sn PRIVATE CUDA::cudart)
 
-# 3-3. 关键：C++17 / CUDA17 标准
+# 关键：C++17 / CUDA17 标准
 target_compile_features(wkv7_sn PUBLIC cxx_std_17)
 set_target_properties(wkv7_sn PROPERTIES
     CUDA_STANDARD          17
@@ -35,7 +35,7 @@ set_target_properties(wkv7_sn PROPERTIES
     PREFIX                 ""        # 去掉默认的 "lib" 前缀
 )
 
-# ---------- 4. 安装 ----------
+# 安装 
 install(TARGETS wkv7_sn
         LIBRARY DESTINATION "${CMAKE_SOURCE_DIR}"
         RUNTIME DESTINATION "${CMAKE_SOURCE_DIR}")

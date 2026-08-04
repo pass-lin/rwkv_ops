@@ -1,3 +1,4 @@
+// RWKV-7 JAX FFI 单步 CUDA kernel。
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <xla/ffi/api/ffi.h>
@@ -7,7 +8,7 @@
 namespace ffi = xla::ffi;
 using bf = __nv_bfloat16;
 
-/* -------------------- 设备端辅助 -------------------- */
+// 设备端辅助函数。
 __device__ inline float to_float(const bf &u) {
     return __bfloat162float(u);
 }
@@ -16,8 +17,23 @@ __device__ inline bf to_bf(const float &u) {
 }
 typedef bf *__restrict__ F_;
 
-/* -------------------- 前向 Kernel（修复） -------------------- */
-template<int C> 
+// RWKV-7 单步前向 kernel（T=1）。
+//
+// 每个 block 处理一个 (batch, head)，计算单步 delta rule 并输出 y 与下一状态。
+//
+// Args:
+//   w_, q_, k_, v_, a_, b_: [B, H, C], bfloat16, row-major。
+//   h0_: [B, H, C, C], float32, row-major。初始状态。
+//   y_:  [B, H, C], bfloat16, row-major。输出 y。
+//   s_:  [B, H, C, C], float32, row-major。输出状态。
+//
+// Grid/block:
+//   grid  (H, B)，每个 block 对应一个 (head, batch)。
+//   block (C, 1)，C 为 head_size。
+//
+// 编译期宏:
+//   _C_: head_size。
+template<int C>
 __launch_bounds__(C, 2)
 __global__ void forward_kernel_single_step(
     int B, int H,
@@ -64,9 +80,20 @@ __global__ void forward_kernel_single_step(
     for (int j = 0; j < C; ++j) s_[s_base + j] = state[j];
 }
 
-/* -------------------- 反向 Kernel（补充） -------------------- */
-template<int C> 
-__launch_bounds__(C, 2) 
+// RWKV-7 单步反向 kernel（T=1）。
+//
+// 每个 block 处理一个 (batch, head)，计算单步 delta rule 的输入梯度。
+//
+// Args:
+//   w_, q_, k_, v_, dy_: [B, H, C], bfloat16, row-major。
+//   s_:   [B, H, C, C], float32, row-major。前向保存的状态。
+//   dht_: [B, H, C, C], float32, row-major。最终状态梯度。
+//   dw_, dq_, dk_, dv_, da_, db_: [B, H, C], bfloat16, row-major。输出梯度。
+//
+// Grid/block: grid (H, B)，block (C, 1)。
+// 编译期宏: _C_ 为 head_size。
+template<int C>
+__launch_bounds__(C, 2)
 __global__ void backward_kernel_single_step(
     int B, int H,
     F_ w_, F_ q_, F_ k_, F_ v_, F_ dy_,
@@ -91,7 +118,7 @@ __global__ void backward_kernel_single_step(
     dy[i] = to_float(dy_[ind]);
     __syncthreads();
 
-    // 从 s_ 加载 stateT（float4 优化可在此处添加）
+    // 从 s_ 加载 stateT
     int64_t s_base = ((int64_t)bb * H + hh) * C * C + i * C;
 #pragma unroll
     for (int j = 0; j < C; ++j) stateT[j] = s_[s_base + j];
@@ -116,7 +143,13 @@ __global__ void backward_kernel_single_step(
     dv_[ind] = to_bf(dv_val);
 }
 
-/* -------------------- Host 函数（修复调用） -------------------- */
+// JAX FFI Host 函数：单步前向。
+//
+// Args:
+//   w, q, k, v, a, b: [B, H, C], bfloat16。
+//   h0: [B, H, C, C], float32。初始状态。
+//   y:  [B, H, C], bfloat16。输出 y。
+//   s:  [B, H, C, C], float32。输出状态。
 static ffi::Error WKV7SingleStepFwdHost(
     cudaStream_t stream,
     ffi::Buffer<ffi::BF16> w,
@@ -131,11 +164,11 @@ static ffi::Error WKV7SingleStepFwdHost(
 {
     auto dims = w.dimensions();
     int B = dims[0], H = dims[1];
-    constexpr int C = _C_;  // 从编译选项获取
+    constexpr int C = _C_;
     dim3 block(C);
     dim3 grid(H, B);
 
-    // ✅ 修复：显式指定模板参数 <_C_>
+    // 显式指定模板参数，避免编译器在 device 函数指针场景推断失败。
     forward_kernel_single_step<_C_><<<grid, block, 0, stream>>>(
         B, H,
         reinterpret_cast<bf *>(w.typed_data()),
@@ -155,7 +188,7 @@ static ffi::Error WKV7SingleStepFwdHost(
     return ffi::Error::Success();
 }
 
-/* -------------------- FFI 符号注册 -------------------- */
+// 注册 JAX FFI 符号。
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
     Wkv7SingleStepFwd, WKV7SingleStepFwdHost,
     ffi::Ffi::Bind()

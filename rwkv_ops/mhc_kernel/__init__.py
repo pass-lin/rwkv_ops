@@ -71,7 +71,7 @@ def get_mhc_kernel(KERNEL_TYPE="native"):
             phi: [n * hidden_size, M]，BF16。投影矩阵，M = n * (n + 2)。
             bias_pre, bias_post, bias_res: [M], float32。各分支线性偏置。
             n: int。流数量。
-            num_iters: int，默认 20。Sinkhorn-Knopp 迭代次数。
+            num_iters: int，默认 20。Sinkhorn-Knopp 轮数。
             eps: float，默认 1e-8。Sinkhorn-Knopp 数值稳定常数。
 
         Returns:
