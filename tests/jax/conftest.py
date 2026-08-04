@@ -1,13 +1,11 @@
-"""
-JAX 后端测试的 session 级配置。
-
-注意：必须在 import keras / rwkv_ops 之前设定 KERAS_BACKEND。
-"""
+"""JAX 后端测试的 session 级配置。"""
 
 import os
 import shutil
 import subprocess
 import sys
+
+# 必须在 import keras / rwkv_ops 之前设定 KERAS_BACKEND。
 
 
 def _set_cuda_host_compiler():
@@ -33,7 +31,7 @@ def _set_cuda_host_compiler():
     if os.environ.get("CC") and os.environ.get("CXX") and os.environ.get("CUDAHOSTCXX"):
         return
 
-    # 默认 gcc 已存在且版本 <= 13，一般可直接使用
+    # 系统默认 gcc 版本 <= 13 时视为与 CUDA 兼容，直接沿用。
     default_major = _major_version("gcc")
     if default_major is not None and default_major <= 13:
         return
@@ -78,6 +76,14 @@ pytest.importorskip("jax.numpy")
 
 @pytest.fixture(scope="session")
 def jax_op(sample_shape):
+    """RWKV-6 JAX CUDA 算子。
+
+    Args:
+        sample_shape: tuple, (B, T, H, N)。
+
+    Returns:
+        Callable: HEAD_SIZE=N 的 RWKV-6 CUDA kernel。
+    """
     from rwkv_ops import get_rwkv6_kernel
 
     _, _, _, N = sample_shape
@@ -86,6 +92,14 @@ def jax_op(sample_shape):
 
 @pytest.fixture(scope="session")
 def native_op(sample_shape):
+    """RWKV-6 native Keras 算子。
+
+    Args:
+        sample_shape: tuple, (B, T, H, N)。
+
+    Returns:
+        Callable: HEAD_SIZE=N 的 RWKV-6 native kernel。
+    """
     from rwkv_ops import get_rwkv6_kernel
 
     _, _, _, N = sample_shape
@@ -94,6 +108,14 @@ def native_op(sample_shape):
 
 @pytest.fixture(scope="session")
 def rwkv7_jax_op(rwkv7_shape):
+    """RWKV-7 JAX CUDA 训练算子。
+
+    Args:
+        rwkv7_shape: tuple, (B, T, H, K)。
+
+    Returns:
+        Callable: HEAD_SIZE=K 的 RWKV-7 CUDA 训练 kernel。
+    """
     from rwkv_ops import get_generalized_delta_rule
 
     _, _, _, K = rwkv7_shape
@@ -103,6 +125,14 @@ def rwkv7_jax_op(rwkv7_shape):
 
 @pytest.fixture(scope="session")
 def rwkv7_inference_op(rwkv7_shape):
+    """RWKV-7 JAX CUDA 推理算子。
+
+    Args:
+        rwkv7_shape: tuple, (B, T, H, K)。
+
+    Returns:
+        Callable: HEAD_SIZE=K 的 RWKV-7 CUDA 推理 kernel。
+    """
     from rwkv_ops import get_generalized_delta_rule
 
     _, _, _, K = rwkv7_shape
@@ -112,6 +142,11 @@ def rwkv7_inference_op(rwkv7_shape):
 
 @pytest.fixture(scope="session")
 def rwkv7_native_op():
+    """RWKV-7 native Keras 参考算子。
+
+    Returns:
+        Callable: RWKV-7 native_keras_op.generalized_delta_rule。
+    """
     from rwkv_ops.rwkv7_kernel.native_keras_op import generalized_delta_rule
 
     return generalized_delta_rule
@@ -119,6 +154,14 @@ def rwkv7_native_op():
 
 @pytest.fixture(scope="session")
 def rwkv7_rnn_op(rwkv7_shape):
+    """RWKV-7 JAX CUDA 单步 RNN 算子。
+
+    Args:
+        rwkv7_shape: tuple, (B, T, H, K)。
+
+    Returns:
+        Callable: HEAD_SIZE=K 的 RWKV-7 单步 CUDA kernel。
+    """
     from rwkv_ops import get_rnn_generalized_delta_rule
 
     _, _, _, K = rwkv7_shape
@@ -127,6 +170,14 @@ def rwkv7_rnn_op(rwkv7_shape):
 
 @pytest.fixture(scope="session")
 def rwkv7_sn_jax_op(rwkv7_shape):
+    """RWKV-7-SN JAX CUDA 训练算子。
+
+    Args:
+        rwkv7_shape: tuple, (B, T, H, K)。
+
+    Returns:
+        Callable: HEAD_SIZE=K 的 RWKV-7-SN CUDA 训练 kernel。
+    """
     from rwkv_ops import get_generalized_delta_rule_sn
 
     _, _, _, K = rwkv7_shape
@@ -136,6 +187,14 @@ def rwkv7_sn_jax_op(rwkv7_shape):
 
 @pytest.fixture(scope="session")
 def rwkv7_sn_inference_op(rwkv7_shape):
+    """RWKV-7-SN JAX CUDA 推理算子。
+
+    Args:
+        rwkv7_shape: tuple, (B, T, H, K)。
+
+    Returns:
+        Callable: HEAD_SIZE=K 的 RWKV-7-SN CUDA 推理 kernel。
+    """
     from rwkv_ops import get_generalized_delta_rule_sn
 
     _, _, _, K = rwkv7_shape
@@ -145,6 +204,11 @@ def rwkv7_sn_inference_op(rwkv7_shape):
 
 @pytest.fixture(scope="session")
 def rwkv7_sn_native_op():
+    """RWKV-7-SN native Keras 参考算子。
+
+    Returns:
+        Callable: RWKV-7-SN native_keras_op.generalized_delta_rule_sn。
+    """
     from rwkv_ops.rwkv7_sn_kernel.native_keras_op import generalized_delta_rule_sn
 
     return generalized_delta_rule_sn
@@ -152,6 +216,11 @@ def rwkv7_sn_native_op():
 
 @pytest.fixture(scope="session")
 def rwkv7_sn_rnn_native_op():
+    """RWKV-7-SN native Keras 单步 RNN 参考算子。
+
+    Returns:
+        Callable: RWKV-7-SN native_keras_op.generalized_delta_rule_sn_single_step。
+    """
     from rwkv_ops.rwkv7_sn_kernel.native_keras_op import (
         generalized_delta_rule_sn_single_step,
     )
@@ -161,6 +230,14 @@ def rwkv7_sn_rnn_native_op():
 
 @pytest.fixture(scope="session")
 def rwkv7_sn_rnn_op(rwkv7_shape):
+    """RWKV-7-SN JAX CUDA 单步 RNN 算子。
+
+    Args:
+        rwkv7_shape: tuple, (B, T, H, K)。
+
+    Returns:
+        Callable: HEAD_SIZE=K 的 RWKV-7-SN 单步 CUDA kernel。
+    """
     from rwkv_ops import get_rnn_generalized_delta_rule_sn
 
     _, _, _, K = rwkv7_shape
@@ -169,6 +246,14 @@ def rwkv7_sn_rnn_op(rwkv7_shape):
 
 @pytest.fixture(scope="session")
 def rwkv7_sn_jax_triton_op(rwkv7_shape):
+    """RWKV-7-SN JAX Triton 训练算子。
+
+    Args:
+        rwkv7_shape: tuple, (B, T, H, K)。
+
+    Returns:
+        Callable: HEAD_SIZE=K 的 RWKV-7-SN Triton 训练 kernel。
+    """
     pytest.importorskip("triton")
     from rwkv_ops import get_generalized_delta_rule_sn
 
@@ -179,6 +264,15 @@ def rwkv7_sn_jax_triton_op(rwkv7_shape):
 
 @pytest.fixture(scope="session")
 def rwkv7_jax_pallas_op(rwkv7_shape):
+    """RWKV-7 JAX Pallas 训练算子。
+
+    Args:
+        rwkv7_shape: tuple, (B, T, H, K)。
+
+    Returns:
+        Callable: HEAD_SIZE=K 的 RWKV-7 Pallas 训练 kernel。
+            非 GPU/TPU 环境会 pytest.skip。
+    """
     pytest.importorskip("jax.experimental.pallas")
     import jax
 
@@ -193,6 +287,15 @@ def rwkv7_jax_pallas_op(rwkv7_shape):
 
 @pytest.fixture(scope="session")
 def rwkv7_sn_jax_pallas_op(rwkv7_shape):
+    """RWKV-7-SN JAX Pallas 训练算子。
+
+    Args:
+        rwkv7_shape: tuple, (B, T, H, K)。
+
+    Returns:
+        Callable: HEAD_SIZE=K 的 RWKV-7-SN Pallas 训练 kernel。
+            非 GPU/TPU 环境会 pytest.skip。
+    """
     pytest.importorskip("jax.experimental.pallas")
     import jax
 

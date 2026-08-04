@@ -1,9 +1,4 @@
-"""
-RWKV-7 JAX CUDA kernel 数值测试。
-
-运行方式：
-    KERAS_BACKEND=jax pytest tests/jax/test_rwkv7.py -v
-"""
+"""RWKV-7 JAX CUDA kernel 数值测试。"""
 
 import jax
 import jax.numpy as jnp
@@ -14,18 +9,47 @@ from tests.conftest import assert_allclose_with_stats
 
 
 def _to_jax(arr, dtype):
+    """把 numpy 数组转成指定 dtype 的 JAX 数组。
+
+    Args:
+        arr: np.ndarray，输入数组。
+        dtype: str, jnp dtype 名称。
+
+    Returns:
+        jax.Array: 指定 dtype 的 JAX 数组。
+    """
     return jnp.asarray(arr, dtype=getattr(jnp, dtype))
 
 
 def _normalize(z, axis=-1, eps=1e-12):
+    """沿指定轴做 L2 归一化。
+
+    Args:
+        z: jax.Array，输入张量。
+        axis: int, 归一化轴。
+        eps: float, 防止除零的小常数。
+
+    Returns:
+        jax.Array: 归一化后的张量。
+    """
     denom = jnp.linalg.norm(z, axis=axis, keepdims=True)
     denom = jnp.maximum(denom, eps)
     return z / denom
 
 
 def _prepare_inputs(rwkv7_inputs, head_first, dtype="bfloat16"):
+    """把 rwkv7_inputs 转成 JAX 测试张量。
+
+    Args:
+        rwkv7_inputs: dict, 来自 fixture 的 numpy 输入。
+        dtype: str, r/k/v/a/b/w 的目标 dtype。
+        head_first: bool, 是否将 layout 转置为 [B, H, T, K]。
+
+    Returns:
+        tuple: (r, k, v, a, b, w, h0)，前六个为 dtype 的 JAX 数组，h0 为 float32。
+    """
     if head_first:
-        # native/CUDA 内部会再次转置，测试直接传入 B,H,T,K
+        # native/CUDA 内部也会再次转置，测试直接传入 B,H,T,K。
         r = _to_jax(np.transpose(rwkv7_inputs["r"], (0, 2, 1, 3)), dtype)
         k = _to_jax(np.transpose(rwkv7_inputs["k"], (0, 2, 1, 3)), dtype)
         v = _to_jax(np.transpose(rwkv7_inputs["v"], (0, 2, 1, 3)), dtype)
@@ -46,6 +70,7 @@ def _prepare_inputs(rwkv7_inputs, head_first, dtype="bfloat16"):
 @pytest.mark.jax
 @pytest.mark.parametrize("head_first", [False, True])
 def test_rwkv7_forward_state(rwkv7_jax_op, rwkv7_native_op, rwkv7_inputs, head_first):
+    """对比 CUDA 与 native 前向输出和最终 state。"""
     r, k, v, a, b, w, h0 = _prepare_inputs(rwkv7_inputs, head_first, "bfloat16")
 
     y_ref, s_ref = rwkv7_native_op(

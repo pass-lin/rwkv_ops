@@ -1,9 +1,4 @@
-"""
-RWKV-6 JAX CUDA kernel 数值测试。
-
-运行方式：
-    KERAS_BACKEND=jax pytest tests/jax/test_rwkv6.py -v
-"""
+"""RWKV-6 JAX CUDA kernel 数值测试。"""
 
 import jax
 import jax.numpy as jnp
@@ -13,11 +8,21 @@ from tests.conftest import assert_allclose_with_stats
 
 
 def _to_jax(arr, dtype):
+    """把 numpy 数组转成指定 dtype 的 JAX 数组。
+
+    Args:
+        arr: np.ndarray，输入数组。
+        dtype: str, jnp dtype 名称。
+
+    Returns:
+        jax.Array: 指定 dtype 的 JAX 数组。
+    """
     return jnp.asarray(arr, dtype=getattr(jnp, dtype))
 
 
 @pytest.mark.jax
 def test_rwkv6_forward_state(jax_op, native_op, sample_inputs, sample_shape):
+    """对比 CUDA 与 native 前向输出和最终 state。"""
     _, _, _, N = sample_shape
     r, k, v, w, u, init = sample_inputs
 
@@ -54,6 +59,7 @@ def test_rwkv6_forward_state(jax_op, native_op, sample_inputs, sample_shape):
 
 @pytest.mark.jax
 def test_rwkv6_state_map(jax_op, native_op, sample_inputs, sample_shape):
+    """验证 state_map 传入单个初始 state 时的行为一致。"""
     B, _, _, N = sample_shape
     r, k, v, w, u, init = sample_inputs
 

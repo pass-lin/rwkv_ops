@@ -1,7 +1,4 @@
-"""
-JAX 版 RWKV7 Triton Kernel 封装
-利用 jax-triton 直接调用 triton_kernel.py 中的算子，并支持 SPMD 切分
-"""
+"""JAX 版 RWKV7 Triton kernel 封装。"""
 
 from __future__ import annotations
 import jax
@@ -10,7 +7,6 @@ import jax_triton as jt
 import jax.tree_util as jtu
 from typing import Optional, Tuple, Union
 
-# 引入 Triton 核心算子
 from .triton_kernel import (
     rwkv7_fwd_kernel,
     rwkv7_bwd_kernel,
@@ -18,16 +14,13 @@ from .triton_kernel import (
     rwkv7_bwd_kernel_with_mask,
 )
 
-# 引入自定义分区器 (适配 JAX 新版 Shardy 引擎)
 from jax.experimental.custom_partitioning import custom_partitioning
 from jax.sharding import NamedSharding, PartitionSpec
 
 CHUNK_LEN = 16
 
-# =========================================================================
-# SPMD 切分规则 (Einsum 风格)
+#  SPMD 切分规则（Einsum 风格）
 # b=Batch, n=Head, t=Time, h=HeadDim1, m=HeadDim2, c=Chunk
-# =========================================================================
 # 无 Mask 规则
 FWD_RULE = "b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n h m -> b n t h, b n t h, b n c h m"
 BWD_RULE = "b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n c h m, b n h m -> b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n h m"
@@ -103,9 +96,7 @@ def _transpose_head(x: jnp.ndarray, head_first: bool) -> jnp.ndarray:
     return x
 
 
-# =========================================================================
-# 无 Mask 的 JAX-Triton Launcher
-# =========================================================================
+#  无 Mask 的 JAX-Triton Launcher
 def _wkv7_fwd_triton_call(r, w, k, v, a, b, h0):
     B, N, T, H = r.shape
     dtype = r.dtype
@@ -236,9 +227,7 @@ def _bwd(res, grads):
 rwkv7_kernel_triton.defvjp(_fwd, _bwd)
 
 
-# =========================================================================
-# 带 Mask 的 JAX-Triton Launcher
-# =========================================================================
+#  带 Mask 的 JAX-Triton Launcher
 def _wkv7_fwd_with_mask_triton_call(r, w, k, v, a, b, h0, mask):
     B, N, T, H = r.shape
     dtype = r.dtype
@@ -373,9 +362,7 @@ def _bwd_with_mask(res, grads):
 rwkv7_kernel_with_mask_triton.defvjp(_fwd_with_mask, _bwd_with_mask)
 
 
-# =========================================================================
-# 对外 API 暴露 (与 JAX/Torch CUDA 版本兼容对齐)
-# =========================================================================
+#  对外 API
 def generalized_delta_rule(
     r: jnp.ndarray,
     w: jnp.ndarray,
@@ -388,6 +375,22 @@ def generalized_delta_rule(
     head_first: bool = False,
     mask: Optional[jnp.ndarray] = None,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
+    """RWKV-7 chunkwise 训练算子（JAX Triton 实现）。
+
+    Args:
+        r, w, k, v, a, b: [B, T, H, K]，bfloat16。T 必须被 16 整除。
+        initial_state: [B, H, K, K] 或 [1, H, K, K]，float32，可选。
+        output_final_state: bool，是否返回最终 state。
+        head_first: bool，输入输出是否 head 维优先（[B, H, T, K]）。
+        mask: [B, T] 或 [B, T, 1, 1]，float32，1 表示更新状态、0 表示冻结状态。
+
+    Returns:
+        out: [B, T, H, K]，与输入同 dtype。
+        final_state: [B, H, K, K]，float32；仅当 output_final_state=True 时返回。
+
+    Raises:
+        ValueError: T 不被 16 整除，或 mask 形状不匹配。
+    """
     dtype = r.dtype
     # 统一转换到 Head-First [B, N, T, H]
     r = _transpose_head(r, head_first)

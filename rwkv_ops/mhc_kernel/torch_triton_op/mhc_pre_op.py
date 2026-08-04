@@ -1,3 +1,5 @@
+"""mHC Pre-Op PyTorch -> Triton 桥接。"""
+
 import torch
 import triton
 
@@ -15,54 +17,36 @@ def mhc_pre_op_fwd_kernel_call(
     num_iters: int = 20,
     eps: float = 1e-8,
 ):
-    """
-    Triton Kernel Launcher for mHC Pre-Op Forward
-    """
-    # 1. 形状检查与准备
+    """PyTorch 前向 Triton launcher（私有）。"""
     B, T, _, C = x.shape
     Total_BT = B * T
 
-    # 2. 确保内存连续 (Triton 性能关键)
     x = x.contiguous()
     h_res_in = h_res_in.contiguous()
     h_pre_in = h_pre_in.contiguous()
 
-    # 3. 准备输出张量
-    # x_layer_in: [B, T, C] (BF16)
     out = torch.empty((B, T, C), device=x.device, dtype=x.dtype)
-    # H_res_out: [B, T, n, n] (FP32)
     H_res_out = torch.empty((B, T, n, n), device=x.device, dtype=torch.float32)
 
-    # 4. 展平视图 (View as [Total_BT, ...])
-    # 注意：stride 的获取必须基于传入的张量，而不是 view 后的
-    # 但由于我们做了 contiguous，view 后的 stride 也是标准的
-
-    # 5. Grid 计算函数
-    # Grid: (Total_BT // BLOCK_BT, C // BLOCK_C)
     def grid(META):
         return (
             triton.cdiv(Total_BT, META["BLOCK_BT"]),
             triton.cdiv(C, META["BLOCK_C"]),
         )
 
-    # 6. 启动 Kernel
     sinkhorn_aggregate_fused_kernel[grid](
-        # --- 指针 ---
         x,
         h_res_in,
         h_pre_in,
         out,
         H_res_out,
-        # --- 常量 (constexpr) ---
         Total_BT_CONST=Total_BT,
         NSIZE=n,
         CSIZE=C,
         NUM_ITERS=num_iters,
         EPS=eps,
-        # --- 步幅 (View as [Total_BT, ...]) ---
-        # x: [BT, n, C] -> stride(0) 是 B维度stride, stride(1) 是 T维度stride
-        # 对于 flatten 后的 [BT, n, C]，stride_bt 就是 n*C (若连续)
-        # 最稳妥的方式是用 reshape 后的 stride
+        # x 原始为 [B, T, n, C]；contiguous 后 view 为 [Total_BT, n, C]，
+        # 但 stride 仍沿用原始张量的最后三维。
         stride_x_bt=x.view(Total_BT, n, C).stride(0),
         stride_x_n=x.stride(2),
         stride_x_c=x.stride(3),
@@ -82,12 +66,14 @@ def mhc_pre_op_fwd_kernel_call(
 
 
 def mhc_pre_op_bwd_kernel_call(grad_out, grad_H_res, x, h_res, h_pre, n, iters, eps):
+    """PyTorch 反向 Triton launcher（私有）。"""
     B, T, _, C = x.shape
     BT = B * T
     gx = torch.empty_like(x)
     gh_res = torch.empty_like(h_res)
     gh_pre = torch.empty_like(h_pre)
-    grid = (BT, 1)  # 消除原子操作的关键：Grid Y = 1
+    # Grid Y = 1 使单个 program 处理整行 C，从而消除原子加。
+    grid = (BT, 1)
 
     sinkhorn_aggregate_bwd_kernel[grid](
         grad_out,
@@ -103,7 +89,6 @@ def mhc_pre_op_bwd_kernel_call(grad_out, grad_H_res, x, h_res, h_pre, n, iters, 
         CHANNEL_SIZE=C,
         NUM_ITERS=iters,
         EPS=eps,
-        # 步幅映射 (与 Kernel 内部签名一一对应)
         stride_gout_bt=grad_out.view(BT, C).stride(0),
         stride_gout_c=grad_out.stride(2),
         stride_gH_bt=grad_H_res.view(BT, n, n).stride(0),
@@ -144,7 +129,7 @@ class MHCFusedPreOp(torch.autograd.Function):
         x, h_res, h_pre = ctx.saved_tensors
         n, iters, eps = ctx.params
         if grad_out is None:
-            grad_out = torch.zeros_like(x[:, :, 0])  # dummy
+            grad_out = torch.zeros_like(x[:, :, 0])
         if grad_H_res is None:
             grad_H_res = torch.zeros_like(h_res)
         gx, gh_res, gh_pre = mhc_pre_op_bwd_kernel_call(
@@ -160,17 +145,23 @@ def mhc_pre_op_fused(
     num_iters: int = 20,
     eps: float = 1e-8,
 ):
-    """
-    Triton 加速版 mHC Pre-Op (Fused Sinkhorn + Stream Aggregate)
+    """mHC Pre-Op PyTorch 公开入口（Triton 加速）。
 
-    参数:
-        x: [B, T, n, C] (BF16)
-        h_res_in: [B, T, n, n] (FP32) - 未归一化的残差矩阵
-        h_pre_in: [B, T, n] (FP32) - 未激活的聚合权重
+    将多流输入通过 Sinkhorn-Knopp 生成双随机残差矩阵，并聚合为单流层输入。
 
-    返回:
-        out: [B, T, C] (BF16) - 聚合后的层输入
-        H_res_out: [B, T, n, n] (FP32) - 双随机残差矩阵
+    Args:
+        x: [B, T, n, C], bfloat16。多流输入。
+        h_res_in: [B, T, n, n], float32。未归一化残差矩阵。
+        h_pre_in: [B, T, n], float32。未激活聚合权重。
+        num_iters: int，默认 20。Sinkhorn-Knopp 迭代次数。
+        eps: float，默认 1e-8。数值稳定常数。
+
+    Returns:
+        out: [B, T, C], bfloat16。聚合后的层输入。
+        H_res_out: [B, T, n, n], float32。双随机残差矩阵。
+
+    Raises:
+        ValueError: C 不能被 128 整除。
     """
     C = x.shape[-1]
     if C % 128 != 0:

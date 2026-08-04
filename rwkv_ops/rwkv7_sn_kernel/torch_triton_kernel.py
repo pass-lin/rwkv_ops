@@ -1,3 +1,5 @@
+"""PyTorch 版 RWKV7-SN Triton kernel 封装。"""
+
 import warnings
 
 import torch
@@ -13,13 +15,23 @@ from .triton_kernel import (
 
 
 def transpose_head(x, head_first):
+    """统一输入布局为 [B, N, T, H]。"""
     if head_first:
         return transpose(x, (0, 2, 1, 3))
     return x
 
 
 def _apply_sn_to_final_state(state, tau, mask=None):
-    """state: [B, N, H, H]; tau: [B, N, C]; mask: [B, C]（可选）。"""
+    """对最终 state 应用 State Neutralization。
+
+    Args:
+        state: [B, N, H, H], float32。
+        tau: [B, N, C], float32。
+        mask: [B, C], float32（可选）。
+
+    Returns:
+        [B, N, H, H], float32。
+    """
     B, N, H, _ = state.shape
     last_tau = tau[:, :, -1].view(B, N, 1, 1)
     tau_safe = torch.clamp(last_tau, min=1e-6)
@@ -274,6 +286,26 @@ def generalized_delta_rule_sn(
     output_final_state=True,
     head_first=False,
 ):
+    """带 State Neutralization 的 RWKV-7 广义 delta 规则（Torch-Triton chunkwise 训练版）。
+
+    Args:
+        r, w, k, v, a, b: [B, T, H, K]（head_first=False）或 [B, H, T, K]（head_first=True），bfloat16。
+            T 必须被 16 整除；当前 Triton kernel 仅支持 K=64。
+        tau: [B, T//16, H]，float32。阈值，必须严格 > 1。
+        mask: [B, T//16]，float32 或 None。>0 的 chunk 边界执行 SN；
+            仅当 output_final_state=True 时生效。
+        initial_state: [B, H, K, K] 或 [1, H, K, K]，float32，可选。
+        output_final_state: bool，是否返回最终 state。
+        head_first: bool，输入输出是否 head 维优先。
+
+    Returns:
+        out: [B, T, H, K]，与输入同 dtype。
+        final_state: [B, H, K, K]，float32。
+            output_final_state=False 时不返回；mask=None 时为 None。
+
+    Raises:
+        ValueError: T 不被 16 整除，或 K 不等于 64，或 tau/mask 形状不匹配。
+    """
     if w.device.type != "cuda":
         from .native_keras_op import generalized_delta_rule_sn
 
@@ -291,7 +323,7 @@ def generalized_delta_rule_sn(
             head_first=head_first,
         )
 
-    # 统一转换为 head-first [B, N, T, H]
+    # 统一转换为 head-first [B, N, T, H]。
     if not head_first:
         r = r.transpose(1, 2)
         w = w.transpose(1, 2)
@@ -310,7 +342,7 @@ def generalized_delta_rule_sn(
             f"Triton SN kernel requires sequence length T={T} to be divisible by {CHUNK_LEN}"
         )
 
-    # tau 公共接口为 [B, T//16, N]；转成 [B, N, T//16]
+    # tau 公共接口为 [B, T//16, N]；转成 [B, N, T//16]。
     tau = cast(tau, "float32").contiguous()
     if tau.shape != (B, T // CHUNK_LEN, N):
         raise ValueError(
@@ -392,4 +424,5 @@ def generalized_delta_rule_sn_inference(
 
 
 def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
+    """返回 Torch-Triton 后端的 (训练算子, 推理算子)。"""
     return [generalized_delta_rule_sn, generalized_delta_rule_sn_inference]

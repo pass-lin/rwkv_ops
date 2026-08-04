@@ -1,3 +1,5 @@
+"""RWKV-7 算子后端分发器。"""
+
 import os
 
 import keras
@@ -5,6 +7,15 @@ from keras import ops
 
 
 def transpose_head(x, head_first):
+    """在 [B, T, H, K] 与 [B, H, T, K] 两种 layout 间切换。
+
+    Args:
+        x: [B, T, H, K] 或 [B, H, T, K]，任意常见 dtype。
+        head_first: bool，为 True 时执行 transpose(0, 2, 1, 3)，否则原样返回。
+
+    Returns:
+        head_first=True 时返回 [B, H, T, K]，否则返回原张量。
+    """
     if head_first:
         return ops.transpose(x, (0, 2, 1, 3))
     else:
@@ -12,19 +23,13 @@ def transpose_head(x, head_first):
 
 
 def _force_keras_native():
-    """RWKV_OPS_KERAS_NATIVE=1 时，jax/torch 的 native 都强制为纯 keras ops。
-
-    用于无 kernel 的调试/数值对照。未设置或设为 0/false 时不强制。
-    """
+    """RWKV_OPS_KERAS_NATIVE=1 时强制 jax/torch native 使用纯 Keras ops。"""
     v = os.environ.get("RWKV_OPS_KERAS_NATIVE", "").lower()
     return v not in ("", "0", "false")
 
 
 def _use_pallas(KERNEL_TYPE):
-    """jax + 非 CPU 平台时，native 默认使用 pallas kernel。
-
-    可用 RWKV_OPS_KERAS_NATIVE=1 强制回退纯 keras ops（调试用）。
-    """
+    """jax + GPU/TPU 且 KERNEL_TYPE=native 时启用 Pallas kernel。"""
     if KERNEL_TYPE != "native" or _force_keras_native():
         return False
     import jax
@@ -33,12 +38,7 @@ def _use_pallas(KERNEL_TYPE):
 
 
 def _use_triton(KERNEL_TYPE):
-    """torch + 非 CPU 平台（CUDA/ROCm/XPU）时，native 默认使用 triton kernel。
-
-    新版 torch 与 triton 强耦合（pip 版自带 triton），triton 之于 torch
-    相当于 pallas 之于 jax。XPU/ROCm 未实测，规则上按"非 CPU 且 triton
-    可导入"开放。可用 RWKV_OPS_KERAS_NATIVE=1 强制回退纯 keras ops。
-    """
+    """torch + 非 CPU 平台且 KERNEL_TYPE=native 时启用 Triton kernel。"""
     if KERNEL_TYPE != "native" or _force_keras_native():
         return False
     try:
@@ -58,6 +58,16 @@ def _use_triton(KERNEL_TYPE):
 
 
 def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
+    """按后端与 KERNEL_TYPE 返回 RWKV-7 chunkwise 训练算子对。
+
+    Args:
+        HEAD_SIZE: int，head 维度大小，必须被 4 整除。
+        KERNEL_TYPE: str，"native" / "cuda" / "triton"。
+
+    Returns:
+        (training_op, inference_op): 均为 Callable。
+        当后端/硬件不支持所选 KERNEL_TYPE 时静默回退 native_keras_op。
+    """
     assert HEAD_SIZE % 4 == 0
     from .native_keras_op import generalized_delta_rule
 
@@ -101,6 +111,15 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
 
 
 def get_rnn_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
+    """按后端与 KERNEL_TYPE 返回 RWKV-7 单步（T=1）算子。
+
+    Args:
+        HEAD_SIZE: int，head 维度大小，必须被 4 整除。
+        KERNEL_TYPE: str，目前仅 "cuda" 提供加速实现，其余回退 native。
+
+    Returns:
+        single_step_op: Callable，输入 T 必须为 1。
+    """
     assert HEAD_SIZE % 4 == 0
     from .native_keras_op import generalized_delta_rule
 

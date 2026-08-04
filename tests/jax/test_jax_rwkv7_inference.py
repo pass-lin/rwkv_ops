@@ -1,6 +1,4 @@
-"""
-RWKV-7 JAX CUDA 推理专用接口数值测试。
-"""
+"""RWKV-7 JAX CUDA 推理专用接口数值测试。"""
 
 import jax.numpy as jnp
 import numpy as np
@@ -10,10 +8,28 @@ from tests.conftest import assert_allclose_with_stats
 
 
 def _to_jax(arr, dtype):
+    """把 numpy 数组转成指定 dtype 的 JAX 数组。
+
+    Args:
+        arr: np.ndarray，输入数组。
+        dtype: str, jnp dtype 名称。
+
+    Returns:
+        jax.Array: 指定 dtype 的 JAX 数组。
+    """
     return jnp.asarray(arr, dtype=getattr(jnp, dtype))
 
 
 def _prepare_inputs(rwkv7_inputs, dtype="bfloat16"):
+    """把 rwkv7_inputs 转成 JAX 测试张量。
+
+    Args:
+        rwkv7_inputs: dict, 来自 fixture 的 numpy 输入。
+        dtype: str, r/k/v/a/b/w 的目标 dtype。
+
+    Returns:
+        tuple: (r, k, v, a, b, w, h0)，前六个为 dtype 的 JAX 数组，h0 为 float32。
+    """
     return (
         _to_jax(rwkv7_inputs["r"], dtype),
         _to_jax(rwkv7_inputs["k"], dtype),
@@ -26,6 +42,18 @@ def _prepare_inputs(rwkv7_inputs, dtype="bfloat16"):
 
 
 def _call_op(op, r, k, v, a, b, w, h0, output_final_state=True, mask=None):
+    """统一调用推理算子。
+
+    Args:
+        op: 待测算子。
+        r, k, v, a, b, w: 输入张量。
+        h0: 初始 state。
+        output_final_state: bool, 是否返回最终 state。
+        mask: 可选 mask 张量。
+
+    Returns:
+        tuple: (y, state) 或 y。
+    """
     return op(
         r=r,
         k=k,
@@ -43,6 +71,7 @@ def _call_op(op, r, k, v, a, b, w, h0, output_final_state=True, mask=None):
 def test_rwkv7_inference_forward_state(
     rwkv7_inference_op, rwkv7_native_op, rwkv7_inputs
 ):
+    """对比推理算子与 native 前向输出和最终 state。"""
     r, k, v, a, b, w, h0 = _prepare_inputs(rwkv7_inputs, "bfloat16")
 
     y_ref, s_ref = _call_op(rwkv7_native_op, r, k, v, a, b, w, h0)
@@ -54,6 +83,7 @@ def test_rwkv7_inference_forward_state(
 
 @pytest.mark.jax
 def test_rwkv7_inference_masked(rwkv7_inference_op, rwkv7_native_op, rwkv7_inputs, rng):
+    """对比推理算子与 native 在随机 mask 下的输出和最终 state。"""
     B, T = rwkv7_inputs["r"].shape[:2]
     mask_np = np.ones((B, T), dtype=np.float32)
     freeze = rng.random((B, T)) < 0.3
@@ -71,6 +101,7 @@ def test_rwkv7_inference_masked(rwkv7_inference_op, rwkv7_native_op, rwkv7_input
 
 @pytest.mark.jax
 def test_rwkv7_inference_mask_all_zero_frozen(rwkv7_inference_op, rwkv7_inputs):
+    """全 0 mask 时最终 state 应保持不变。"""
     B, T = rwkv7_inputs["r"].shape[:2]
     mask = jnp.zeros((B, T), dtype=jnp.float32)
     r, k, v, a, b, w, h0 = _prepare_inputs(rwkv7_inputs, "bfloat16")
@@ -86,6 +117,7 @@ def test_rwkv7_inference_mask_all_zero_frozen(rwkv7_inference_op, rwkv7_inputs):
 
 @pytest.mark.jax
 def test_rwkv7_inference_mask_all_one_equivalent(rwkv7_inference_op, rwkv7_inputs):
+    """全 1 mask 应与不传 mask 等价。"""
     B, T = rwkv7_inputs["r"].shape[:2]
     mask = jnp.ones((B, T), dtype=jnp.float32)
     r, k, v, a, b, w, h0 = _prepare_inputs(rwkv7_inputs, "bfloat16")
@@ -101,6 +133,7 @@ def test_rwkv7_inference_mask_all_one_equivalent(rwkv7_inference_op, rwkv7_input
 
 @pytest.mark.jax
 def test_rwkv7_inference_last_frame_only(rwkv7_inference_op, rwkv7_inputs):
+    """仅最后一帧 mask 为 1 时，最终 state 应发生变化。"""
     B, T = rwkv7_inputs["r"].shape[:2]
     mask_np = np.zeros((B, T), dtype=np.float32)
     mask_np[:, -1] = 1.0

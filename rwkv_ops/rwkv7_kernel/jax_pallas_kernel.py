@@ -1,18 +1,4 @@
-"""
-JAX 版 RWKV-7 Pallas Kernel 封装
-
-设计目标：
-- 作为 KERAS_BACKEND=jax 且 KERNEL_TYPE=native（或显式 pallas）时
-  非 CPU 平台（GPU/TPU）的默认 kernel。
-- kernel 本体只使用稳定的公开 Pallas API（pl.program_id / ref 索引 /
-  lax.fori_loop / jnp），不写死任何后端私有 API，
-  以便同时兼容 Triton 与 Mosaic GPU 后端，以及 TPU。
-- 后端配置、autotune 与 SPMD partition 回调统一由
-  rwkv_ops.pallas_utils 提供；custom_partitioning 即使在 eager 调用下
-  也会 trace 内层函数，因此每个 custom_vjp 入口（primal/_fwd/_bwd）
-  都先用真实数组调用对应 warmup（内部调 ensure_config 解析并缓存配置），
-  再走 SPMD 包装（其内层只会被 trace，只查缓存）。
-"""
+"""JAX 版 RWKV7 Pallas kernel 封装。"""
 
 from __future__ import annotations
 
@@ -30,10 +16,8 @@ from jax.sharding import NamedSharding, PartitionSpec
 CHUNK_LEN = 16
 
 
-# =========================================================================
-# SPMD 切分规则 (Einsum 风格)
+#  SPMD 切分规则（Einsum 风格）
 # b=Batch, n=Head, t=Time, h=HeadDim1, m=HeadDim2, c=Chunk
-# =========================================================================
 FWD_RULE = "b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n h m -> b n t h, b n t h, b n c h m"
 BWD_RULE = "b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n c h m, b n h m -> b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n h m"
 
@@ -95,9 +79,7 @@ def _transpose_head(x: jnp.ndarray, head_first: bool) -> jnp.ndarray:
     return x
 
 
-# =========================================================================
-# Pallas Kernel 本体（纯公开 API，后端无关）
-# =========================================================================
+#  Pallas Kernel 本体
 def _rwkv7_fwd_kernel(
     r_ref, w_ref, k_ref, v_ref, a_ref, b_ref, h0_ref, o_ref, sa_ref, chkp_ref
 ):
@@ -336,9 +318,7 @@ def _rwkv7_bwd_kernel_with_mask(
     dh0_ref[b, h] = dS.astype(dh0_ref.dtype)
 
 
-# =========================================================================
-# 无 Mask 的 Pallas Launcher
-# =========================================================================
+#  无 Mask 的 Pallas Launcher
 def _fwd_out_shape(r):
     B, N, T, H = r.shape
     return [
@@ -486,9 +466,7 @@ def _bwd(res, grads):
 rwkv7_kernel_pallas.defvjp(_fwd, _bwd)
 
 
-# =========================================================================
-# 带 Mask 的 Pallas Launcher
-# =========================================================================
+#  带 Mask 的 Pallas Launcher
 def _wkv7_fwd_with_mask_pallas_call(r, w, k, v, a, b, h0, mask):
     B, N, T, H = r.shape
     return launch(
@@ -572,9 +550,7 @@ def _bwd_with_mask(res, grads):
 rwkv7_kernel_with_mask_pallas.defvjp(_fwd_with_mask, _bwd_with_mask)
 
 
-# =========================================================================
-# 对外 API 暴露 (与 JAX/Torch CUDA 版本兼容对齐)
-# =========================================================================
+#  对外 API
 def generalized_delta_rule(
     r: jnp.ndarray,
     w: jnp.ndarray,
@@ -587,6 +563,22 @@ def generalized_delta_rule(
     head_first: bool = False,
     mask: Optional[jnp.ndarray] = None,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
+    """RWKV-7 chunkwise 训练算子（JAX Pallas 实现）。
+
+    Args:
+        r, w, k, v, a, b: [B, T, H, K]，bfloat16。T 必须被 16 整除。
+        initial_state: [B, H, K, K] 或 [1, H, K, K]，float32，可选。
+        output_final_state: bool，是否返回最终 state。
+        head_first: bool，输入输出是否 head 维优先（[B, H, T, K]）。
+        mask: [B, T] 或 [B, T, 1, 1]，float32，1 表示更新状态、0 表示冻结状态。
+
+    Returns:
+        out: [B, T, H, K]，与输入同 dtype。
+        final_state: [B, H, K, K]，float32；仅当 output_final_state=True 时返回。
+
+    Raises:
+        ValueError: T 不被 16 整除，或 mask 形状不匹配。
+    """
     dtype = r.dtype
     # 统一转换到 Head-First [B, N, T, H]
     r = _transpose_head(r, head_first)
@@ -628,4 +620,5 @@ def generalized_delta_rule(
 
 
 def get_jax_generalized_delta_rule(HEAD_SIZE=64):
+    """返回 RWKV-7 Pallas 训练/推理算子对（当前两者相同）。"""
     return generalized_delta_rule, generalized_delta_rule

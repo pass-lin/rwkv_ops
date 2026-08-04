@@ -1,9 +1,4 @@
-"""
-RWKV-7 State Neutralization JAX Triton kernel 数值测试。
-
-运行方式：
-    KERAS_BACKEND=jax pytest tests/jax/test_jax_rwkv7_sn_triton.py -v
-"""
+"""RWKV-7 State Neutralization JAX Triton kernel 数值测试。"""
 
 import warnings
 
@@ -19,10 +14,31 @@ pytest.importorskip("triton")
 
 
 def _to_jax(arr, dtype):
+    """把 numpy 数组转成指定 dtype 的 JAX 数组。
+
+    Args:
+        arr: np.ndarray，输入数组。
+        dtype: str, jnp dtype 名称。
+
+    Returns:
+        jax.Array: 指定 dtype 的 JAX 数组。
+    """
     return jnp.asarray(arr, dtype=getattr(jnp, dtype))
 
 
 def _prepare_inputs(rwkv7_sn_inputs, head_first, dtype="bfloat16"):
+    """把 rwkv7_sn_inputs 转成 JAX 测试张量。
+
+    Args:
+        rwkv7_sn_inputs: dict, 来自 fixture 的 numpy 输入。
+        dtype: str, r/k/v/a/b/w 的目标 dtype。
+        head_first: bool, 是否将 layout 转置为 [B, H, T, K]。
+
+    Returns:
+        tuple: (r, k, v, a, b, w, tau, mask, h0)。
+            r/k/v/a/b/w: dtype 的 JAX 数组。
+            tau/mask/h0: float32 的 JAX 数组。
+    """
     B, T, H, _ = rwkv7_sn_inputs["r"].shape
     if head_first:
         r = _to_jax(np.transpose(rwkv7_sn_inputs["r"], (0, 2, 1, 3)), dtype)
@@ -45,6 +61,18 @@ def _prepare_inputs(rwkv7_sn_inputs, head_first, dtype="bfloat16"):
 
 
 def _test_is_close(name, ref, tgt, atol, rtol):
+    """打印精确匹配率与误差统计，再调用 assert_allclose_with_stats。
+
+    Args:
+        name: str, 比较项名称。
+        ref: 参考张量，任意后端。
+        tgt: 目标张量，任意后端。
+        atol: float, 绝对容差。
+        rtol: float, 相对容差。
+
+    Returns:
+        None。断言失败时抛出 AssertionError。
+    """
     ref_f = np.asarray(ref, dtype=np.float32)
     tgt_f = np.asarray(tgt, dtype=np.float32)
     diff = np.abs(ref_f - tgt_f)
@@ -64,6 +92,7 @@ def _test_is_close(name, ref, tgt, atol, rtol):
 def test_rwkv7_sn_triton_forward_state(
     rwkv7_sn_jax_triton_op, rwkv7_sn_native_op, rwkv7_sn_inputs, head_first
 ):
+    """对比 Triton 与 native 前向输出和最终 state（带 mask）。"""
     r_ref, k_ref, v_ref, a_ref, b_ref, w_ref, tau_ref, mask_ref, h0_ref = (
         _prepare_inputs(rwkv7_sn_inputs, head_first, "bfloat16")
     )
@@ -110,6 +139,7 @@ def test_rwkv7_sn_triton_forward_state(
 def test_rwkv7_sn_triton_backward(
     rwkv7_sn_jax_triton_op, rwkv7_sn_native_op, rwkv7_sn_inputs, head_first
 ):
+    """对比 Triton 与 native 反向梯度（含 tau/mask）。"""
     r, k, v, a, b, w, tau, mask, h0 = _prepare_inputs(
         rwkv7_sn_inputs, head_first, "bfloat16"
     )
@@ -156,6 +186,7 @@ def test_rwkv7_sn_triton_backward(
 def test_rwkv7_sn_triton_no_mask_forward_state(
     rwkv7_sn_jax_triton_op, rwkv7_sn_native_op, rwkv7_sn_inputs, head_first
 ):
+    """无 mask 路径前向输出与 native 对比。"""
     r_ref, k_ref, v_ref, a_ref, b_ref, w_ref, tau_ref, _, h0_ref = _prepare_inputs(
         rwkv7_sn_inputs, head_first, "bfloat16"
     )
@@ -199,6 +230,7 @@ def test_rwkv7_sn_triton_no_mask_forward_state(
 def test_rwkv7_sn_triton_no_mask_backward(
     rwkv7_sn_jax_triton_op, rwkv7_sn_native_op, rwkv7_sn_inputs, head_first
 ):
+    """无 mask 路径反向梯度与 native 对比。"""
     r, k, v, a, b, w, tau, _, h0 = _prepare_inputs(
         rwkv7_sn_inputs, head_first, "bfloat16"
     )
@@ -241,6 +273,7 @@ def test_rwkv7_sn_triton_no_mask_backward(
 def test_rwkv7_sn_triton_no_mask_y_matches_all_one(
     rwkv7_sn_jax_triton_op, rwkv7_sn_inputs
 ):
+    """无 mask 算子与全 1 mask 算子的 y 应一致，且返回 None state 并警告。"""
     B, T, H, K = rwkv7_sn_inputs["r"].shape
     n_chunks = T // 16
     mask = jnp.ones((B, n_chunks), dtype=jnp.float32)

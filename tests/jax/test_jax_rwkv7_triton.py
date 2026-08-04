@@ -1,6 +1,4 @@
-"""
-RWKV-7 JAX Triton kernel 数值测试。
-"""
+"""RWKV-7 JAX Triton kernel 数值测试。"""
 
 import jax
 import jax.numpy as jnp
@@ -13,11 +11,28 @@ pytest.importorskip("triton")
 
 
 def _to_jax(arr, dtype):
+    """把 numpy 数组转成指定 dtype 的 JAX 数组。
+
+    Args:
+        arr: np.ndarray，输入数组。
+        dtype: str, jnp dtype 名称。
+
+    Returns:
+        jax.Array: 指定 dtype 的 JAX 数组。
+    """
     return jnp.asarray(arr, dtype=getattr(jnp, dtype))
 
 
 @pytest.fixture(scope="module")
 def triton_op(rwkv7_shape):
+    """RWKV-7 JAX Triton 训练算子。
+
+    Args:
+        rwkv7_shape: tuple, (B, T, H, K)。
+
+    Returns:
+        Callable: HEAD_SIZE=K 的 RWKV-7 Triton 训练 kernel。
+    """
     from rwkv_ops import get_generalized_delta_rule
 
     _, _, _, K = rwkv7_shape
@@ -27,12 +42,27 @@ def triton_op(rwkv7_shape):
 
 @pytest.fixture(scope="module")
 def native_op():
+    """RWKV-7 native Keras 参考算子。
+
+    Returns:
+        Callable: RWKV-7 native_keras_op.generalized_delta_rule。
+    """
     from rwkv_ops.rwkv7_kernel.native_keras_op import generalized_delta_rule
 
     return generalized_delta_rule
 
 
 def _prepare_inputs(rwkv7_inputs, head_first, dtype="bfloat16"):
+    """把 rwkv7_inputs 转成 JAX 测试张量。
+
+    Args:
+        rwkv7_inputs: dict, 来自 fixture 的 numpy 输入。
+        dtype: str, r/k/v/a/b/w 的目标 dtype。
+        head_first: bool, 是否将 layout 转置为 [B, H, T, K]。
+
+    Returns:
+        tuple: (r, k, v, a, b, w, h0)，前六个为 dtype 的 JAX 数组，h0 为 float32。
+    """
     if head_first:
         r = _to_jax(np.transpose(rwkv7_inputs["r"], (0, 2, 1, 3)), dtype)
         k = _to_jax(np.transpose(rwkv7_inputs["k"], (0, 2, 1, 3)), dtype)
@@ -55,6 +85,7 @@ def _prepare_inputs(rwkv7_inputs, head_first, dtype="bfloat16"):
 @pytest.mark.slow
 @pytest.mark.parametrize("head_first", [False, True])
 def test_rwkv7_triton_forward_state(triton_op, native_op, rwkv7_inputs, head_first):
+    """对比 Triton 与 native 前向输出和最终 state。"""
     r, k, v, a, b, w, h0 = _prepare_inputs(rwkv7_inputs, head_first, "bfloat16")
 
     y_ref, s_ref = native_op(

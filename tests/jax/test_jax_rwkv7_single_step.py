@@ -1,6 +1,4 @@
-"""
-RWKV-7 JAX CUDA 单步 RNN 接口数值测试。
-"""
+"""RWKV-7 JAX CUDA 单步 RNN 接口数值测试。"""
 
 import jax.numpy as jnp
 import numpy as np
@@ -10,11 +8,29 @@ from tests.conftest import assert_allclose_with_stats
 
 
 def _to_jax(arr, dtype):
+    """把 numpy 数组转成指定 dtype 的 JAX 数组。
+
+    Args:
+        arr: np.ndarray，输入数组。
+        dtype: str, jnp dtype 名称。
+
+    Returns:
+        jax.Array: 指定 dtype 的 JAX 数组。
+    """
     return jnp.asarray(arr, dtype=getattr(jnp, dtype))
 
 
 @pytest.fixture
 def single_step_inputs(rwkv7_inputs, rng):
+    """生成 T=1 的单步 RNN 测试输入。
+
+    Args:
+        rwkv7_inputs: dict, 来自 fixture 的 numpy 输入（用于取 B/H/K）。
+        rng: np.random.Generator，随机数生成器。
+
+    Returns:
+        dict: 包含 r/k/v/a/b/w([B, 1, H, K]) 与 h0([B, H, K, K]) 的 float32 数组。
+    """
     B, _, H, K = rwkv7_inputs["r"].shape
     return {
         name: rng.standard_normal((B, 1, H, K), dtype=np.float32)
@@ -26,6 +42,8 @@ def single_step_inputs(rwkv7_inputs, rng):
 def test_rwkv7_single_step_forward_state(
     rwkv7_rnn_op, rwkv7_native_op, single_step_inputs
 ):
+    """对比 CUDA 单步 RNN 与 native 单步前向输出和最终 state。"""
+
     def make(tensors, dtype):
         return (
             _to_jax(tensors["r"], dtype),

@@ -1,17 +1,20 @@
+"""RWKV-7 广义 delta 规则的纯 Keras 参考实现。"""
+
 import keras
 from keras import ops
 
 
 def transpose_head(x, head_first):
-    """
-    对输入张量进行转置操作。
+    """在 [B, T, H, K] 与 [B, H, T, K] 两种 layout 间切换。
 
-    参数:
-    x: 输入张量。
-    head_first: 布尔值，决定是否进行转置。
+    内部先把输入 cast 到 float32，保证递推数值稳定性。
 
-    返回:
-    转置后的张量（如果head_first为True），否则返回原张量。
+    Args:
+        x: [B, T, H, K] 或 [B, H, T, K]，任意常见 dtype。
+        head_first: bool，为 True 时转置为 [B, H, T, K]，否则原样返回。
+
+    Returns:
+        head_first=True 时返回 [B, H, T, K] float32，否则返回原张量 float32。
     """
     x = ops.cast(x, "float32")
     if head_first:
@@ -32,20 +35,24 @@ def generalized_delta_rule(
     head_first: bool = False,
     mask=None,
 ):
-    """
-    实现广义delta规则的函数。
+    """RWKV-7 广义 delta 规则的逐 token 原生实现（数值 ground truth）。
 
-    参数:
-    r: 输入张量。
-    w: 权重张量。
-    k, v, a, b: 其他输入张量。
-    mask:[B,T],决定这个状态是否被更新,1更新0不更新
-    initial_state: 初始状态张量。
-    output_final_state: 是否输出最终状态。
-    head_first: 是否在计算中将head维度放在第一位。
+    递推公式：
+        w_t = exp(-exp(w_t))
+        sa_t = state_{t-1} @ a_t
+        state_t = state_{t-1} * w_t + sa_t \otimes b_t + v_t \otimes k_t
+        y_t = state_t @ r_t
 
-    返回:
-    根据output_final_state参数决定是否返回最终状态。
+    Args:
+        r, w, k, v, a, b: [B, T, H, K]，任意常见 dtype。
+        initial_state: [B, H, K, K] 或 [1, H, K, K]，float32，可选。
+        output_final_state: bool，是否返回最终 state。
+        head_first: bool，输入/输出是否采用 [B, H, T, K] layout。
+        mask: [B, T] 或 [B, T, 1, 1]，float32，1 表示更新状态、0 表示冻结状态。
+
+    Returns:
+        out: [B, T, H, K]，与 r 同 dtype。
+        final_state: [B, H, K, K]，float32；仅当 output_final_state=True 时返回。
     """
     DTYPE = r.dtype
 
@@ -70,16 +77,7 @@ def generalized_delta_rule(
     keras_backend = keras.config.backend()
 
     def step_with_mask(t, inputs):
-        """
-        执行单个时间步的计算。
-
-        参数:
-        t: 当前时间步。
-        inputs: 包含当前状态和输出的列表。
-
-        返回:
-        更新后的状态和输出。
-        """
+        """单时间步递推（带 mask）。"""
         state, out = inputs
         old_state = state
         kk = ops.reshape(k[:, t, :], (B, H, 1, N))
@@ -100,16 +98,7 @@ def generalized_delta_rule(
         return [state, out]
 
     def step_wo_mask(t, inputs):
-        """
-        执行单个时间步的计算。
-
-        参数:
-        t: 当前时间步。
-        inputs: 包含当前状态和输出的列表。
-
-        返回:
-        更新后的状态和输出。
-        """
+        """单时间步递推（无 mask）。"""
         state, out = inputs
         kk = ops.reshape(k[:, t, :], (B, H, 1, N))
         rr = ops.reshape(r[:, t, :], (B, H, N, 1))

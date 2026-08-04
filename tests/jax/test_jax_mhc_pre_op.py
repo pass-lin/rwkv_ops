@@ -1,6 +1,4 @@
-"""
-mHC Pre-Op JAX-Triton 正确性测试。
-"""
+"""mHC Pre-Op JAX-Triton 正确性测试。"""
 
 import jax
 import jax.numpy as jnp
@@ -12,11 +10,25 @@ pytest.importorskip("triton")
 
 
 def _to_jax(arr, dtype):
+    """把 numpy 数组转成指定 dtype 的 JAX 数组。
+
+    Args:
+        arr: np.ndarray，输入数组。
+        dtype: str, jnp dtype 名称。
+
+    Returns:
+        jax.Array: 指定 dtype 的 JAX 数组。
+    """
     return jnp.asarray(arr, dtype=getattr(jnp, dtype))
 
 
 @pytest.fixture(scope="module")
 def ops():
+    """返回 native 与 Triton mHC pre-op 算子对。
+
+    Returns:
+        tuple: (native_mhc_pre_op, triton_mhc_pre_op)。
+    """
     from rwkv_ops.mhc_kernel.jax_triton_op.mhc_pre_op import (
         mhc_pre_op_fused as triton_mhc_pre_op,
     )
@@ -28,6 +40,7 @@ def ops():
 @pytest.mark.jax
 @pytest.mark.slow
 def test_mhc_pre_op_forward(ops, mhc_pre_inputs):
+    """对比 Triton 与 native mHC pre-op 前向输出。"""
     native_op, triton_op = ops
     x = _to_jax(mhc_pre_inputs["x"], "bfloat16")
     h_res = _to_jax(mhc_pre_inputs["h_res"], "float32")
@@ -43,6 +56,7 @@ def test_mhc_pre_op_forward(ops, mhc_pre_inputs):
 @pytest.mark.jax
 @pytest.mark.slow
 def test_mhc_pre_op_backward(ops, mhc_pre_inputs):
+    """对比 Triton 与 native mHC pre-op 反向梯度。"""
     native_op, triton_op = ops
     x = _to_jax(mhc_pre_inputs["x"], "bfloat16")
     h_res = _to_jax(mhc_pre_inputs["h_res"], "float32")

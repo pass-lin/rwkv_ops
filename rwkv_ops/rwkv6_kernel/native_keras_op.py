@@ -1,9 +1,4 @@
-"""
-RWKV-6 原生 Keras-ops 实现（函数式接口）。
-
-直接复用 ops_rwkv_kernel.RWKVKernelOperator 作为数值 ground truth，
-仅将其封装为与 CUDA 版本一致的函数签名。
-"""
+"""RWKV-6 原生 Keras-ops 函数式封装。"""
 
 from .ops_rwkv_kernel import RWKVKernelOperator
 
@@ -20,21 +15,28 @@ def rwkv6(
     head_size: int = 64,
     max_sequence_length: int = 4096,
 ):
-    """
-    RWKV-6 原生 Keras-ops 函数式算子。
+    """RWKV-6 原生 Keras-ops 函数式算子。
 
     Args:
-        r, k, v, w: [B, T, C]（head_first=False）或 [B, H, T, N]（head_first=True）
-        u: [H, N] 或 [C]
-        initial_state: 可选，[B, H, N, N] 或 [H, N, N]
-        output_final_state: 是否返回最终状态
-        state_map: [B] int64，当 initial_state 的 batch 维度与 B 不一致时使用
-        head_size: 每个 head 的维度，默认 64
-        max_sequence_length: 最大序列长度，默认 4096
+        r, k, v, w: [B, T, C]（head_first=False）或 [B, H, T, N]
+            （head_first=True），bfloat16/float16/float32。
+        u: [H, N] 或 [C]，与输入同 dtype。位置相关衰减项。
+        initial_state: [B, H, N, N] 或 [H, N, N]，float32，可选。初始状态。
+        output_final_state: bool，是否返回最终状态。
+        state_map: [B] int64，可选。当 initial_state 的 batch 维度与 B
+            不一致时使用。
+        head_size: int，默认 64。每个 head 的维度。
+        max_sequence_length: int，默认 4096。最大序列长度（原生实现不限制，
+            仅用于与 CUDA 版本签名对齐）。
 
     Returns:
-        y: [B, T, C]
-        final_state: [B, H, N, N]（当 output_final_state=True）
+        y: [B, T, C] 或 [B, H, T, N]，与输入同 layout/dtype。
+        final_state: [B, H, N, N]，float32（当 output_final_state=True）。
+
+    Examples:
+        >>> y = rwkv6(r, k, v, w, u)
+        >>> y, state = rwkv6(r, k, v, w, u, initial_state=h0,
+        ...                  output_final_state=True)
     """
     op = RWKVKernelOperator(
         head_size=head_size, max_sequence_length=max_sequence_length

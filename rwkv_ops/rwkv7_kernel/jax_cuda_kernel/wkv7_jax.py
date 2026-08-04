@@ -1,7 +1,4 @@
-"""
-JAX 版 RWKV7 wkv kernel + generalized_delta_rule
-延迟编译 CUDA 扩展，接口与 Torch 版本 1:1 对齐
-"""
+"""JAX 版 RWKV7 CUDA kernel 封装。"""
 
 from __future__ import annotations
 import pathlib
@@ -12,23 +9,17 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 from typing import Optional, Tuple, Union
 
-# 引入自定义分区器 (适配 JAX 新版 Shardy 引擎)
 from jax.experimental.custom_partitioning import custom_partitioning
 from jax.sharding import NamedSharding, PartitionSpec
 
-CHUNK_LEN = 16  # 这是一个常数
-# ---------- 延迟编译（改到当前目录） ----------
-_CURRENT_DIR = pathlib.Path(
-    __file__
-).parent.absolute()  # rwkv_ops/rwkv7_kernel/jax_cuda_kernel
+CHUNK_LEN = 16
+_CURRENT_DIR = pathlib.Path(__file__).parent.absolute()
 
-# 用于绕过 glibc 2.41+ 与 CUDA 13.1 的 rsqrt noexcept 冲突
+# nvcc 包装器用于绕过 glibc 2.41+ 与 CUDA 13.1 的 rsqrt noexcept 冲突。
 _NVCC_WRAPPER = _CURRENT_DIR.parents[1] / "cuda_tools" / "nvcc_wrap"
 
-# =========================================================================
-# 【核心修复】：为 Shardy 引擎定义的静态 Einsum 切分映射字符串
-# 字母含义: b=Batch, t=Time, h=Head, k=HeadDim1, v=HeadDim2, c=Chunk
-# =========================================================================
+#  SPMD 切分规则（Einsum 风格）
+# b=Batch, t=Time, h=Head, k=HeadDim1, v=HeadDim2, c=Chunk
 FWD_RULE = "b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b h k v -> b t h k, b h c k v, b t h k"
 BWD_RULE = "b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b h c k v, b t h k, b h k v -> b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b h k v"
 FWD_MASK_RULE = "b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b h k v, b t -> b t h k, b h c k v, b t h k"
@@ -92,9 +83,6 @@ def _inf_infer_sharding(arg_shapes, arg_shardings):
     return (_sharding_like_q(qs), _sharding_for_final_state(qs))
 
 
-# =========================================================================
-# 【关键修复】：根据 JAX 官方文档提供的标准 Partition 样板函数
-# =========================================================================
 def _create_partition(impl_fn):
     def partition(mesh, arg_shapes, result_shape):
         def lower_fn(*args):
@@ -108,14 +96,20 @@ def _create_partition(impl_fn):
     return partition
 
 
-# =========================================================================
-
-
 def get_jax_generalized_delta_rule(HEAD_SIZE=64):
+    """按 HEAD_SIZE 延迟编译并返回 RWKV-7 JAX CUDA 训练/推理算子对。
+
+    Args:
+        HEAD_SIZE: int，head 维度大小，必须被 4 整除。
+
+    Returns:
+        (training_op, inference_op): 均为 Callable。
+    """
     _BUILD_DIR = _CURRENT_DIR / f"build_{HEAD_SIZE}"
     _SO_PATH = _CURRENT_DIR / f"build_{HEAD_SIZE}/wkv7.so"
 
     def _ensure_compiled() -> pathlib.Path:
+        """首次调用时编译 CUDA 扩展并返回 so 路径。"""
         if _SO_PATH.exists():
             return _SO_PATH
 
@@ -193,9 +187,7 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
             return jnp.transpose(x, (0, 2, 1, 3))
         return x
 
-    # =========================================================================
-    # 前向 + 反向 kernel (无 Mask)
-    # =========================================================================
+    #  前向 + 反向 kernel（无 Mask）
     def _wkv7_kernel_impl(w, q, k, v, a, b, h0):
         B, T, H, K = q.shape
         dtype = q.dtype
@@ -279,9 +271,7 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
 
     wk7_kernel.defvjp(_fwd, _bwd)
 
-    # =========================================================================
-    # 前向 + 反向 kernel (带 Mask)
-    # =========================================================================
+    #  前向 + 反向 kernel（带 Mask）
     def _wkv7_kernel_with_mask_impl(w, q, k, v, a, b, h0, mask):
         B, T, H, K = q.shape
         dtype = q.dtype
@@ -382,7 +372,7 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
 
     wk7_kernel_with_mask.defvjp(_fwd_with_mask, _bwd_with_mask)
 
-    # ---------- 公共 API ----------
+    #  公共 API
     def generalized_delta_rule(
         r: jnp.ndarray,
         w: jnp.ndarray,
@@ -395,6 +385,22 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         head_first: bool = False,
         mask: Optional[jnp.ndarray] = None,
     ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
+        """RWKV-7 chunkwise 训练算子（JAX CUDA 实现）。
+
+        Args:
+            r, w, k, v, a, b: [B, T, H, K]，bfloat16。T 必须被 16 整除。
+            initial_state: [B, H, K, K] 或 [1, H, K, K]，float32，可选。
+            output_final_state: bool，是否返回最终 state。
+            head_first: bool，输入输出是否 head 维优先（[B, H, T, K]）。
+            mask: [B, T]，bfloat16，1 表示更新状态、0 表示冻结状态。
+
+        Returns:
+            out: [B, T, H, K]，与输入同 dtype。
+            final_state: [B, H, K, K]，float32；仅当 output_final_state=True 时返回。
+
+        Raises:
+            ValueError: T 不被 16 整除，或 mask 形状不匹配。
+        """
         dtype = r.dtype
         r = _transpose_head(r, head_first)
         w = _transpose_head(w, head_first)
@@ -430,9 +436,7 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
             return out, last_state
         return out
 
-    # =========================================================================
-    # 推理 Kernel (无 Mask)
-    # =========================================================================
+    #  推理 Kernel（无 Mask）
     def _wkv7_inference_kernel_impl(w, q, k, v, a, b, h0):
         B, T, H, K = q.shape
         dtype = q.dtype
@@ -454,9 +458,7 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         partition=_create_partition(_wkv7_inference_kernel_impl),
     )
 
-    # =========================================================================
-    # 推理 Kernel (带 Mask)
-    # =========================================================================
+    #  推理 Kernel（带 Mask）
     def _wkv7_inference_kernel_with_mask_impl(w, q, k, v, a, b, h0, mask):
         B, T, H, K = q.shape
         dtype = q.dtype
@@ -478,7 +480,7 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         partition=_create_partition(_wkv7_inference_kernel_with_mask_impl),
     )
 
-    # ---------- 公共推理 API ----------
+    #  公共推理 API
     def generalized_delta_rule_inference(
         r: jnp.ndarray,
         w: jnp.ndarray,
@@ -491,6 +493,22 @@ def get_jax_generalized_delta_rule(HEAD_SIZE=64):
         head_first: bool = False,
         mask: Optional[jnp.ndarray] = None,
     ):
+        """RWKV-7 推理算子（JAX CUDA 实现）。
+
+        Args:
+            r, w, k, v, a, b: [B, T, H, K]，bfloat16。
+            output_final_state: bool，是否返回最终 state。
+            initial_state: [B, H, K, K] 或 [1, H, K, K]，float32，可选。
+            head_first: bool，输入输出是否 head 维优先（[B, H, T, K]）。
+            mask: [B, T]，bfloat16，1 表示更新状态、0 表示冻结状态。
+
+        Returns:
+            out: [B, T, H, K]，与输入同 dtype。
+            final_state: [B, H, K, K]，float32；仅当 output_final_state=True 时返回。
+
+        Raises:
+            ValueError: mask 形状不匹配。
+        """
         dtype = r.dtype
         r = _transpose_head(r, head_first)
         w = _transpose_head(w, head_first)

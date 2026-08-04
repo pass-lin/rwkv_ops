@@ -1,3 +1,5 @@
+// RWKV-7-SN JAX FFI 单步 CUDA kernel。
+
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <xla/ffi/api/ffi.h>
@@ -15,6 +17,20 @@ __device__ inline bf to_bf(const float &u) {
 }
 typedef bf *__restrict__ F_;
 
+// RWKV-7-SN 单步前向 CUDA kernel。
+//
+// 每个 block 处理一个 (batch, head)，单步完成 delta-rule 更新并可选执行 SN。
+//
+// Args:
+//   w, q, k, v, a, b: [B, H, C], bfloat16, row-major。
+//   tau: [B, H], float32, row-major。阈值，必须 > 0。
+//   do_sn: [B], int32, row-major。非 0 表示对该 sample 执行 SN。
+//   y: [B, H, C], bfloat16, row-major。输出。
+//   s: [B, H, C, C], float32, row-major。输出 state。
+//   h0: [B, H, C, C], float32, row-major。初始 state。
+//
+// 编译期宏:
+//   _C_: head_size，由 -D_C_ 传入。
 template<int C>
 __launch_bounds__(C, 2)
 __global__ void forward_kernel_single_step_sn(
@@ -69,6 +85,7 @@ __global__ void forward_kernel_single_step_sn(
     for (int j = 0; j < C; ++j) s_[s_base + j] = state[j];
 }
 
+// Host wrapper for forward_kernel_single_step_sn。
 static ffi::Error WKV7SnSingleStepFwdHost(
     cudaStream_t stream,
     ffi::Buffer<ffi::BF16> w,
@@ -110,6 +127,7 @@ static ffi::Error WKV7SnSingleStepFwdHost(
     return ffi::Error::Success();
 }
 
+// XLA FFI handler 注册。
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
     Wkv7SnSingleStepFwd, WKV7SnSingleStepFwdHost,
     ffi::Ffi::Bind()

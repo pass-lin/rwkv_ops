@@ -2,19 +2,13 @@ import triton
 import triton.language as tl
 
 
-# ======================================================================================
-#                                   无 Mask 前向传播
-# ======================================================================================
+#  无 Mask 前向传播
 @triton.autotune(
     configs=[
-        # 【稳定性修复 1/2】：强制 MINI_BSZ=1
-        # 核心原因：限制每个 GPU Block 只处理一个 Batch 样本，避免因 MINI_BSZ > 1
-        # 导致在 AMD 显卡上出现超大的寄存器/共享内存分配，从而绕开 ROCm 编译器的
-        # 寄存器溢出 (Register Spilling) Bug，这是导致 Segfault 的主要原因之一。
-        # 这种做法牺牲了极小的块内并行度，但换来了跨平台的绝对稳定性。
+        # MINI_BSZ=1 限制单个 block 只处理一个 batch 样本，控制寄存器/共享内存占用，
+        # 避免 ROCm 等编译器因批量过大产生寄存器溢出或地址扩展问题。
         triton.Config({"MINI_BSZ": 1}, num_warps=num_warps, num_stages=num_stages)
-        # 补偿策略：增加 num_warps 和 num_stages 可以利用更多线程和更深的流水线来
-        # 隐藏内存延迟，弥补 MINI_BSZ=1 带来的性能损失。
+        # 提高 num_warps 与 num_stages 以隐藏 MINI_BSZ=1 带来的内存延迟。
         for num_warps in [4, 8]
         for num_stages in [2, 3, 4]
     ],
@@ -42,15 +36,11 @@ def rwkv7_fwd_kernel(
     pid_b = tl.program_id(0)
     pid_h = tl.program_id(1)
 
-    # --- 1. 计算 Batch 掩码 ---
     b_range = pid_b * MINI_BSZ + tl.arange(0, MINI_BSZ)
     b_mask = b_range < B_BATCH
     cols = tl.arange(0, H_SIZE)
 
-    # 【稳定性修复 2/2】：强制使用 64 位整数进行指针运算
-    # 核心原因：防止在 Batch, T_LEN, N_HEAD, H_SIZE 较大时发生 32 位整数溢出，
-    # 导致计算出错误的负数内存地址。同时，这也能规避 AMD 编译器在处理
-    # 32 位到 64 位地址扩展时可能存在的 Bug。
+    # 指针运算全部使用 int64，避免大 tensor 时 32 位偏移溢出。
     b_range_i64 = b_range.to(tl.int64)
     N_HEAD_i64 = tl.cast(N_HEAD, tl.int64)
     T_LEN_i64 = tl.cast(T_LEN, tl.int64)
@@ -58,11 +48,9 @@ def rwkv7_fwd_kernel(
     pid_h_i64 = tl.cast(pid_h, tl.int64)
     CHUNK_LEN_i64 = tl.cast(CHUNK_LEN, tl.int64)
 
-    # --- 2. 构造各种形状的掩码 ---
     ptr_mask = b_mask[:, None]
     state_mask = b_mask[:, None, None]
 
-    # --- 3. 计算基础偏移 (使用 64 位整数) ---
     base_ptr_off = (
         (b_range_i64[:, None] * N_HEAD_i64 * T_LEN_i64 * H_SIZE_i64)
         + (pid_h_i64 * T_LEN_i64 * H_SIZE_i64)
@@ -72,7 +60,6 @@ def rwkv7_fwd_kernel(
         pid_h_i64 * H_SIZE_i64 * H_SIZE_i64
     )
 
-    # --- 4. 初始化状态加载 ---
     row_idx = tl.arange(0, H_SIZE)[None, :, None]
     col_idx = tl.arange(0, H_SIZE)[None, None, :]
     state = tl.load(
@@ -82,7 +69,6 @@ def rwkv7_fwd_kernel(
     for t in range(0, T_LEN):
         t_off = t * H_SIZE
 
-        # a. 向量加载
         rv = tl.load(R + base_ptr_off + t_off, mask=ptr_mask, other=0.0).to(tl.float32)
         wv = tl.load(W + base_ptr_off + t_off, mask=ptr_mask, other=0.0).to(tl.float32)
         kv = tl.load(K + base_ptr_off + t_off, mask=ptr_mask, other=0.0).to(tl.float32)
@@ -92,7 +78,6 @@ def rwkv7_fwd_kernel(
             tl.float32
         )
 
-        # b. 数学计算
         w_decay = tl.exp(-tl.exp(wv))
         sa_vec = tl.sum(state * av[:, None, :], axis=2)
         tl.store(
@@ -101,20 +86,18 @@ def rwkv7_fwd_kernel(
             mask=ptr_mask,
         )
 
-        # c. 状态演进
         state = (
             state * w_decay[:, None, :]
             + sa_vec[:, :, None] * bv[:, None, :]
             + vv[:, :, None] * kv[:, None, :]
         )
 
-        # d. 计算输出
         y_vec = tl.sum(state * rv[:, None, :], axis=2)
         tl.store(
             OUT + base_ptr_off + t_off, y_vec.to(OUT.dtype.element_ty), mask=ptr_mask
         )
 
-        # e. 状态快照
+        # checkpoint 保存每 chunk 结束时的 state，供反向使用。
         if (t + 1) % CHUNK_LEN == 0:
             chkp_t = (tl.cast(t, tl.int64) + 1) // CHUNK_LEN_i64 - 1
             chunk_num_i64 = T_LEN_i64 // CHUNK_LEN_i64
@@ -136,9 +119,7 @@ def rwkv7_fwd_kernel(
             )
 
 
-# ======================================================================================
-#                                   无 Mask 反向传播
-# ======================================================================================
+#  无 Mask 反向传播
 @triton.autotune(
     configs=[
         triton.Config({"MINI_BSZ": 1}, num_warps=num_warps, num_stages=num_stages)
@@ -280,9 +261,7 @@ def rwkv7_bwd_kernel(
             )
 
 
-# ======================================================================================
-#                                   带 Mask 前向传播
-# ======================================================================================
+#  带 Mask 前向传播
 @triton.autotune(
     configs=[
         triton.Config({"MINI_BSZ": 1}, num_warps=num_warps, num_stages=num_stages)
@@ -402,9 +381,7 @@ def rwkv7_fwd_kernel_with_mask(
             )
 
 
-# ======================================================================================
-#                                   带 Mask 反向传播
-# ======================================================================================
+#  带 Mask 反向传播
 @triton.autotune(
     configs=[
         triton.Config({"MINI_BSZ": 1}, num_warps=num_warps, num_stages=num_stages)

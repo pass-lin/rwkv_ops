@@ -1,3 +1,5 @@
+"""RWKV-7-SN 算子工厂（按后端与 KERNEL_TYPE 分发）。"""
+
 import keras
 from keras import ops
 
@@ -5,12 +7,22 @@ from ..rwkv7_kernel import _use_pallas, _use_triton
 
 
 def transpose_head(x, head_first):
+    """统一输入布局为 [B, H, T, K]。"""
     if head_first:
         return ops.transpose(x, (0, 2, 1, 3))
     return x
 
 
 def get_generalized_delta_rule_sn(HEAD_SIZE=64, KERNEL_TYPE="cuda"):
+    """返回 RWKV-7-SN chunkwise 训练算子与推理算子。
+
+    Args:
+        HEAD_SIZE: int，head 维度大小，必须为 4 的倍数。
+        KERNEL_TYPE: str，可选 "cuda" / "triton" / "native" / "pallas"（JAX）。
+
+    Returns:
+        (train_op, inference_op)：均为函数。
+    """
     assert HEAD_SIZE % 4 == 0
     from .native_keras_op import generalized_delta_rule_sn
 
@@ -56,6 +68,15 @@ def get_generalized_delta_rule_sn(HEAD_SIZE=64, KERNEL_TYPE="cuda"):
 
 
 def get_rnn_generalized_delta_rule_sn(HEAD_SIZE=64, KERNEL_TYPE="cuda"):
+    """返回 RWKV-7-SN 单步（T=1）算子。
+
+    Args:
+        HEAD_SIZE: int，head 维度大小，必须为 4 的倍数。
+        KERNEL_TYPE: str，仅 "cuda" 启用 FFI/C++ 扩展，其余回退 native。
+
+    Returns:
+        single_step_op：函数。
+    """
     assert HEAD_SIZE % 4 == 0
     from .native_keras_op import generalized_delta_rule_sn_single_step
 

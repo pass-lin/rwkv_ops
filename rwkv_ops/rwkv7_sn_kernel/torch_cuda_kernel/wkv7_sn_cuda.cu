@@ -248,7 +248,7 @@ __global__ void forward_inference_kernel_sn(int T, int H,
     for (int j = 0; j < C; ++j) s_[base + j] = state[j];
 }
 
-/* -------------------- 无 mask 训练前向 Kernel -------------------- */
+/*  无 mask 训练前向 Kernel  */
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_kernel_sn_no_mask(int T, int H,
                                           F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
@@ -305,7 +305,7 @@ __global__ void forward_kernel_sn_no_mask(int T, int H,
     }
 }
 
-/* -------------------- 无 mask 训练反向 Kernel -------------------- */
+/*  无 mask 训练反向 Kernel  */
 template<int C> __launch_bounds__(C, 2)
 __global__ void backward_kernel_sn_no_mask(int T, int H,
                                            F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
@@ -425,7 +425,7 @@ __global__ void backward_kernel_sn_no_mask(int T, int H,
     }
 }
 
-/* -------------------- 无 mask 推理 Kernel -------------------- */
+/*  无 mask 推理 Kernel  */
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_inference_kernel_sn_no_mask(int T, int H,
                                                     F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
@@ -478,7 +478,7 @@ __global__ void forward_inference_kernel_sn_no_mask(int T, int H,
 }
 
 
-/* -------------------- Host 接口 -------------------- */
+/*  Host 接口  */
 void cuda_forward_sn(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, bf* a, bf* b,
                      const float* tau, const float* mask,
                      bf* y, float* s, float* sa, float* h0) {
@@ -509,7 +509,7 @@ void cuda_forward_inference_sn(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, 
     forward_inference_kernel_sn<C><<<blocks, threads>>>(T, H, w, q, k, v, a, b, tau, mask, y, s, h0);
 }
 
-/* -------------------- Host 接口（无 mask） -------------------- */
+/*  Host 接口（无 mask）  */
 void cuda_forward_sn_no_mask(int B, int T, int H, bf* w, bf* q, bf* k, bf* v, bf* a, bf* b,
                              const float* tau,
                              bf* y, float* s, float* sa, float* h0) {

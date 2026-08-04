@@ -1,6 +1,4 @@
-"""
-JAX 版 RWKV7-SN 单步 wkv kernel（仅前向）
-"""
+"""JAX 版 RWKV7-SN 单步 wkv kernel（仅前向）。"""
 
 from __future__ import annotations
 import pathlib
@@ -17,12 +15,9 @@ from jax.sharding import NamedSharding, PartitionSpec
 _CURRENT_DIR = pathlib.Path(__file__).parent.absolute()
 _NVCC_WRAPPER = _CURRENT_DIR.parents[1] / "cuda_tools" / "nvcc_wrap"
 
-# =========================================================================
-# SPMD 切分规则 (Einsum 风格)
-# b=Batch, h=Head, k/m=HeadDim
-# 支持 DP（batch 维切分）与 TP（head 维切分）
-# tau 为 [B, H]（per-head），do_sn 为 [B]（per-sample）
-# =========================================================================
+#  SPMD 切分规则（Einsum 风格）
+# b=Batch, h=Head, k/m=HeadDim。支持 DP（batch 维）与 TP（head 维）。
+# tau 为 [B, H]（per-head），do_sn 为 [B]（per-sample）。
 FWD_RULE = "b h k, b h k, b h k, b h k, b h k, b h k, b h, b, b h k m -> b h k, b h k m"
 
 
@@ -67,6 +62,14 @@ def _create_partition(impl_fn):
 
 
 def get_jax_generalized_delta_rule_sn_single_step(HEAD_SIZE=64):
+    """返回 RWKV-7-SN 单步（T=1）JAX-CUDA FFI 算子。
+
+    Args:
+        HEAD_SIZE: int，head 维度大小，必须为 4 的倍数。
+
+    Returns:
+        single_step_op：函数，输入 T=1，输出 (y, final_state)。
+    """
     _BUILD_DIR = _CURRENT_DIR / f"build_single_step_{HEAD_SIZE}"
     _SO_PATH = _BUILD_DIR / "wkv7_sn_single_step.so"
 
@@ -166,6 +169,23 @@ def get_jax_generalized_delta_rule_sn_single_step(HEAD_SIZE=64):
         output_final_state: bool = True,
         head_first: bool = False,
     ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
+        """RWKV-7-SN 单步推理（JAX-CUDA FFI 入口）。
+
+        Args:
+            r, w, k, v, a, b: [B, 1, H, K]（head_first=False）或 [B, H, 1, K]（head_first=True）。
+            tau: [B, H]，float32，必须 > 0。
+            do_sn: [B]，bool 或 int32。非 0 表示对该 sample 执行 SN。
+            initial_state: [B, H, K, K] 或 [1, H, K, K]，float32，可选。
+            output_final_state: bool，是否返回最终 state。
+            head_first: bool，输入输出是否 head 维优先。
+
+        Returns:
+            out: [B, 1, H, K]（或 [B, H, 1, K]），bfloat16。
+            final_state: [B, H, K, K]，float32。output_final_state=False 时不返回。
+
+        Raises:
+            ValueError: 时间维不为 1。
+        """
         r = _transpose_head(r, head_first)
         w = _transpose_head(w, head_first)
         k = _transpose_head(k, head_first)

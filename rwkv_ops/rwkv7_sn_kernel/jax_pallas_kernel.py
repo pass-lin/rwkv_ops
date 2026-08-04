@@ -1,24 +1,4 @@
-"""
-JAX 版 RWKV-7 State Neutralization Pallas Kernel 封装
-
-设计目标：
-- 作为 KERAS_BACKEND=jax 且 KERNEL_TYPE=native（或显式 pallas）时
-  非 CPU 平台（GPU/TPU）的默认 SN kernel。
-- kernel 本体只使用稳定的公开 Pallas API（pl.pallas_call / pl.BlockSpec /
-  pl.program_id / ref 索引 / lax.fori_loop / jnp），不写死任何后端私有 API，
-  以便同时兼容 Triton 后端、Mosaic GPU 以及 TPU。
-- 后端与编译参数由 rwkv_ops.pallas_utils 统一选择（autotune + 缓存）；
-  custom_partitioning 即使在 eager 调用下也会 trace 内层函数，因此每个
-  custom_vjp 入口（primal / _fwd / _bwd）都先用真实数组调用对应 warmup
-  （内部走 ensure_config），再走 SPMD 包装（内层只被 trace，仅查缓存）。
-
-相对非 SN 版本（rwkv7_kernel/jax_pallas_kernel.py）的增量：
-- tau: per-head per-chunk 阈值，形状 [B, N, T//16]（公共接口为 [B, T//16, N]）
-- mask: chunk-level 标志，形状 [B, T//16]，所有 head 共享
-- 无 mask / 带 mask 两套 forward / backward kernel
-- chunk 边界（每 16 tokens）执行 State Neutralization：
-  state = tau * tanh(state / tau)，带 mask 时按 mask blend
-"""
+"""JAX 版 RWKV7-SN Pallas kernel 封装。"""
 
 from __future__ import annotations
 
@@ -35,10 +15,8 @@ from ..pallas_utils import create_partition, ensure_config, launch
 
 CHUNK_LEN = 16
 
-# =========================================================================
-# SPMD 切分规则 (Einsum 风格)
+#  SPMD 切分规则（Einsum 风格）
 # b=Batch, n=Head, t=Time, h=HeadDim, c=Chunk
-# =========================================================================
 FWD_RULE = (
     "b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n c, b n h h -> "
     "b n t h, b n t h, b n c h h"
@@ -68,6 +46,7 @@ def _q_spec(qs):
 
 
 def _sharding_like_q(qs):
+    """为输出构造与输入 q 同形的 sharding。"""
     spec = _q_spec(qs)
     if spec is None:
         return qs
@@ -146,7 +125,16 @@ def _apply_sn_to_final_state(
     tau: jnp.ndarray,
     mask: Optional[jnp.ndarray] = None,
 ) -> jnp.ndarray:
-    """state: [B, N, H, H]; tau: [B, N, C]; mask: [B, C]（可选）。"""
+    """对最终 state 应用 State Neutralization。
+
+    Args:
+        state: [B, N, H, H], float32。
+        tau: [B, N, C], float32。
+        mask: [B, C], float32（可选）。
+
+    Returns:
+        [B, N, H, H], float32。
+    """
     last_tau = tau[:, :, -1][:, :, None, None]
     tau_safe = jnp.maximum(last_tau, 1e-6)
     sn_state = last_tau * jnp.tanh(state / tau_safe)
@@ -156,9 +144,7 @@ def _apply_sn_to_final_state(
     return jnp.where(last_mask > 0, sn_state, state)
 
 
-# =========================================================================
-# Pallas Kernel 本体（纯公开 API，后端无关）
-# =========================================================================
+#  Pallas kernel 本体（纯公开 API）
 def _rwkv7_sn_fwd_kernel(
     r_ref,
     w_ref,
@@ -172,6 +158,11 @@ def _rwkv7_sn_fwd_kernel(
     sa_ref,
     chkp_ref,
 ):
+    """无 mask 前向 Pallas kernel。
+
+    grid 为 (B, N)，每个 program 处理一个 (batch, head)。
+    chunk 内静态展开 16 步，chunk 边界无条件执行 SN。
+    """
     b = pl.program_id(0)
     h = pl.program_id(1)
     num_chunks = r_ref.shape[2] // CHUNK_LEN
@@ -201,7 +192,7 @@ def _rwkv7_sn_fwd_kernel(
             y_vec = jnp.sum(state * rv[None, :], axis=1)
             o_ref[b, h, t, :] = y_vec.astype(o_ref.dtype)
 
-        # 先保存 SN 之前的 state 供反向使用，再执行 State Neutralization
+        # checkpoint 保存 SN 之前的 state 供反向使用。
         chkp_ref[b, h, c] = state
         tau_v = tau_ref[b, h, c].astype(jnp.float32)
         tau_safe = jnp.maximum(tau_v, 1e-6)
@@ -225,6 +216,10 @@ def _rwkv7_sn_fwd_kernel_with_mask(
     sa_ref,
     chkp_ref,
 ):
+    """带 mask 前向 Pallas kernel。
+
+    与无 mask 版本相同，但按 mask 选择是否执行 SN。
+    """
     b = pl.program_id(0)
     h = pl.program_id(1)
     num_chunks = r_ref.shape[2] // CHUNK_LEN
@@ -254,7 +249,7 @@ def _rwkv7_sn_fwd_kernel_with_mask(
             y_vec = jnp.sum(state * rv[None, :], axis=1)
             o_ref[b, h, t, :] = y_vec.astype(o_ref.dtype)
 
-        # 先保存 SN 之前的 state 供反向使用，再按 mask 选择是否执行 SN
+        # checkpoint 保存 SN 之前的 state 供反向使用。
         chkp_ref[b, h, c] = state
         tau_v = tau_ref[b, h, c].astype(jnp.float32)
         tau_safe = jnp.maximum(tau_v, 1e-6)
@@ -287,6 +282,7 @@ def _rwkv7_sn_bwd_kernel(
     dtau_ref,
     dh0_ref,
 ):
+    """无 mask 反向 Pallas kernel。"""
     b = pl.program_id(0)
     h = pl.program_id(1)
     num_chunks = r_ref.shape[2] // CHUNK_LEN
@@ -295,10 +291,10 @@ def _rwkv7_sn_bwd_kernel(
 
     def chunk_body(c_rev, dS):
         c = num_chunks - 1 - c_rev
-        # chkp 保存的是 SN 之前的 state
+        # chkp 保存的是 SN 之前的 state。
         S_t = chkp_ref[b, h, c].astype(jnp.float32)
 
-        # 先对下游梯度 dS 应用 SN 导数
+        # 先对下游梯度 dS 应用 SN 导数。
         tau_v = tau_ref[b, h, c].astype(jnp.float32)
         tau_safe = jnp.maximum(tau_v, 1e-6)
         u = S_t / tau_safe
@@ -374,6 +370,7 @@ def _rwkv7_sn_bwd_kernel_with_mask(
     dtau_ref,
     dh0_ref,
 ):
+    """带 mask 反向 Pallas kernel。"""
     b = pl.program_id(0)
     h = pl.program_id(1)
     num_chunks = r_ref.shape[2] // CHUNK_LEN
@@ -382,10 +379,10 @@ def _rwkv7_sn_bwd_kernel_with_mask(
 
     def chunk_body(c_rev, dS):
         c = num_chunks - 1 - c_rev
-        # chkp 保存的是 SN 之前的 state
+        # chkp 保存的是 SN 之前的 state。
         S_t = chkp_ref[b, h, c].astype(jnp.float32)
 
-        # 先对下游梯度 dS 应用 SN 导数（按 mask blend）
+        # 先对下游梯度 dS 应用 SN 导数（按 mask blend）。
         tau_v = tau_ref[b, h, c].astype(jnp.float32)
         tau_safe = jnp.maximum(tau_v, 1e-6)
         m = mask_ref[b, c].astype(jnp.float32)
@@ -441,9 +438,7 @@ def _rwkv7_sn_bwd_kernel_with_mask(
     dh0_ref[b, h] = dS.astype(dh0_ref.dtype)
 
 
-# =========================================================================
-# 无 Mask 的 Pallas Launcher
-# =========================================================================
+#  无 mask launcher
 def _fwd_out_shape(r):
     B, N, T, H = r.shape
     return [
@@ -537,6 +532,7 @@ _wkv7_sn_bwd_spmd.def_partition(
 
 @jax.custom_vjp
 def rwkv7_sn_kernel_pallas(r, w, k, v, a, b, tau, h0):
+    """无 mask Pallas 训练 kernel 公开入口。"""
     _wkv7_sn_fwd_warmup(r, w, k, v, a, b, tau, h0)
     out, sa_out, state_chkp = _wkv7_sn_fwd_spmd(r, w, k, v, a, b, tau, h0)
     final_state = _apply_sn_to_final_state(state_chkp[:, :, -1, :, :], tau)
@@ -570,9 +566,7 @@ def _bwd(res, grads):
 rwkv7_sn_kernel_pallas.defvjp(_fwd, _bwd)
 
 
-# =========================================================================
-# 带 Mask 的 Pallas Launcher
-# =========================================================================
+#  带 mask launcher
 def _wkv7_sn_fwd_with_mask_pallas_call(r, w, k, v, a, b, tau, mask, h0):
     B, N, T, H = r.shape
     return launch(
@@ -647,6 +641,7 @@ _wkv7_sn_bwd_with_mask_spmd.def_partition(
 
 @jax.custom_vjp
 def rwkv7_sn_kernel_with_mask_pallas(r, w, k, v, a, b, tau, mask, h0):
+    """带 mask Pallas 训练 kernel 公开入口。"""
     _wkv7_sn_fwd_with_mask_warmup(r, w, k, v, a, b, tau, mask, h0)
     out, sa_out, state_chkp = _wkv7_sn_fwd_with_mask_spmd(
         r, w, k, v, a, b, tau, mask, h0
@@ -686,9 +681,7 @@ def _bwd_with_mask(res, grads):
 rwkv7_sn_kernel_with_mask_pallas.defvjp(_fwd_with_mask, _bwd_with_mask)
 
 
-# =========================================================================
-# 对外 API 暴露
-# =========================================================================
+#  对外 API
 def generalized_delta_rule_sn(
     r: jnp.ndarray,
     w: jnp.ndarray,
@@ -702,9 +695,28 @@ def generalized_delta_rule_sn(
     output_final_state: bool = True,
     head_first: bool = False,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
+    """带 State Neutralization 的 RWKV-7 广义 delta 规则（Pallas chunkwise 训练版）。
+
+    Args:
+        r, w, k, v, a, b: [B, T, H, K], bfloat16。T 必须被 16 整除。
+        tau: [B, T//16, H], float32。阈值，必须严格 > 1。
+        mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SN；
+            仅当 output_final_state=True 时生效。
+        initial_state: [B, H, K, K] 或 [1, H, K, K]，float32，可选。
+        output_final_state: bool，是否返回最终 state。
+        head_first: bool，输入输出是否 head 维优先 ([B, H, T, K])。
+
+    Returns:
+        out: [B, T, H, K]，bfloat16。
+        final_state: [B, H, K, K]，float32。
+            output_final_state=False 时不返回；mask=None 时为 None。
+
+    Raises:
+        ValueError: T 不被 16 整除，或 tau/mask 形状不匹配。
+    """
     dtype = r.dtype
 
-    # 统一转换为 head-first [B, N, T, H]
+    # 统一转换为 head-first [B, N, T, H]。
     r = _transpose_head(r, head_first)
     w = _transpose_head(w, head_first)
     k = _transpose_head(k, head_first)
@@ -744,7 +756,7 @@ def generalized_delta_rule_sn(
         out = jnp.asarray(out, dtype)
         return (out, last_state) if output_final_state else out
 
-    # 无 mask 路径：chunk 边界无条件执行 SN
+    # 无 mask 路径：chunk 边界无条件执行 SN。
     out, _ = rwkv7_sn_kernel_pallas(r, w, k, v, a, b, tau, h0)
     out = jnp.transpose(out, (0, 2, 1, 3))
     out = jnp.asarray(out, dtype)
@@ -795,4 +807,5 @@ def generalized_delta_rule_sn_inference(
 
 
 def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
+    """返回 Pallas 后端的 (训练算子, 推理算子)。"""
     return [generalized_delta_rule_sn, generalized_delta_rule_sn_inference]

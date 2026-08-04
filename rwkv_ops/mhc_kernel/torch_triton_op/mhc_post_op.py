@@ -1,3 +1,5 @@
+"""mHC Post-Op PyTorch -> Triton 桥接。"""
+
 import torch
 import triton
 from ..triton_kernel.mhc_post_op import (
@@ -12,10 +14,10 @@ def mhc_post_op_forward(
     h_post_raw: torch.tensor,
     H_res: torch.tensor,
 ) -> torch.tensor:
+    """PyTorch 前向 Triton launcher（私有）。"""
     batch, time, NSIZE, channel = x_expanded.shape
     total_batch_time = batch * time
 
-    # 内存连续化处理
     x_v = x_expanded.reshape(-1, NSIZE, channel).contiguous()
     h_v = h_post_raw.reshape(-1, NSIZE).contiguous()
     H_v = H_res.reshape(-1, NSIZE, NSIZE).contiguous()
@@ -60,24 +62,23 @@ def mhc_post_op_backward(
     h_post_raw: torch.Tensor,
     H_res: torch.Tensor,
 ):
+    """PyTorch 反向 Triton launcher（私有）。"""
     B, T, n, C = x_expanded.shape
     total_bt = B * T
 
-    # 1. 连续化
     x_v = x_expanded.reshape(-1, n, C).contiguous()
     h_v = h_post_raw.reshape(-1, n).contiguous()
     H_v = H_res.reshape(-1, n, n).contiguous()
     l_v = layer_out.reshape(-1, C).contiguous()
     g_out_v = grad_output.reshape(-1, n, C).contiguous()
 
-    # 2. 准备输出 (不使用 Workspace)
     grad_x = torch.empty_like(x_v)
     grad_l = torch.empty_like(l_v)
-    # 规约结果使用 FP32 保证精度，最后再转
+    # 规约结果用 FP32 保证精度，再转回目标 dtype。
     grad_h = torch.empty_like(h_v, dtype=torch.float32)
     grad_H = torch.empty_like(H_v, dtype=torch.float32)
 
-    # 3. 启动 Kernel: Grid Y 设为 1，强迫单个 Program 处理整行
+    # Grid Y = 1 使单个 program 处理整行 C，从而消除原子加。
     grid = (total_bt, 1)
 
     mhc_fused_backward_kernel[grid](
@@ -151,31 +152,25 @@ def mhc_post_op(
     h_post_raw: torch.Tensor,
     H_res: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    Multi-Head Control (MHC) Post-Operation.
+    """Multi-Head Control (mHC) Post-Operation（Triton 加速）。
 
-    该算子实现了 RWKV 模型中的 MHC 后处理融合逻辑，包括：
-    1. 门控计算: w = 2 * sigmoid(h_post_raw)
-    2. 通道分配: x_delta = w * layer_out
-    3. 矩阵混合: x_mixed = H_res @ x_expanded
-    4. 融合输出: Out = x_mixed + x_delta
+    该算子将核心层单流输出通过 h_post 门控分发回多流，并与 H_res 混合后的
+    多流残差相加，得到更新后的多流表示。
 
-    使用 Triton 实现全融合 Kernel，相比原生 PyTorch 具有更低的显存带宽占用和更高的执行效率。
+    Args:
+        layer_out: [B, T, C], bfloat16。核心层（Attention/FFN）输出。
+        x_expanded: [B, T, n, C], bfloat16。原始多流残差。
+        h_post_raw: [B, T, n], float32/bfloat16。未激活分发权重。
+        H_res: [B, T, n, n], float32/bfloat16。双随机流混合矩阵。
 
-    参数:
-        layer_out (torch.Tensor): 形状为 [B, T, C]，bfloat16 类型。
-        x_expanded (torch.Tensor): 形状为 [B, T, n, C]，bfloat16 类型。
-        h_post_raw (torch.Tensor): 形状为 [B, T, n]，float32 或 bfloat16 类型。
-        H_res (torch.Tensor): 形状为 [B, T, n, n]，float32 或 bfloat16 类型。
+    Returns:
+        [B, T, n, C], bfloat16。更新后的多流残差。
 
-    返回:
-        torch.Tensor: 形状为 [B, T, n, C]，bfloat16 类型。
+    Raises:
+        ValueError: C 不能被 128 整除。
 
-    形状说明:
-        B: Batch Size
-        T: Sequence Length
-        C: Channel Size (Hidden Dimension)
-        n: Head Size (State Dimension, 通常为 4 或 8)
+    Examples:
+        >>> x_next = mhc_post_op(layer_out, x_expanded, h_post_raw, H_res)
     """
     C = layer_out.shape[-1]
     if C % 128 != 0:

@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
-"""
-清理 RWKV-OPS 各 CUDA/FFI 算子产生的构建产物。
-
-包括：
-- rwkv6/rwkv7 的 JAX FFI build 目录与 .so
-- rwkv7 单步 kernel 的 build 目录与 .so
-- 项目根目录及算子目录下的 .ninja_log / .ninja_deps
-- 各目录下的 __pycache__
-
-用法：
-    python clean_build_artifacts.py
-"""
+"""清理 RWKV-OPS 各 CUDA/FFI 算子产生的构建产物。"""
 
 import shutil
 from pathlib import Path
@@ -65,6 +54,7 @@ def _glob_paths(pattern: str):
 
 
 def _remove(path: Path):
+    """删除单个文件、目录或符号链接。"""
     if path.is_dir():
         shutil.rmtree(path, ignore_errors=True)
         print(f"[DIR]  {path}")
@@ -74,6 +64,7 @@ def _remove(path: Path):
 
 
 def _clean_pycache():
+    """递归删除项目中的 __pycache__ 目录。"""
     count = 0
     for pycache in _PROJECT_ROOT.rglob("__pycache__"):
         if pycache.is_dir():
@@ -84,6 +75,11 @@ def _clean_pycache():
 
 
 def clean_all():
+    """按 _CLEAN_PATTERNS 清理构建产物并删除所有 __pycache__。
+
+    Returns:
+        int, 清理的文件/目录数量。
+    """
     removed = 0
     for pattern in _CLEAN_PATTERNS:
         for path in _glob_paths(pattern):
@@ -100,6 +96,7 @@ def clean_all():
 
 
 def main():
+    """命令行入口。"""
     clean_all()
 
 

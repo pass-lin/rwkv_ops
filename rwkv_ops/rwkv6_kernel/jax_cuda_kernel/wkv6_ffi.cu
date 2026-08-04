@@ -1,9 +1,4 @@
-/* RWKV-6 JAX FFI CUDA kernel
- *
- * 核心 CUDA 计算逻辑直接复用自旧的 rwkv6_kernel/jax_kernel_cuda/rwkv_kernels.cu
- * （其本身与 torch_cuda_kernel/wkv6_cuda.cu 的算法完全等价），仅将入口包装为
- * XLA FFI 格式以适配 JAX >= 0.6 的新自定义调用路径。
- */
+// RWKV-6 JAX FFI CUDA kernel。
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -31,6 +26,15 @@ __device__ __forceinline__ F from_float(float x) {
     return F(x);
 }
 
+// RWKV-6 前向核心：每个 thread 负责 head 维度的一个位置 i，沿 T 扫描。
+//
+// Args:
+//   state: 当前 thread 的 _N_ 维状态数组（寄存器）。
+//   _r/_k/_v/_w/_u: [B, H, T, N]（row-major，T 为慢变维），bfloat16。
+//   _y: [B, H, T, N]，bfloat16。输出。
+//
+// 编译期宏:
+//   _N_: head size，必须被 4 整除。
 template <typename F_in, typename F_out>
 __device__ void kernel_forward_core(const int B, const int T, const int C, const int H,
                                     const int b, const int h, const int i, const float *state,
@@ -89,6 +93,10 @@ __device__ void kernel_forward_core(const int B, const int T, const int C, const
     }
 }
 
+// RWKV-6 前向（带初始/最终状态）。
+//
+// grid = (B * H, 1, 1)，block = (_N_, 1, 1)。
+// 每个 block 处理一个 (batch, head)，最终写回 final_state。
 template <typename F_in, typename F_out>
 __global__ void kernel_forward_state(const int B, const int T, const int C, const int H,
                                      const bool is_custom_state, const int32_t *map,
@@ -124,6 +132,9 @@ __global__ void kernel_forward_state(const int B, const int T, const int C, cons
     }
 }
 
+// RWKV-6 前向（无状态）。
+//
+// grid = (B * H, 1, 1)，block = (_N_, 1, 1)。
 template <typename F_in, typename F_out>
 __global__ void kernel_forward(const int B, const int T, const int C, const int H,
                                const F_in *__restrict__ const _r,
@@ -140,6 +151,10 @@ __global__ void kernel_forward(const int B, const int T, const int C, const int 
     kernel_forward_core(B, T, C, H, b, h, i, state, _r, _k, _v, _w, _u, _y);
 }
 
+// RWKV-6 反向：计算 gr 与 gu。
+//
+// 沿时间正序扫描，复用前向状态递推。_gu 按 batch/head/channel 写出后，
+// Python 侧再按 batch 求和 reshape 为 (H, N)。
 template <typename F_in, typename F_out>
 __global__ void kernel_backward_101(const int B, const int T, const int C, const int H,
                                     const F_in *__restrict__ const _r,
@@ -190,6 +205,10 @@ __global__ void kernel_backward_101(const int B, const int T, const int C, const
     _gu[b * C + h * _N_ + i] = from_float<F_out>(gu);
 }
 
+// RWKV-6 反向：计算 gk。
+//
+// 沿时间逆序扫描，用独立状态数组 scccc 递推。指针算术使用 int64_t，
+// 避免大 tensor 时 32 位偏移溢出。
 template <typename F_in, typename F_out>
 __global__ void kernel_backward_102(const int B, const int T, const int C, const int H,
                                     const F_in *__restrict__ const _r,
@@ -235,6 +254,9 @@ __global__ void kernel_backward_102(const int B, const int T, const int C, const
     }
 }
 
+// RWKV-6 反向：计算 gv。
+//
+// 沿时间逆序扫描。_u 指针先偏移到当前 head 起点。
 template <typename F_in, typename F_out>
 __global__ void kernel_backward_103(const int B, const int T, const int C, const int H,
                                     const F_in *__restrict__ const _r,
@@ -284,6 +306,10 @@ __global__ void kernel_backward_103(const int B, const int T, const int C, const
     }
 }
 
+// RWKV-6 反向：计算 gw。
+//
+// 沿时间双向扫描：先逆序累加 sbbbb 缓存，再正序组合得到 gw。
+// 数组 sbbbb 的大小依赖编译期 _T_。
 template <typename F_in, typename F_out>
 __global__ void kernel_backward_201(const int B, const int T, const int C, const int H,
                                     const F_in *__restrict__ const _r,
@@ -357,6 +383,7 @@ __global__ void kernel_backward_201(const int B, const int T, const int C, const
     _gw[t_T_1] = from_float<F_out>(0.0f);
 }
 
+// Host 启动函数：带初始/最终状态前向。
 template <typename T_in, typename T_out>
 void HostApplyRWKVWithState(cudaStream_t stream, int B, int T, int C, int H, bool S,
                             const int32_t *state_map,
@@ -370,6 +397,7 @@ void HostApplyRWKVWithState(cudaStream_t stream, int B, int T, int C, int H, boo
         output_y, output_s);
 }
 
+// Host 启动函数：无状态前向。
 template <typename T_in, typename T_out>
 void HostApplyRWKV(cudaStream_t stream, int B, int T, int C, int H,
                    const T_in *input_r, const T_in *input_k, const T_in *input_v,
@@ -380,6 +408,7 @@ void HostApplyRWKV(cudaStream_t stream, int B, int T, int C, int H,
         B, T, C, H, input_r, input_k, input_v, input_w, input_u, output_y);
 }
 
+// Host 启动函数：反向，启动 4 个 kernel 分别计算 gr/gu、gk、gv、gw。
 template <typename T_in, typename T_out>
 void HostApplyGradient(cudaStream_t stream, int B, int T, int C, int H,
                        const T_in *r, const T_in *k, const T_in *v, const T_in *w,
@@ -399,7 +428,7 @@ void HostApplyGradient(cudaStream_t stream, int B, int T, int C, int H,
 
 } // namespace
 
-/* -------------------- XLA FFI Handlers -------------------- */
+//  XLA FFI Handlers 
 
 // 仅实现 bf16 路径；其它 dtype 通过 native_keras_op 回退。
 
@@ -486,7 +515,7 @@ static ffi::Error Wkv6FwdWithStateHost(cudaStream_t stream,
     return ffi::Error::Success();
 }
 
-/* -------------------- FFI 注册 -------------------- */
+//  FFI 注册 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
     Wkv6Fwd, Wkv6FwdHost,
     ffi::Ffi::Bind()

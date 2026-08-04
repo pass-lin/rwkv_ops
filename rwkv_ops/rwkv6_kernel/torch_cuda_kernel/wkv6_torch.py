@@ -1,13 +1,14 @@
+"""RWKV-6 PyTorch CUDA 函数式接口。"""
+
 import os
 import warnings
+
 import torch
 from torch.utils.cpp_extension import load
 
 
 def get_torch_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
-    """
-    构建并返回 RWKV-6 Torch CUDA 函数式算子。
-    """
+    """构建并返回 RWKV-6 Torch CUDA 函数式算子。"""
     current_file_path = os.path.abspath(__file__)
     current_dir_path = os.path.dirname(current_file_path)
 
@@ -28,9 +29,7 @@ def get_torch_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
         extra_cuda_cflags=extra_cuda_cflags,
     )
 
-    # ============================================================
-    # 训练用 Autograd Function（无状态）
-    # ============================================================
+    # 训练用 Autograd Function（无状态）。
     class RWKV6Function(torch.autograd.Function):
         @staticmethod
         def forward(ctx, B, T, C, H, r, k, v, w, u):
@@ -49,6 +48,7 @@ def get_torch_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
             ctx.dtype = r.dtype
             ctx.save_for_backward(r, k, v, w, u)
 
+            # fp16 输入输出固定为 fp32，与 CUDA 内核行为对齐。
             y_dtype = r.dtype if r.dtype != torch.float16 else torch.float32
             y = torch.empty(
                 (B, T, C),
@@ -119,14 +119,12 @@ def get_torch_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
                     B, T, C, H, r, k, v, w, u, gy, gr, gk, gv, gw, gu
                 )
 
-            # gu 原始 shape 为 (B, C)，需要按 batch 求和后 reshape 为与输入 u 一致
+            # gu 原始 shape 为 (B, C)，按 batch 求和后 reshape 回与输入 u 一致。
             gu = torch.sum(gu, dim=0).view(u.shape)
 
             return (None, None, None, None, gr, gk, gv, gw, gu)
 
-    # ============================================================
-    # 带初始状态/最终状态的前向（仅前向，无梯度）
-    # ============================================================
+    # 带初始状态/最终状态的前向（仅前向，无梯度）。
     class RWKV6ForwardWithState(torch.autograd.Function):
         @staticmethod
         def forward(ctx, B, T, C, H, is_custom_state, state_map, r, k, v, w, u, s):
@@ -172,9 +170,6 @@ def get_torch_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
                 "RWKV6 forward_with_state does not support backward"
             )
 
-    # ============================================================
-    # 对外函数式接口
-    # ============================================================
     def rwkv6(
         r,
         k,
@@ -185,6 +180,30 @@ def get_torch_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
         output_final_state: bool = False,
         state_map=None,
     ):
+        """RWKV-6 Torch CUDA 函数式算子。
+
+        Args:
+            r, k, v, w: [B, T, C]，bfloat16/float16/float32。
+            u: [H, N] 或 [C]，与输入同 dtype。
+            initial_state: [B, H, N, N] 或 [H, N, N]，与输入同 dtype，可选。
+            output_final_state: bool，是否返回最终状态。
+            state_map: [B] int64/int32，可选。当 initial_state 的 batch 维度
+                与 B 不一致时使用。
+
+        Returns:
+            y: [B, T, C]，与输入同 dtype。
+            final_state: [B, H, N, N]，与输入同 dtype（当
+                output_final_state=True）。
+
+        Raises:
+            ValueError: T 超过 max_sequence_length，或 C 不能被 head_size 整除，
+                或 state_map 不合法。
+
+        Examples:
+            >>> y = rwkv6(r, k, v, w, u)
+            >>> y, state = rwkv6(r, k, v, w, u, initial_state=h0,
+            ...                   output_final_state=True)
+        """
         if r.device.type != "cuda":
             from ..native_keras_op import rwkv6 as native_rwkv6
 

@@ -448,7 +448,11 @@ pytest tests/jax -v -m "not slow"
 本节为**强制规范**，新增/修改代码必须遵守；评审时应以本节为准驳回不合规
 注释。整体结构参照 Keras 3 的 docstring 风格，正文语言沿用项目现有的中文
 （小节标题用英文：`Args` / `Returns` / `Raises` / `Examples`）。
-禁止使用"------" "======="等分割线
+禁止使用"------" "======="等一切形式的分割线  
+这种# ===== 推理 Kernel（无 Mask） ===== 也不行  
+应该是# 推理 Kernel（无 Mask）
+同样的，cpp/cuda里/* -------------------- C 接口函数 -------------------- */
+应该是// C 接口函数 或 /* C 接口函数 */
 注释里禁止出现1. 2. 3. 4.等不便于修改的不符合人类注释风格的情况
 
 **模块 docstring（一行制）**
@@ -471,6 +475,40 @@ pytest tests/jax -v -m "not slow"
    `T % 16 != 0`、`M % 32 != 0`）。
 
 私有函数（下划线开头）允许只写一行描述。
+
+**函数 docstring 示例**
+
+```python
+def generalized_delta_rule_sn(r, w, k, v, a, b, tau, mask=None,
+                              initial_state=None, output_final_state=True,
+                              head_first=False):
+    """带 State Neutralization 的 RWKV-7 广义 delta 规则（chunkwise 训练版）。
+
+    在 chunk 边界（每 16 个 token）按 mask 对 state 执行
+    `state = tau * tanh(state / tau)`；输出始终基于 SN 之前的 state。
+
+    Args:
+        r, w, k, v, a, b: [B, T, H, K], bfloat16。T 必须被 16 整除。
+        tau: [B, T//16, H], float32。阈值，必须严格 > 1。
+        mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SN；
+            仅当 output_final_state=True 时生效。
+        initial_state: [B, H, K, K] 或 [1, H, K, K], float32, 可选。
+        output_final_state: bool, 是否返回最终 state。
+        head_first: bool, 输入输出是否 head 维优先 ([B, H, T, K])。
+
+    Returns:
+        out: [B, T, H, K], 与输入同 dtype。
+        final_state: [B, H, K, K], float32。
+            output_final_state=False 时不返回；mask=None 时为 None。
+
+    Raises:
+        ValueError: T 不被 16 整除，或 tau/mask 形状不匹配。
+
+    Examples:
+        >>> y, state = generalized_delta_rule_sn(
+        ...     r, w, k, v, a, b, tau, mask, initial_state=h0)
+    """
+```
 
 **类 docstring（结构按序）**
 
@@ -512,6 +550,29 @@ Keras 3 只规定 Python docstring；CUDA/C++ 按同等精神执行，同为强�
   写法"。
 - 禁止内容同 Python：性能数字、与 README 重复的教程、待办、吐槽、署名。
 - 语言与 Python 侧一致：中文正文，结构词（如 `Args:` 可选）用英文。
+
+**CUDA kernel 块注释示例**
+
+```cpp
+// RWKV-7 wkv 前向 CUDA kernel。
+//
+// 每个 block 处理一个 (batch, head)，顺序扫描 T 步，在每个 chunk 末尾
+// 写出 SN 之前的 state checkpoint。
+//
+// Args:
+//   r, w, k, v, a, b: [B, H, T, K], bfloat16, row-major。
+//   h0:  [B, H, K, K], float32, row-major。初始 state。
+//   out: [B, H, T, K], bfloat16, row-major。输出 y。
+//   sa:  [B, H, T, K], float32, row-major。反向所需中间量。
+//   s_:  [B, H, T//16, K, K], float32, row-major。SN 之前的 state checkpoint。
+//
+// 编译期宏:
+//   _C_: head_size，必须被 4 整除。
+//   CHUNK_LEN: chunk 长度，固定 16。
+//
+// 指针算术一律使用 64 位整数，防止大 tensor 时 32 位偏移溢出。
+__global__ void wkv7_forward(...)
+```
 
 ### 7.3 CUDA/Triton/Pallas 代码
 

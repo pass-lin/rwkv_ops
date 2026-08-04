@@ -1,3 +1,5 @@
+// RWKV-7-SN JAX FFI CUDA kernel。
+
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <xla/ffi/api/ffi.h>
@@ -15,10 +17,25 @@ __device__ inline bf to_bf(const float &u) {
 }
 typedef bf *__restrict__ F_;
 
-/* -------------------- 训练前向 Kernel --------------------
- * mask: [B, T//16]，>0 表示在该 chunk 边界执行 State Neutralization。
- * tau 只作为阈值，必须 > 0。
- * -------------------- */
+// RWKV-7-SN 训练前向 CUDA kernel（带 mask）。
+//
+// 每个 block 处理一个 (batch, head)，顺序扫描 T 步，在每个 chunk 末尾
+// 写出 SN 之前的 state checkpoint。
+//
+// Args:
+//   w, q, k, v, a, b: [B, H, T, C], bfloat16, row-major。
+//   tau: [B, H, T//16], float32, row-major。阈值，必须 > 0。
+//   mask: [B, T//16], float32, row-major。>0 表示该 chunk 边界执行 SN。
+//   y: [B, H, T, C], bfloat16, row-major。输出。
+//   s: [B, H, T//16, C, C], float32, row-major。SN 之前的 state checkpoint。
+//   sa: [B, H, T, C], float32, row-major。反向所需中间量。
+//   h0: [B, H, C, C], float32, row-major。初始 state。
+//
+// 编译期宏:
+//   _C_: head_size，由 -D_C_ 传入。
+//   _CHUNK_LEN_: chunk 长度，固定 16。
+//
+// 指针算术一律使用 64 位整数，防止大 tensor 时 32 位偏移溢出。
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_kernel_sn(int T, int H,
                                   F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
@@ -78,9 +95,22 @@ __global__ void forward_kernel_sn(int T, int H,
     }
 }
 
-/* -------------------- 训练反向 Kernel --------------------
- * mask 控制是否在该 chunk 边界产生 dtau 并修改梯度。
- * -------------------- */
+// RWKV-7-SN 训练反向 CUDA kernel（带 mask）。
+//
+// 每个 block 处理一个 (batch, head)，逆序扫描 T 步，在每个 chunk 边界先算 dtau，
+// 再对下游梯度乘 sech2。
+//
+// Args:
+//   w, q, k, v, a, b: [B, H, T, C], bfloat16, row-major。前向输入。
+//   tau, mask: 同 forward_kernel_sn。
+//   dy: [B, H, T, C], bfloat16, row-major。输出梯度。
+//   s, sa: [B, H, T//16, C, C] / [B, H, T, C], float32, row-major。前向保存量。
+//   dht: [B, H, C, C], float32, row-major。最终 state 梯度。
+//   dh0: [B, H, C, C], float32, row-major。初始 state 梯度输出。
+//   dtau: [B, H, T//16], float32, row-major。
+//   dw/dq/dk/dv/da/db: [B, H, T, C], bfloat16, row-major。输入梯度输出。
+//
+// 编译期宏同 forward_kernel_sn。
 template<int C> __launch_bounds__(C, 2)
 __global__ void backward_kernel_sn(int T, int H,
                                    F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
@@ -206,10 +236,17 @@ __global__ void backward_kernel_sn(int T, int H,
     }
 }
 
-/* -------------------- 推理 Kernel --------------------
- * 仅用于 prefill / 纯推理：不保存 s checkpoint 与 sa，减少显存占用。
- * T 必须被 _CHUNK_LEN_ 整除；若需任意长度请用单步 kernel。
- * -------------------- */
+// RWKV-7-SN 推理前向 CUDA kernel（带 mask）。
+//
+// 仅用于 prefill / 纯推理：不保存 s checkpoint 与 sa，减少显存占用。
+// T 必须被 _CHUNK_LEN_ 整除；若需任意长度请用单步 kernel。
+//
+// Args:
+//   y: [B, H, T, C], bfloat16, row-major。输出。
+//   s: [B, H, C, C], float32, row-major。最终 state。
+//   其余同 forward_kernel_sn。
+//
+// 编译期宏同 forward_kernel_sn。
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_inference_kernel_sn(int T, int H,
                                             F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
@@ -266,7 +303,7 @@ __global__ void forward_inference_kernel_sn(int T, int H,
     for (int j = 0; j < C; ++j) s_[base + j] = state[j];
 }
 
-/* -------------------- Host 函数 -------------------- */
+// Host wrapper for forward_kernel_sn。
 static ffi::Error WKV7SnFwdHost(
     cudaStream_t stream,
     ffi::Buffer<ffi::BF16> w,
@@ -310,6 +347,7 @@ static ffi::Error WKV7SnFwdHost(
     return ffi::Error::Success();
 }
 
+// Host wrapper for backward_kernel_sn。
 static ffi::Error WKV7SnBwdHost(
     cudaStream_t stream,
     ffi::Buffer<ffi::BF16> w,
@@ -369,6 +407,7 @@ static ffi::Error WKV7SnBwdHost(
     return ffi::Error::Success();
 }
 
+// Host wrapper for forward_inference_kernel_sn。
 static ffi::Error WKV7SnInferenceHost(
     cudaStream_t stream,
     ffi::Buffer<ffi::BF16> w,
@@ -410,9 +449,10 @@ static ffi::Error WKV7SnInferenceHost(
     return ffi::Error::Success();
 }
 
-/* -------------------- 训练前向 Kernel（无 mask） --------------------
- * 在 chunk 边界无条件执行 State Neutralization。
- * -------------------- */
+// RWKV-7-SN 训练前向 CUDA kernel（无 mask）。
+//
+// 在 chunk 边界无条件执行 State Neutralization。
+// Args 与 forward_kernel_sn 相同，但不读 mask。
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_kernel_sn_no_mask(int T, int H,
                                           F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
@@ -469,7 +509,9 @@ __global__ void forward_kernel_sn_no_mask(int T, int H,
     }
 }
 
-/* -------------------- 训练反向 Kernel（无 mask） -------------------- */
+// RWKV-7-SN 训练反向 CUDA kernel（无 mask）。
+//
+// Args 与 backward_kernel_sn 相同，但不读 mask。
 template<int C> __launch_bounds__(C, 2)
 __global__ void backward_kernel_sn_no_mask(int T, int H,
                                            F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
@@ -591,12 +633,14 @@ __global__ void backward_kernel_sn_no_mask(int T, int H,
     }
 }
 
-/* -------------------- 推理 Kernel（无 mask） -------------------- */
+// RWKV-7-SN 推理前向 CUDA kernel（无 mask）。
+//
+// Args 与 forward_inference_kernel_sn 相同，但不读 mask。
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_inference_kernel_sn_no_mask(int T, int H,
-                                                    F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
-                                                    const float* __restrict__ tau_,
-                                                    bf *y_, float *s_, float *h0_) {
+                                                      F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
+                                                      const float* __restrict__ tau_,
+                                                      bf *y_, float *s_, float *h0_) {
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
     float state[C] = {0};
     __shared__ float q[C], k[C], w[C], a[C], b[C];
@@ -645,7 +689,7 @@ __global__ void forward_inference_kernel_sn_no_mask(int T, int H,
     for (int j = 0; j < C; ++j) s_[base + j] = state[j];
 }
 
-/* -------------------- Host 函数（无 mask） -------------------- */
+// Host wrapper for forward_kernel_sn_no_mask。
 static ffi::Error WKV7SnFwdNoMaskHost(
     cudaStream_t stream,
     ffi::Buffer<ffi::BF16> w,
@@ -687,6 +731,7 @@ static ffi::Error WKV7SnFwdNoMaskHost(
     return ffi::Error::Success();
 }
 
+// Host wrapper for backward_kernel_sn_no_mask。
 static ffi::Error WKV7SnBwdNoMaskHost(
     cudaStream_t stream,
     ffi::Buffer<ffi::BF16> w,
@@ -744,6 +789,7 @@ static ffi::Error WKV7SnBwdNoMaskHost(
     return ffi::Error::Success();
 }
 
+// Host wrapper for forward_inference_kernel_sn_no_mask。
 static ffi::Error WKV7SnInferenceNoMaskHost(
     cudaStream_t stream,
     ffi::Buffer<ffi::BF16> w,
@@ -783,7 +829,7 @@ static ffi::Error WKV7SnInferenceNoMaskHost(
     return ffi::Error::Success();
 }
 
-/* -------------------- FFI 注册 -------------------- */
+// XLA FFI handler 注册。
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
     Wkv7SnFwd, WKV7SnFwdHost,
     ffi::Ffi::Bind()

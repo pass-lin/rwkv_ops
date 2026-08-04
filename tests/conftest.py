@@ -1,12 +1,4 @@
-"""
-公共 pytest 配置与工具函数。
-
-注意：
-- 本文件不 import torch/jax，也不 import rwkv_ops/keras，
-  避免在收集阶段锁定 Keras 后端。
-- torch/jax 相关的 import 请放到 tests/torch/ 或 tests/jax/ 各自的
-  conftest.py / 测试函数里。
-"""
+"""公共 pytest 配置与共享工具函数。"""
 
 import sys
 from pathlib import Path
@@ -14,13 +6,16 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-# 让测试能导入项目根目录的 clean_build_artifacts
+# 根 conftest 不在收集阶段导入 torch/jax/keras/rwkv_ops，避免锁定 Keras 后端。
+
+# 让测试能导入项目根目录的 clean_build_artifacts。
 _PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def pytest_configure(config):
+    """注册 pytest 自定义 markers。"""
     config.addinivalue_line("markers", "torch: require PyTorch")
     config.addinivalue_line("markers", "jax: require JAX")
     config.addinivalue_line("markers", "numpy: require Keras numpy backend")
@@ -40,17 +35,38 @@ def pytest_sessionfinish(session, exitstatus):
 
 @pytest.fixture(scope="session")
 def rng():
+    """返回固定种子 42 的 NumPy 随机数生成器。
+
+    Returns:
+        np.random.Generator: 固定种子生成器。
+    """
     return np.random.default_rng(42)
 
 
 @pytest.fixture(scope="session")
 def sample_shape():
-    """默认 (B, T, H, N)。"""
+    """RWKV-6 测试默认形状。
+
+    Returns:
+        tuple: (B, T, H, N) = (2, 16, 6, 64)。
+    """
     return 2, 16, 6, 64
 
 
 @pytest.fixture(scope="session")
 def sample_inputs(rng, sample_shape):
+    """RWKV-6 测试输入张量。
+
+    Args:
+        rng: np.random.Generator，随机数生成器。
+        sample_shape: tuple, (B, T, H, N)。
+
+    Returns:
+        tuple: (r, k, v, w, u, init_state)，均为 float32 numpy 数组。
+            r/k/v/w: [B, T, H*N]。
+            u: [H, N]。
+            init_state: [B, H, N, N]。
+    """
     B, T, H, N = sample_shape
     C = H * N
     r = rng.standard_normal((B, T, C), dtype=np.float32)
@@ -64,12 +80,29 @@ def sample_inputs(rng, sample_shape):
 
 @pytest.fixture(scope="session")
 def rwkv7_shape():
-    """RWKV-7 默认 (B, T, H, K)。"""
+    """RWKV-7 测试默认形状。
+
+    Returns:
+        tuple: (B, T, H, K) = (5, 128, 6, 64)。
+    """
     return 5, 128, 6, 64
 
 
 @pytest.fixture(scope="session")
 def rwkv7_inputs(rng, rwkv7_shape):
+    """RWKV-7 测试输入张量。
+
+    a 与 b 取同一向量的正负单位向量，w 用 -softplus - 0.5 保证稳定衰减。
+
+    Args:
+        rng: np.random.Generator，随机数生成器。
+        rwkv7_shape: tuple, (B, T, H, K)。
+
+    Returns:
+        dict: 包含 r/k/v/a/b/w/h0，均为 float32 numpy 数组。
+            r/k/v/a/b/w: [B, T, H, K]。
+            h0: [B, H, K, K]。
+    """
     B, T, H, K = rwkv7_shape
     r = rng.standard_normal((B, T, H, K), dtype=np.float32)
     k = rng.standard_normal((B, T, H, K), dtype=np.float32)
@@ -81,7 +114,7 @@ def rwkv7_inputs(rng, rwkv7_shape):
     b = (z / norm).astype(np.float32)
 
     w_raw = rng.standard_normal((B, T, H, K), dtype=np.float32)
-    # softplus(w) = log(1 + exp(w))
+    # softplus(w) = log(1 + exp(w))。
     w = -np.log1p(np.exp(w_raw)) - 0.5
     w = w.astype(np.float32)
 
@@ -91,9 +124,17 @@ def rwkv7_inputs(rng, rwkv7_shape):
 
 @pytest.fixture(scope="session")
 def rwkv7_sn_inputs(rng, rwkv7_inputs):
-    """
-    RWKV-7-SN 测试输入：在 rwkv7_inputs 基础上补充 tau。
-    tau = softplus(x) + 1，x 随机，均值约 4 以让 tau 接近 100（近似恒等映射）。
+    """RWKV-7-SN 测试输入，在 rwkv7_inputs 基础上补充 tau。
+
+    tau = softplus(x) + 1，x 均值约 7 使 tau 接近 1000，近似恒等映射。
+
+    Args:
+        rng: np.random.Generator，随机数生成器。
+        rwkv7_inputs: dict, RWKV-7 基础输入。
+
+    Returns:
+        dict: 包含 rwkv7_inputs 全部字段与 tau。
+            tau: [B, T//16, H], float32。
     """
     B, T, H, _ = rwkv7_inputs["r"].shape
     x = rng.standard_normal((B, T // 16, H), dtype=np.float32) * 0.5 + 7.0
@@ -103,12 +144,28 @@ def rwkv7_sn_inputs(rng, rwkv7_inputs):
 
 @pytest.fixture(scope="session")
 def mhc_shape():
-    """mHC 默认 (B, T, n, C)。"""
+    """mHC 测试默认形状。
+
+    Returns:
+        tuple: (B, T, n, C) = (64, 64, 4, 512)。
+    """
     return 64, 64, 4, 512
 
 
 @pytest.fixture(scope="session")
 def mhc_pre_inputs(rng, mhc_shape):
+    """mHC pre-op 测试输入张量。
+
+    Args:
+        rng: np.random.Generator，随机数生成器。
+        mhc_shape: tuple, (B, T, n, C)。
+
+    Returns:
+        dict: 包含 x/h_res/h_pre，均为 float32 numpy 数组。
+            x: [B, T, n, C]。
+            h_res: [B, T, n, n]。
+            h_pre: [B, T, n]。
+    """
     B, T, n, C = mhc_shape
     x = rng.standard_normal((B, T, n, C), dtype=np.float32)
     h_res = rng.standard_normal((B, T, n, n), dtype=np.float32)
@@ -118,6 +175,19 @@ def mhc_pre_inputs(rng, mhc_shape):
 
 @pytest.fixture(scope="session")
 def mhc_post_inputs(rng, mhc_shape):
+    """mHC post-op 测试输入张量。
+
+    Args:
+        rng: np.random.Generator，随机数生成器。
+        mhc_shape: tuple, (B, T, n, C)。
+
+    Returns:
+        dict: 包含 layer_out/x_expanded/h_post/H_res，均为 float32 numpy 数组。
+            layer_out: [B, T, C]。
+            x_expanded: [B, T, n, C]。
+            h_post: [B, T, n]。
+            H_res: [B, T, n, n]。
+    """
     B, T, n, C = mhc_shape
     layer_out = rng.standard_normal((B, T, C), dtype=np.float32)
     x_expanded = rng.standard_normal((B, T, n, C), dtype=np.float32)
@@ -132,7 +202,14 @@ def mhc_post_inputs(rng, mhc_shape):
 
 
 def to_numpy(x):
-    """统一把后端张量转成 numpy。"""
+    """把后端张量统一转成 numpy 数组。
+
+    Args:
+        x: torch.Tensor / jax.Array / tf.Tensor / np.ndarray 等后端张量。
+
+    Returns:
+        np.ndarray: float32 numpy 数组。bfloat16 会先做 float() 转换。
+    """
     if hasattr(x, "detach"):
         x = x.detach().cpu()
         import torch
@@ -152,13 +229,17 @@ def assert_allclose_with_stats(
     atol=1e-3,
     rtol=1e-3,
 ):
-    """
-    数值比较工具：打印最大/平均差异、完全一致数、近似一致数，
-    然后调用 np.testing.assert_allclose。
+    """数值比较工具：打印统计信息后调用 np.testing.assert_allclose。
 
-    参考 rwkv7 测试代码中的“完全一致”语义：
-    - exact_match：转换到 float32 后逐元素 == 的数量
-    - close_match：|ref - tgt| <= atol 的元素数量
+    Args:
+        ref: 参考张量，任意后端，会被 to_numpy 转成 float32。
+        tgt: 目标张量，任意后端，会被 to_numpy 转成 float32。
+        name: str, 当前比较项名称，用于日志与错误信息。
+        atol: float, 绝对容差。
+        rtol: float, 相对容差。
+
+    Returns:
+        None。断言失败时抛出 AssertionError。
     """
     ref_arr = to_numpy(ref).astype(np.float32)
     tgt_arr = to_numpy(tgt).astype(np.float32)

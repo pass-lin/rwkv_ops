@@ -1,7 +1,17 @@
+"""RWKV-6 原生 Keras-ops 逐 timestep 参考实现。"""
+
 from keras import ops
 
 
 class RWKVKernelOperator:
+    """RWKV-6 核算子（while_loop 逐步 RNN，State 全程 fp32）。
+
+    Args:
+        head_size: int。每个 head 的维度。
+        max_sequence_length: int。最大序列长度（原生实现不限制，
+            仅用于与 CUDA 版本签名对齐）。
+    """
+
     def __init__(self, head_size, max_sequence_length):
         self.head_size = head_size
         self.max_sequence_length = max_sequence_length
@@ -9,6 +19,19 @@ class RWKVKernelOperator:
     def __call__(
         self, r, k, v, w, u, with_state=False, init_state=None, state_map=None
     ):
+        """执行 RWKV-6 前向。
+
+        Args:
+            r, k, v, w: [B, T, C]，任意实 dtype。
+            u: [H, N] 或 [C]，与输入同 dtype。
+            with_state: bool，是否返回最终状态。
+            init_state: [B, H, N, N] 或 [H, N, N]，float32，可选。
+            state_map: [B] int64，可选。
+
+        Returns:
+            y: [B, T, C]，与 r.dtype 相同。
+            final_state: [B, H, N, N]，float32（当 with_state=True）。
+        """
         B, T, C = ops.shape(r)
         assert C % self.head_size == 0
         H = C // self.head_size
@@ -59,13 +82,13 @@ class RWKVKernelOperator:
                     f"请确保state_map的值域为[0, {state_kinds})"
                 )
             s = ops.take(init_state, state_map, axis=0)
+            # 与 CUDA 对齐，State 全程用 fp32 累加。
             s = ops.cast(s, "float32")
 
         else:
             assert state_map is None
             s = ops.zeros((B, H, self.head_size, self.head_size), dtype="float32")
 
-        # 为与 CUDA 保持一致，State 全程用 fp32 累加
         u = ops.cast(u, "float32")
         w = ops.exp(-ops.exp(ops.cast(w, "float32")))
 

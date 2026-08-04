@@ -1,15 +1,4 @@
-"""
-RWKV-7 State Neutralization (Adaptive Tanh Clipping) — 半线性 Chunkwise 训练与单步推理
-
-设计要点：
-- 训练时只在 chunk 边界（每 16 token）执行 State Neutralization，使用 ops.cond 避免非边界
-  步的冗余计算与梯度传播。
-- 单步推理时每步都计算 SN，再用 ops.where 根据 per-sample mask 选择。
-- `tau` 仅作为 State Neutralization 的阈值（必须 > 0）；是否执行 SN 由同 batch-chunk 维度的
-  `mask` 决定，形状为 [B, T//16]。
-- 不再内置 token-level mask。调用者需在外部保证 padding 位置 k=0, a=0, w=-inf，
-  并把全 padding chunk 的 mask 置 0。
-"""
+"""RWKV-7 State Neutralization 原生 Keras 参考实现。"""
 
 import warnings
 
@@ -18,16 +7,7 @@ from keras import ops
 
 
 def transpose_head(x, head_first):
-    """
-    将输入张量统一转置为 [B, H, T, N] 并转为 float32。
-
-    参数:
-        x:          [B, T, H, N]（head_first=False）或 [B, H, T, N]（head_first=True）
-        head_first: True 表示输入已是 [B, H, T, N]，无需转置
-
-    返回:
-        [B, H, T, N]，float32
-    """
+    """将输入统一转置为 [B, H, T, N] 并转为 float32。"""
     x = ops.cast(x, "float32")
     if head_first:
         return x
@@ -35,18 +15,7 @@ def transpose_head(x, head_first):
 
 
 def _apply_state_norm_cond(state, t, tau, mask):
-    """
-    训练用：只在 chunk 边界按 mask 执行 State Neutralization，使用 ops.cond 避免冗余计算。
-
-    参数:
-        state: [B, H, N, N]，float32
-        t:     scalar Tensor，当前 token 索引
-        tau:   [B, T//16, H]，float32，必须 > 0
-        mask:  [B, T//16]，float32/bool，>0 表示执行 SN
-
-    返回:
-        [B, H, N, N]
-    """
+    """训练用：只在 chunk 边界按 mask 执行 State Neutralization。"""
     is_boundary = ops.equal(ops.mod(t + 1, 16), 0)
 
     def _true_fn():
@@ -78,17 +47,7 @@ def _apply_state_norm_cond(state, t, tau, mask):
 
 
 def _apply_state_norm_uncond(state, t, tau):
-    """
-    训练用无 mask 版本：在 chunk 边界无条件执行 State Neutralization。
-
-    参数:
-        state: [B, H, N, N]，float32
-        t:     scalar Tensor，当前 token 索引
-        tau:   [B, T//16, H]，float32，必须 > 0
-
-    返回:
-        [B, H, N, N]
-    """
+    """训练用：在 chunk 边界无条件执行 State Neutralization。"""
     is_boundary = ops.equal(ops.mod(t + 1, 16), 0)
 
     def _true_fn():
@@ -124,36 +83,31 @@ def generalized_delta_rule_sn(
     output_final_state=True,
     head_first=False,
 ):
-    """
-    带 State Neutralization 的 RWKV-7 广义 Delta 规则（Chunkwise 训练版本）。
+    """带 State Neutralization 的 RWKV-7 广义 delta 规则（chunkwise 训练版）。
 
-    说明：
-    - 训练版本会保存反向传播所需的中间量；纯推理请使用后端对应的 inference
-      入口，可减少显存占用。
-    - T 必须被 16 整除（tau/mask 是 per-chunk）。
-    - `tau` 只表示阈值，必须严格 > 0；是否执行 SN 由 `mask` 决定。
+    在 chunk 边界（每 16 个 token）按 mask 对 state 执行
+    `state = tau * tanh(state / tau)`；输出始终基于 SN 之前的 state。
 
-    参数:
-        r, w, k, v, a, b:
-            [B, T, H, N]（head_first=False）或 [B, H, T, N]（head_first=True）。
-            T 必须被 16 整除。
-        tau:
-            [B, T//16, H]，float32。阈值，必须 > 0。
-        mask:
-            [B, T//16]，float32/bool。>0 表示该 chunk 边界执行 SN。
-            只有 ``output_final_state=True`` 且显式提供 mask 时才会被使用；
-            其他情况下将调用无 mask 算子（chunk 边界无条件执行 SN）。
-        initial_state:
-            [B, H, N, N] 或 [1, H, N, N]，可选。
-        output_final_state:
-            bool，是否返回最终 State。
-        head_first:
-            bool，输入输出是否 head 维度优先。
+    Args:
+        r, w, k, v, a, b: [B, T, H, K]，bfloat16。T 必须被 16 整除。
+        tau: [B, T//16, H]，float32。阈值，必须严格 > 1。
+        mask: [B, T//16]，float32 或 None。>0 的 chunk 边界执行 SN；
+            仅当 output_final_state=True 时生效。
+        initial_state: [B, H, K, K] 或 [1, H, K, K]，float32，可选。
+        output_final_state: bool，是否返回最终 state。
+        head_first: bool，输入输出是否 head 维优先 ([B, H, T, K])。
 
-    返回:
-        - output_final_state=False 时返回 out。
-        - output_final_state=True 且 mask 显式提供时返回 (out, final_state)。
-        - output_final_state=True 且 mask=None 时返回 (out, None)，并弹出警告。
+    Returns:
+        out: [B, T, H, K]，与输入同 dtype。
+        final_state: [B, H, K, K]，float32。
+            output_final_state=False 时不返回；mask=None 时为 None。
+
+    Raises:
+        ValueError: T 不被 16 整除，或 tau/mask 形状不匹配。
+
+    Examples:
+        >>> y, state = generalized_delta_rule_sn(
+        ...     r, w, k, v, a, b, tau, mask, initial_state=h0)
     """
     DTYPE = r.dtype
 
@@ -185,7 +139,6 @@ def generalized_delta_rule_sn(
             )
     elif mask is not None and output_final_state:
         # mask 被显式提供但 output_final_state=False：为节省算力将忽略 mask。
-        # 这里不抛错，但也不使用 mask。
         pass
 
     if initial_state is not None:
@@ -236,9 +189,6 @@ def generalized_delta_rule_sn(
 
     state, out = ops.fori_loop(0, T, step, [state, out])
 
-    if keras_backend == "tensorflow":
-        out = ops.transpose(out.stack(), (1, 0, 2, 3))
-
     # 与 CUDA 后端保持一致：输出统一为 [B, T, H, N]（时间步优先）。
     out = ops.transpose(out, (0, 2, 1, 3))
 
@@ -273,22 +223,17 @@ def rwkv7_step_sn(
     tau,
     do_sn,
 ):
-    """
-    RWKV-7 单步推理（RNN 模式），带 State Neutralization。
+    """RWKV-7 单步推理（RNN 模式），带 State Neutralization。
 
-    参数:
-        r, w, k, v, a, b:
-            [B, H, N]，单步输入，已 head-first。
-        state:
-            [B, H, N, N]，float32。
-        tau:
-            [B, H] 或 [H]，float32，必须 > 0。
-        do_sn:
-            [B]，bool。
+    Args:
+        r, w, k, v, a, b: [B, H, N]，单步输入，已 head-first。
+        state: [B, H, N, N]，float32。
+        tau: [B, H] 或 [H]，float32，必须 > 0。
+        do_sn: [B]，bool。
 
-    返回:
-        o:         [B, H, N]
-        state_out: [B, H, N, N]
+    Returns:
+        o: [B, H, N]。
+        state_out: [B, H, N, N]，float32。
     """
     DTYPE = state.dtype
     B = ops.shape(state)[0]
@@ -335,20 +280,22 @@ def generalized_delta_rule_sn_single_step(
     output_final_state=True,
     head_first=False,
 ):
-    """
-    带 State Neutralization 的 RWKV-7 单步推理（native 入口）。
+    """带 State Neutralization 的 RWKV-7 单步推理（native 入口）。
 
-    参数:
-        r, w, k, v, a, b:
-            [B, 1, H, N]（head_first=False）或 [B, H, 1, N]（head_first=True）。
-        tau:
-            [B, H]，float32，必须 > 0。
-        do_sn:
-            [B]，bool。
-        initial_state, output_final_state, head_first: 同训练版本。
+    Args:
+        r, w, k, v, a, b: [B, 1, H, N]（head_first=False）或 [B, H, 1, N]（head_first=True）。
+        tau: [B, H]，float32，必须 > 0。
+        do_sn: [B]，bool。
+        initial_state: [B, H, N, N] 或 [1, H, N, N]，float32，可选。
+        output_final_state: bool，是否返回最终 state。
+        head_first: bool，输入输出是否 head 维优先。
 
-    返回:
-        out 或 (out, final_state)。
+    Returns:
+        out: [B, 1, H, N]（或 [B, H, 1, N]），与输入同 dtype。
+        final_state: [B, H, N, N]，float32。output_final_state=False 时不返回。
+
+    Raises:
+        ValueError: 时间维不为 1。
     """
     DTYPE = r.dtype
     time_axis = 2 if head_first else 1

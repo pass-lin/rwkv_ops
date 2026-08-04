@@ -1,3 +1,5 @@
+"""RWKV-OPS 包入口：解析环境变量并暴露全部算子 API。"""
+
 __version__ = "0.9.0"
 import os
 
@@ -53,6 +55,6 @@ rwkv7_op_sn_rnn = rnn_generalized_delta_rule_sn
 
 
 rwkv6_op = get_rwkv6_kernel(KERNEL_TYPE=KERNEL_TYPE)
-# 保留旧名称的向后兼容别名（其调用方式已变为函数式）
+# 保留旧名称的向后兼容别名
 RWKV6_OP = rwkv6_op
 mhc_pre_op, mhc_post_op = get_mhc_kernel(KERNEL_TYPE=KERNEL_TYPE)

@@ -1,7 +1,29 @@
+"""mHC Pre-Op 共享 Triton 内核（Sinkhorn-Knopp + Stream Aggregate）。"""
+
 import triton
 import triton.language as tl
 
 
+# mHC Pre-Op 前向 Triton kernel。
+#
+# 每个 program 处理 (BLOCK_BT, BLOCK_C) 个 (batch*time, channel) 元素：
+# pid_c == 0 的 program 负责 Sinkhorn-Knopp 生成双随机矩阵；
+# 所有 program 负责 Stream Aggregate 的加权求和。
+#
+# Args:
+#   x_ptr: [Total_BT, n, C], bfloat16, row-major。多流输入。
+#   h_res_in_ptr: [Total_BT, n, n], float32, row-major。未归一化残差矩阵。
+#   h_pre_in_ptr: [Total_BT, n], float32, row-major。未激活聚合权重。
+#   out_ptr: [Total_BT, C], bfloat16, row-major。聚合输出。
+#   H_res_out_ptr: [Total_BT, n, n], float32, row-major。双随机残差矩阵。
+#
+# 编译期宏:
+#   Total_BT_CONST: batch * time。
+#   NSIZE: 流数量 n。
+#   CSIZE: 通道数 C。
+#   NUM_ITERS: Sinkhorn-Knopp 迭代次数。
+#   EPS: 数值稳定常数。
+#   BLOCK_BT, BLOCK_C: tile 大小。
 @triton.autotune(
     configs=[
         triton.Config(
@@ -18,19 +40,16 @@ import triton.language as tl
 )
 @triton.jit
 def sinkhorn_aggregate_fused_kernel(
-    # --- 1. 指针参数 ---
     x_ptr,
     h_res_in_ptr,
     h_pre_in_ptr,
     out_ptr,
     H_res_out_ptr,
-    # --- 2. 编译时常量 ---
     Total_BT_CONST: tl.constexpr,
     NSIZE: tl.constexpr,
     CSIZE: tl.constexpr,
     NUM_ITERS: tl.constexpr,
     EPS: tl.constexpr,
-    # --- 3. 步幅参数 (constexpr) ---
     stride_x_bt: tl.constexpr,
     stride_x_n: tl.constexpr,
     stride_x_c: tl.constexpr,
@@ -44,7 +63,6 @@ def sinkhorn_aggregate_fused_kernel(
     stride_Hr_out_bt: tl.constexpr,
     stride_Hr_out_n1: tl.constexpr,
     stride_Hr_out_n2: tl.constexpr,
-    # --- 4. 调优参数 ---
     BLOCK_BT: tl.constexpr,
     BLOCK_C: tl.constexpr,
 ):
@@ -54,9 +72,7 @@ def sinkhorn_aggregate_fused_kernel(
     offs_bt = pid_bt * BLOCK_BT + tl.arange(0, BLOCK_BT)
     mask_bt = offs_bt < Total_BT_CONST
 
-    # -----------------------------------------------------------
-    # PART 1: Sinkhorn-Knopp (仅 pid_c == 0 执行)
-    # -----------------------------------------------------------
+    # Sinkhorn-Knopp 只在 pid_c == 0 时执行，避免重复写回。
     if pid_c == 0:
         offs_n1 = tl.arange(0, NSIZE)
         offs_n2 = tl.arange(0, NSIZE)
@@ -91,11 +107,8 @@ def sinkhorn_aggregate_fused_kernel(
         )
         tl.store(H_out_loc, P, mask=mask_bt[:, None, None])
 
-    # -----------------------------------------------------------
-    # PART 2: Stream Aggregate
-    # -----------------------------------------------------------
-
-    # 2.1 加载聚合权重 (一次性加载所有流的权重，效率最高)
+    # Stream Aggregate
+    # 加载聚合权重 (一次性加载所有流的权重，效率最高)
     offs_n = tl.arange(0, NSIZE)
     h_pre_ptr_loc = (
         h_pre_in_ptr
@@ -104,29 +117,20 @@ def sinkhorn_aggregate_fused_kernel(
     )
 
     h_pre = tl.load(h_pre_ptr_loc, mask=mask_bt[:, None], other=0.0).to(tl.float32)
-    w_pre = tl.sigmoid(h_pre)  # [BLOCK_BT, N]
+    w_pre = tl.sigmoid(h_pre)
 
-    # 2.2 聚合计算
     offs_c = pid_c * BLOCK_C + tl.arange(0, BLOCK_C)
     mask_c = offs_c < CSIZE
 
     acc = tl.zeros([BLOCK_BT, BLOCK_C], dtype=tl.float32)
 
-    # 用于列提取的辅助索引 [1, N]
     n_range = tl.arange(0, NSIZE)[None, :]
 
     for k in tl.static_range(NSIZE):
-        # --- 关键修改: 使用 Masking 提取第 k 列 ---
-        # w_pre: [BLOCK_BT, N]
-        # col_mask: [1, N] (例如 k=2 -> [0,0,1,0])
+        # 用掩码从 [BLOCK_BT, N] 权重中提取第 k 列，避免 gather。
         col_mask = n_range == k
-
-        # 1. 广播乘法: 保留第 k 列，其他置零
-        # 2. Sum(axis=1): 降维成 [BLOCK_BT]
-        # 3. [:, None]: 广播成 [BLOCK_BT, 1] 用于后续乘法
         w_k = tl.sum(w_pre * col_mask, axis=1)[:, None]
 
-        # 加载 x
         x_ptr_k = (
             x_ptr
             + offs_bt[:, None] * stride_x_bt
@@ -139,7 +143,6 @@ def sinkhorn_aggregate_fused_kernel(
 
         acc += val_x * w_k
 
-    # 2.3 写回
     out_loc = (
         out_ptr + offs_bt[:, None] * stride_out_bt + offs_c[None, :] * stride_out_c
     )
@@ -148,6 +151,25 @@ def sinkhorn_aggregate_fused_kernel(
     tl.store(out_loc, acc.to(tl.bfloat16), mask=store_mask)
 
 
+# mHC Pre-Op 反向 Triton kernel。
+#
+# 每个 program 处理一个 batch*time 实例，沿 Channel 维度循环分块。
+# Sinkhorn 梯度通过重算前向 P 并执行 VJP 逆向迭代得到；
+# Aggregate 梯度在 persistent 寄存器中累加，避免 atomic_add。
+#
+# Args:
+#   grad_out_ptr: [Total_BT, C], bfloat16, row-major。上游传给 out 的梯度。
+#   grad_H_res_out_ptr: [Total_BT, n, n], float32, row-major。上游传给 H_res 的梯度。
+#   x_ptr: [Total_BT, n, C], bfloat16, row-major。前向多流输入。
+#   h_res_in_ptr: [Total_BT, n, n], float32, row-major。前向未归一化残差矩阵。
+#   h_pre_in_ptr: [Total_BT, n], float32, row-major。前向未激活聚合权重。
+#   grad_x_ptr: [Total_BT, n, C], bfloat16, row-major。x 的梯度输出。
+#   grad_h_res_in_ptr: [Total_BT, n, n], float32, row-major。h_res 的梯度输出。
+#   grad_h_pre_in_ptr: [Total_BT, n], float32, row-major。h_pre 的梯度输出。
+#
+# 编译期宏:
+#   TOTAL_BT_CONST, NSIZE, CHANNEL_SIZE, NUM_ITERS, EPS。
+#   BLOCK_CHANNEL: channel tile 大小。
 @triton.autotune(
     configs=[
         triton.Config(
@@ -163,7 +185,6 @@ def sinkhorn_aggregate_fused_kernel(
 )
 @triton.jit
 def sinkhorn_aggregate_bwd_kernel(
-    # --- 1. 输入指针 ---
     grad_out_ptr,  # [Total_BT, C]
     grad_H_res_out_ptr,  # [Total_BT, n, n]
     x_ptr,  # [Total_BT, n, C]
@@ -173,13 +194,11 @@ def sinkhorn_aggregate_bwd_kernel(
     grad_x_ptr,  # [Total_BT, n, C]
     grad_h_res_in_ptr,  # [Total_BT, n, n]
     grad_h_pre_in_ptr,  # [Total_BT, n]
-    # --- 3. 编译时常量 ---
     TOTAL_BT_CONST: tl.constexpr,
     NSIZE: tl.constexpr,
     CHANNEL_SIZE: tl.constexpr,
     NUM_ITERS: tl.constexpr,
     EPS: tl.constexpr,
-    # --- 4. 步幅参数 (constexpr) ---
     stride_gout_bt: tl.constexpr,
     stride_gout_c: tl.constexpr,
     stride_gH_bt: tl.constexpr,
@@ -201,19 +220,14 @@ def sinkhorn_aggregate_bwd_kernel(
     stride_gh_res_n2: tl.constexpr,
     stride_gh_pre_bt: tl.constexpr,
     stride_gh_pre_n: tl.constexpr,
-    # --- 5. 调优参数 ---
     BLOCK_CHANNEL: tl.constexpr,
 ):
-    # 强制单 Block 处理整行 C 以消除 atomic_add
+    # Grid Y = 1 保证单个 program 处理整行 C，从而消除原子加。
     pid_bt = tl.program_id(0)
 
-    # ===========================================================
-    # PART 1: 精确 Sinkhorn 梯度 (先处理并写回，释放寄存器)
-    # ===========================================================
     off_n1 = tl.arange(0, NSIZE)
     off_n2 = tl.arange(0, NSIZE)
 
-    # [1.1] 加载原始输入 h_res_in 并重算前向 P
     h_res_ptr = (
         h_res_in_ptr
         + pid_bt * stride_h_res_bt
@@ -222,14 +236,13 @@ def sinkhorn_aggregate_bwd_kernel(
     )
     h_res = tl.load(h_res_ptr).to(tl.float32)
 
-    # 前向重算 (指数空间)
+    # 手写 VJP 强制重算前向 P，前向只保存原始输入以省显存。
     max_val = tl.max(tl.max(h_res, 1), 0)
     P = tl.exp(h_res - max_val)
     for _ in tl.range(NUM_ITERS):
         P /= tl.sum(P, axis=1)[:, None] + EPS
         P /= tl.sum(P, axis=0)[None, :] + EPS
 
-    # [1.2] 加载输出梯度并执行精确 VJP 逆向迭代
     gH_ptr = (
         grad_H_res_out_ptr
         + pid_bt * stride_gH_bt
@@ -239,12 +252,12 @@ def sinkhorn_aggregate_bwd_kernel(
     dP = tl.load(gH_ptr).to(tl.float32)
 
     for _ in tl.static_range(NUM_ITERS):
-        # 逆向列归一化: dX = dY - Y * sum(dY * Y)
+        # 逆向列归一化：dX = dY - Y * sum(dY * Y)
         dP = dP - P * tl.sum(dP * P, axis=0)[None, :]
         # 逆向行归一化
         dP = dP - P * tl.sum(dP * P, axis=1)[:, None]
-
     # 写回 grad_h_res = dP * P (映射回 Log 空间)
+
     grad_h_res = dP * P
     gh_res_out_ptr = (
         grad_h_res_in_ptr
@@ -254,35 +267,24 @@ def sinkhorn_aggregate_bwd_kernel(
     )
     tl.store(gh_res_out_ptr, grad_h_res)
 
-    # ===========================================================
-    # PART 2: Aggregate 梯度 (Persistent Reduction)
-    # ===========================================================
-
-    # [2.1] 准备聚合权重与掩码
     off_n = tl.arange(0, NSIZE)
     h_pre_ptr = h_pre_in_ptr + pid_bt * stride_h_pre_bt + off_n * stride_h_pre_n
     h_pre = tl.load(h_pre_ptr).to(tl.float32)
     w_pre = tl.sigmoid(h_pre)
-    dw_pre = w_pre * (1.0 - w_pre)  # Sigmoid 导数
-
+    dw_pre = w_pre * (1.0 - w_pre)
     # 持久化累加器
     acc_gh_pre = tl.zeros([NSIZE], dtype=tl.float32)
 
-    # [2.2] 跨步遍历 Channel 维度
     for start_c in tl.static_range(0, CHANNEL_SIZE, BLOCK_CHANNEL):
         off_c = start_c + tl.arange(0, BLOCK_CHANNEL)
         mask_c = off_c < CHANNEL_SIZE
 
-        # 加载 grad_out 块
         gout_ptr = grad_out_ptr + pid_bt * stride_gout_bt + off_c * stride_gout_c
         g_out = tl.load(gout_ptr, mask=mask_c, other=0.0).to(tl.float32)
 
-        # 遍历流计算 grad_x 并规约 grad_h_pre
         for k in tl.static_range(NSIZE):
-            # 获取当前流权重 (Masking trick)
             w_k = tl.sum(w_pre * (off_n == k), axis=0)
 
-            # A. 计算并存储 grad_x [k, c]
             gx_chunk = g_out * w_k
             gx_out_ptr = (
                 grad_x_ptr
@@ -292,15 +294,12 @@ def sinkhorn_aggregate_bwd_kernel(
             )
             tl.store(gx_out_ptr, gx_chunk.to(tl.bfloat16), mask=mask_c)
 
-            # B. 计算 grad_h_pre 规约分量
             x_ptr_k = x_ptr + pid_bt * stride_x_bt + k * stride_x_n + off_c * stride_x_c
             x_chunk = tl.load(x_ptr_k, mask=mask_c, other=0.0).to(tl.float32)
 
-            # dot_sum = sum_c(grad_out * x)
             dot_sum = tl.sum(g_out * x_chunk, axis=0)
             acc_gh_pre += dot_sum * (off_n == k)
 
-    # [2.3] 规约结束，应用 Sigmoid 导数并写回
     final_gh_pre = acc_gh_pre * dw_pre
     gh_pre_out_ptr = (
         grad_h_pre_in_ptr + pid_bt * stride_gh_pre_bt + off_n * stride_gh_pre_n

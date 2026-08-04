@@ -1,9 +1,4 @@
-"""
-RWKV-6 JAX FFI CUDA kernel（函数式接口）。
-
-编译/加载逻辑与 rwkv7_kernel/jax_cuda_kernel/wkv7_jax.py 对齐，
-核心 CUDA 计算复用 rwkv6_kernel/torch_cuda_kernel/wkv6_cuda.cu 的等价实现。
-"""
+"""RWKV-6 JAX FFI CUDA 函数式接口。"""
 
 from __future__ import annotations
 
@@ -19,14 +14,9 @@ import jax.tree_util as jtu
 from jax.experimental.custom_partitioning import custom_partitioning
 
 _CURRENT_DIR = pathlib.Path(__file__).parent.absolute()
-
-# 用于绕过 glibc 2.41+ 与 CUDA 13.1 的 rsqrt noexcept 冲突
 _NVCC_WRAPPER = _CURRENT_DIR.parents[1] / "cuda_tools" / "nvcc_wrap"
 
-# ---------------------------------------------------------------------------
-# Shardy 分片规则（与 rwkv7 风格一致）
-# 字母含义：b=Batch, t=Time, c=Channel(H*N), h=Head, n=HeadDim
-# ---------------------------------------------------------------------------
+# SPMD sharding rule：b=Batch, t=Time, c=Channel(H*N), h=Head, n=HeadDim。
 FWD_RULE = "b t c, b t c, b t c, b t c, h n -> b t c"
 BWD_RULE = "b t c, b t c, b t c, b t c, h n, b t c -> b t c, b t c, b t c, b t c, h n"
 FWD_STATE_RULE = "b t c, b t c, b t c, b t c, h n, b, b h n n -> b t c, b h n n"
@@ -47,7 +37,7 @@ def _bwd_infer_sharding(arg_shapes, arg_shardings):
 
 
 def _fwd_state_infer_sharding(arg_shapes, arg_shardings):
-    # y 跟随 r，final_state 跟随 init_state
+    # y 跟随 r，final_state 跟随 init_state。
     return (arg_shardings[0], arg_shardings[6])
 
 
@@ -64,6 +54,7 @@ def _create_partition(impl_fn):
 
 
 def get_jax_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
+    """构建并返回 RWKV-6 JAX CUDA 函数式算子。"""
     _BUILD_DIR = _CURRENT_DIR / f"build_{head_size}_{max_sequence_length}"
     _SO_PATH = _CURRENT_DIR / f"build_{head_size}_{max_sequence_length}" / "wkv6.so"
 
@@ -139,9 +130,7 @@ def get_jax_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
             return jnp.transpose(x, (0, 2, 1, 3))
         return x
 
-    # -----------------------------------------------------------------------
-    # 前向 kernel（无状态，可反传）
-    # -----------------------------------------------------------------------
+    # 前向 kernel（无状态，可反传）。
     def _rwkv6_fwd_impl(r, k, v, w, u):
         B, T, C = r.shape
         dtype = r.dtype
@@ -196,16 +185,14 @@ def get_jax_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
         r, k, v, w, u = res
         gy = jnp.asarray(gy, jnp.bfloat16)
         gr, gk, gv, gw, gu = _rwkv6_bwd(r, k, v, w, u, gy)
-        # CUDA kernel 返回的 gu 形状为 (B, C)，按 batch 求和后 reshape 回 (H, N)
+        # CUDA kernel 返回的 gu 形状为 (B, C)，按 batch 求和后 reshape 回 (H, N)。
         H, N = u.shape
         gu = jnp.sum(gu, axis=0).reshape((H, N))
         return gr, gk, gv, gw, gu
 
     _rwkv6.defvjp(_fwd, _bwd)
 
-    # -----------------------------------------------------------------------
-    # 前向 kernel（带初始状态/最终状态，仅前向）
-    # -----------------------------------------------------------------------
+    # 前向 kernel（带初始状态/最终状态，仅前向）。
     def _rwkv6_fwd_with_state_impl(r, k, v, w, u, state_map, init_state):
         B, T, C = r.shape
         dtype = r.dtype
@@ -227,9 +214,6 @@ def get_jax_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
         partition=_create_partition(_rwkv6_fwd_with_state_impl),
     )
 
-    # -----------------------------------------------------------------------
-    # 公共 API
-    # -----------------------------------------------------------------------
     def rwkv6_op(
         r: jnp.ndarray,
         k: jnp.ndarray,
@@ -241,6 +225,32 @@ def get_jax_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
         state_map: Optional[jnp.ndarray] = None,
         head_first: bool = False,
     ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
+        """RWKV-6 JAX CUDA 函数式算子。
+
+        Args:
+            r, k, v, w: [B, T, C]（head_first=False）或 [B, H, T, N]
+                （head_first=True），bfloat16/float16/float32。
+            u: [H, N] 或 [C]，与输入同 dtype。
+            initial_state: [B, H, N, N] 或 [H, N, N]，float32/bfloat16，可选。
+            output_final_state: bool，是否返回最终状态。
+            state_map: [B] int32，可选。当 initial_state 的 batch 维度与 B
+                不一致时使用。
+            head_first: bool，输入输出是否 head 维优先。
+
+        Returns:
+            y: [B, T, C] 或 [B, H, T, N]，与输入同 layout/dtype。
+            final_state: [B, H, N, N]，与输入同 dtype（当
+                output_final_state=True）。
+
+        Raises:
+            ValueError: T 超过 max_sequence_length，或 C 不能被 head_size 整除，
+                或 initial_state/state_map 形状不合法。
+
+        Examples:
+            >>> y = rwkv6_op(r, k, v, w, u)
+            >>> y, state = rwkv6_op(r, k, v, w, u, initial_state=h0,
+            ...                       output_final_state=True)
+        """
         dtype = r.dtype
 
         r = _transpose_head(r, head_first)
@@ -270,7 +280,6 @@ def get_jax_rwkv6(head_size: int = 64, max_sequence_length: int = 4096):
             raise ValueError(f"通道数 C={C} 必须能被 head_size={head_size} 整除")
         H = C // head_size
         N = head_size
-
         # u 统一 reshape 为 (H, N)
         u = jnp.reshape(u, (H, N))
 

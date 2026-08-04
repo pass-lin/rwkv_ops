@@ -1,39 +1,30 @@
-"""
-JAX 版 RWKV-7 State Neutralization Triton Kernel 封装
-
-参考 rwkv7_kernel/jax_triton_kernel.py 的结构，增加：
-- tau: per-head per-chunk 阈值，形状 [B, N_HEAD, T//16]
-- mask: chunk-level 标志，形状 [B, T//16]
-- 无 mask / 带 mask 两套 forward / backward kernel
-- 支持 SPMD 切分
-"""
+"""JAX 版 RWKV7-SN Triton kernel 封装。"""
 
 from __future__ import annotations
+
 import warnings
+from typing import Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
-from typing import Optional, Tuple, Union
 
 import jax_triton as jt
-
-from .triton_kernel import (
-    rwkv7_sn_fwd_kernel,
-    rwkv7_sn_bwd_kernel,
-    rwkv7_sn_fwd_kernel_with_mask,
-    rwkv7_sn_bwd_kernel_with_mask,
-)
 
 from jax.experimental.custom_partitioning import custom_partitioning
 from jax.sharding import NamedSharding, PartitionSpec
 
+from .triton_kernel import (
+    rwkv7_sn_bwd_kernel,
+    rwkv7_sn_bwd_kernel_with_mask,
+    rwkv7_sn_fwd_kernel,
+    rwkv7_sn_fwd_kernel_with_mask,
+)
+
 CHUNK_LEN = 16
 
-# =========================================================================
-# SPMD 切分规则 (Einsum 风格)
+#  SPMD 切分规则（Einsum 风格）
 # b=Batch, n=Head, t=Time, h=HeadDim, c=Chunk
-# =========================================================================
 FWD_RULE = (
     "b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n c, b n h h -> "
     "b n t h, b n t h, b n c h h"
@@ -63,6 +54,7 @@ def _q_spec(qs):
 
 
 def _sharding_like_q(qs):
+    """为输出构造与输入 q 同形的 sharding。"""
     spec = _q_spec(qs)
     if spec is None:
         return qs
@@ -153,7 +145,16 @@ def _apply_sn_to_final_state(
     tau: jnp.ndarray,
     mask: Optional[jnp.ndarray] = None,
 ) -> jnp.ndarray:
-    """state: [B, N, H, H]; tau: [B, N, C]; mask: [B, C]（可选）。"""
+    """对最终 state 应用 State Neutralization。
+
+    Args:
+        state: [B, N, H, H], float32。
+        tau: [B, N, C], float32。
+        mask: [B, C], float32（可选）。
+
+    Returns:
+        [B, N, H, H], float32。
+    """
     last_tau = tau[:, :, -1][:, :, None, None]
     tau_safe = jnp.maximum(last_tau, 1e-6)
     sn_state = last_tau * jnp.tanh(state / tau_safe)
@@ -163,9 +164,7 @@ def _apply_sn_to_final_state(
     return jnp.where(last_mask > 0, sn_state, state)
 
 
-# =========================================================================
-# 无 Mask 的 JAX-Triton Launcher
-# =========================================================================
+#  无 mask 的 JAX-Triton launcher
 def _wkv7_sn_fwd_triton_call(r, w, k, v, a, b, tau, h0):
     B, N, T, H = r.shape
     dtype = r.dtype
@@ -269,6 +268,7 @@ _wkv7_sn_bwd_spmd.def_partition(
 
 @jax.custom_vjp
 def rwkv7_sn_kernel_triton(r, w, k, v, a, b, tau, h0):
+    """无 mask JAX-Triton 训练 kernel 公开入口。"""
     out, sa_out, state_chkp = _wkv7_sn_fwd_spmd(r, w, k, v, a, b, tau, h0)
     final_state = _apply_sn_to_final_state(state_chkp[:, :, -1, :, :], tau)
     return out, final_state
@@ -299,9 +299,7 @@ def _bwd(res, grads):
 rwkv7_sn_kernel_triton.defvjp(_fwd, _bwd)
 
 
-# =========================================================================
-# 带 Mask 的 JAX-Triton Launcher
-# =========================================================================
+#  带 mask 的 JAX-Triton launcher
 def _wkv7_sn_fwd_with_mask_triton_call(r, w, k, v, a, b, tau, mask, h0):
     B, N, T, H = r.shape
     dtype = r.dtype
@@ -411,6 +409,7 @@ _wkv7_sn_bwd_with_mask_spmd.def_partition(
 
 @jax.custom_vjp
 def rwkv7_sn_kernel_with_mask_triton(r, w, k, v, a, b, tau, mask, h0):
+    """带 mask JAX-Triton 训练 kernel 公开入口。"""
     out, sa_out, state_chkp = _wkv7_sn_fwd_with_mask_spmd(
         r, w, k, v, a, b, tau, mask, h0
     )
@@ -445,9 +444,7 @@ def _bwd_with_mask(res, grads):
 rwkv7_sn_kernel_with_mask_triton.defvjp(_fwd_with_mask, _bwd_with_mask)
 
 
-# =========================================================================
-# 对外 API 暴露
-# =========================================================================
+#  对外 API
 def generalized_delta_rule_sn(
     r: jnp.ndarray,
     w: jnp.ndarray,
@@ -461,9 +458,28 @@ def generalized_delta_rule_sn(
     output_final_state: bool = True,
     head_first: bool = False,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
+    """带 State Neutralization 的 RWKV-7 广义 delta 规则（JAX-Triton chunkwise 训练版）。
+
+    Args:
+        r, w, k, v, a, b: [B, T, H, K], bfloat16。T 必须被 16 整除。
+        tau: [B, T//16, H], float32。阈值，必须严格 > 1。
+        mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SN；
+            仅当 output_final_state=True 时生效。
+        initial_state: [B, H, K, K] 或 [1, H, K, K]，float32，可选。
+        output_final_state: bool，是否返回最终 state。
+        head_first: bool，输入输出是否 head 维优先 ([B, H, T, K])。
+
+    Returns:
+        out: [B, T, H, K]，bfloat16。
+        final_state: [B, H, K, K]，float32。
+            output_final_state=False 时不返回；mask=None 时为 None。
+
+    Raises:
+        ValueError: T 不被 16 整除，或 tau/mask 形状不匹配。
+    """
     dtype = r.dtype
 
-    # 统一转换为 head-first [B, N, T, H]
+    # 统一转换为 head-first [B, N, T, H]。
     r = _transpose_head(r, head_first)
     w = _transpose_head(w, head_first)
     k = _transpose_head(k, head_first)
@@ -503,7 +519,7 @@ def generalized_delta_rule_sn(
         out = jnp.asarray(out, dtype)
         return (out, last_state) if output_final_state else out
 
-    # 无 mask 路径：chunk 边界无条件执行 SN
+    # 无 mask 路径：chunk 边界无条件执行 SN。
     out, _ = rwkv7_sn_kernel_triton(r, w, k, v, a, b, tau, h0)
     out = jnp.transpose(out, (0, 2, 1, 3))
     out = jnp.asarray(out, dtype)
@@ -554,4 +570,5 @@ def generalized_delta_rule_sn_inference(
 
 
 def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
+    """返回 JAX-Triton 后端的 (训练算子, 推理算子)。"""
     return [generalized_delta_rule_sn, generalized_delta_rule_sn_inference]

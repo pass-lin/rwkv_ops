@@ -1,15 +1,15 @@
+// RWKV-7 wkv 前向/反向 CUDA kernel（JAX FFI 版本）。
+
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <xla/ffi/api/ffi.h>
 #include <vector>
 #include <cstdint>
-// ref link:https://github.com/BlinkDL/RWKV-CUDA/tree/main/rwkv7_fast_fused 
+
 namespace ffi = xla::ffi;
 
-/* -------------------- 类型别名 -------------------- */
 using bf = __nv_bfloat16;
 
-/* -------------------- 设备端辅助 -------------------- */
 __device__ inline float to_float(const bf &u) {
     return __bfloat162float(u);
 }
@@ -18,8 +18,23 @@ __device__ inline bf to_bf(const float &u) {
 }
 typedef bf *__restrict__ F_;
 
-/* -------------------- Kernel -------------------- */
-// 【优化1】模板化 + launch_bounds，提升 Occupancy
+// RWKV-7 chunkwise 前向 CUDA kernel（无 Mask）。
+//
+// 每个 block 处理一个 (batch, head)，顺序扫描 T 步，在每个 chunk 末尾
+// 写出 state checkpoint。
+//
+// Args:
+//   w_, q_, k_, v_, a_, b_: [B, T, H, K]，bfloat16，row-major。
+//   h0_: [B, H, K, K]，float32，row-major。初始 state。
+//   y_: [B, T, H, K]，bfloat16，row-major。输出。
+//   sa_: [B, T, H, K]，float32，row-major。反向所需中间量。
+//   s_: [B, H, C, K, K]，float32，row-major。每 chunk 结束时的 state checkpoint。
+//
+// 编译期宏:
+//   _C_: head_size。
+//   _CHUNK_LEN_: chunk 长度，固定 16。
+//
+// 指针算术使用 int64_t，避免大 tensor 时 32 位偏移溢出。
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_kernel(int T, int H,
                                F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
@@ -27,16 +42,15 @@ __global__ void forward_kernel(int T, int H,
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
     float state[C] = {0};
     __shared__ float q[C], k[C], w[C], a[C], b[C];
-    
-    int64_t h0_base = ((int64_t)bb * H + hh) * C * C + i * C; 
-    
+
+    int64_t h0_base = ((int64_t)bb * H + hh) * C * C + i * C;
+
     #pragma unroll
     for (int j = 0; j < C; ++j) state[j] = h0_[h0_base + j];
 
     for (int t = 0; t < T; ++t) {
-        // 【优化2】强制 int64_t 防止溢出
         int64_t ind = (int64_t)bb * T * H * C + (int64_t)t * H * C + hh * C + i;
-        
+
         __syncthreads();
         q[i] = to_float(q_[ind]);
         w[i] = __expf(-__expf(to_float(w_[ind])));
@@ -69,7 +83,24 @@ __global__ void forward_kernel(int T, int H,
     }
 }
 
-// 【优化3】反向 Kernel：模板化 + launch_bounds + float4 向量加载
+// RWKV-7 chunkwise 反向 CUDA kernel（无 Mask）。
+//
+// 每个 block 处理一个 (batch, head)，逆序扫描 T 步，从 checkpoint 恢复状态，
+// 计算各输入梯度。
+//
+// Args:
+//   w_, q_, k_, v_, a_, b_, dy_: [B, T, H, K]，bfloat16，row-major。
+//   s_: [B, H, C, K, K]，float32，row-major。前向保存的 state checkpoint。
+//   sa_: [B, T, H, K]，float32，row-major。前向保存的中间量。
+//   dht_: [B, H, K, K]，float32，row-major。最终状态梯度。
+//   dh0_: [B, H, K, K]，float32，row-major。初始状态梯度（输出）。
+//   dw_, dq_, dk_, dv_, da_, db_: [B, T, H, K]，bfloat16，row-major（输出）。
+//
+// 编译期宏:
+//   _C_: head_size。
+//   _CHUNK_LEN_: chunk 长度，固定 16。
+//
+// 指针算术使用 int64_t，避免大 tensor 时 32 位偏移溢出。
 template<int C> __launch_bounds__(C, 2)
 __global__ void backward_kernel(int T, int H,
                                 F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_, F_ dy_,
@@ -107,7 +138,7 @@ __global__ void backward_kernel(int T, int H,
             int64_t base = ((int64_t)bb * H + hh) * (T / _CHUNK_LEN_) * C * C +
                            ((int64_t)t / _CHUNK_LEN_) * C * C + i * C;
             
-            // 【优化4】float4 向量加载，带宽利用率提升 4倍
+            // 使用 float4 向量加载 checkpoint state，提高带宽利用率。
             const float4* s4 = (const float4*)(s_ + base);
             #pragma unroll
             for (int j4 = 0; j4 < C / 4; ++j4) {
@@ -165,7 +196,18 @@ __global__ void backward_kernel(int T, int H,
     }
 }
 
-/* -------------------- 推理专用 Kernel -------------------- */
+// RWKV-7 推理 CUDA kernel（无 Mask）。
+//
+// 每个 block 处理一个 (batch, head)，顺序扫描 T 步，只输出 y 与最终 state。
+//
+// Args:
+//   w_, q_, k_, v_, a_, b_: [B, T, H, K]，bfloat16，row-major。
+//   h0_: [B, H, K, K]，float32，row-major。初始 state。
+//   y_: [B, T, H, K]，bfloat16，row-major。输出。
+//   s_: [B, H, K, K]，float32，row-major。最终 state（输出）。
+//
+// 编译期宏:
+//   _C_: head_size。
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_inference_kernel(int T, int H,
                                          F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
@@ -210,15 +252,15 @@ __global__ void forward_inference_kernel(int T, int H,
     for (int j = 0; j < C; ++j) s_[base + j] = state[j];
 }
 
-/* -------------------- Host 函数（参数名已统一） -------------------- */
+// RWKV-7 chunkwise 前向 host 函数（无 Mask）。
 static ffi::Error WKV7FwdHost(
     cudaStream_t stream,
     ffi::Buffer<ffi::BF16> w,
     ffi::Buffer<ffi::BF16> q,
     ffi::Buffer<ffi::BF16> k,
     ffi::Buffer<ffi::BF16> v,
-    ffi::Buffer<ffi::BF16> a,  // 原'z'，直接对应 kernel 的 a_
-    ffi::Buffer<ffi::BF16> b,  // 原'a'，直接对应 kernel 的 b_
+    ffi::Buffer<ffi::BF16> a,
+    ffi::Buffer<ffi::BF16> b,
     ffi::Buffer<ffi::F32>  h0,
     ffi::ResultBuffer<ffi::BF16> y,
     ffi::ResultBuffer<ffi::F32>  s,
@@ -230,15 +272,14 @@ static ffi::Error WKV7FwdHost(
     dim3 block(C);
     dim3 grid(H, B);
 
-    // 【关键】模板实例化调用，参数直接映射
     forward_kernel<_C_><<<grid, block, 0, stream>>>(
         T, H,
         reinterpret_cast<bf *>(w.typed_data()),
         reinterpret_cast<bf *>(q.typed_data()),
         reinterpret_cast<bf *>(k.typed_data()),
         reinterpret_cast<bf *>(v.typed_data()),
-        reinterpret_cast<bf *>(a.typed_data()),  // 直接映射到 a_
-        reinterpret_cast<bf *>(b.typed_data()),  // 直接映射到 b_
+        reinterpret_cast<bf *>(a.typed_data()),
+        reinterpret_cast<bf *>(b.typed_data()),
         reinterpret_cast<bf *>(y->typed_data()),
         s->typed_data(),
         sa->typed_data(),
@@ -251,14 +292,15 @@ static ffi::Error WKV7FwdHost(
     return ffi::Error::Success();
 }
 
+// RWKV-7 chunkwise 反向 host 函数（无 Mask）。
 static ffi::Error WKV7BwdHost(
     cudaStream_t stream,
     ffi::Buffer<ffi::BF16> w,
     ffi::Buffer<ffi::BF16> q,
     ffi::Buffer<ffi::BF16> k,
     ffi::Buffer<ffi::BF16> v,
-    ffi::Buffer<ffi::BF16> a,  // 原'z'，直接对应 kernel 的 a_
-    ffi::Buffer<ffi::BF16> b,  // 原'a'，直接对应 kernel 的 b_
+    ffi::Buffer<ffi::BF16> a,
+    ffi::Buffer<ffi::BF16> b,
     ffi::Buffer<ffi::BF16> dy,
     ffi::Buffer<ffi::F32>  s,
     ffi::Buffer<ffi::F32>  sa,
@@ -277,15 +319,14 @@ static ffi::Error WKV7BwdHost(
     dim3 block(C);
     dim3 grid(H, B);
 
-    // 【关键】模板实例化调用，参数直接映射
     backward_kernel<_C_><<<grid, block, 0, stream>>>(
         T, H,
         reinterpret_cast<bf *>(w.typed_data()),
         reinterpret_cast<bf *>(q.typed_data()),
         reinterpret_cast<bf *>(k.typed_data()),
         reinterpret_cast<bf *>(v.typed_data()),
-        reinterpret_cast<bf *>(a.typed_data()),  // 直接映射到 a_
-        reinterpret_cast<bf *>(b.typed_data()),  // 直接映射到 b_
+        reinterpret_cast<bf *>(a.typed_data()),
+        reinterpret_cast<bf *>(b.typed_data()),
         reinterpret_cast<bf *>(dy.typed_data()),
         s.typed_data(),
         sa.typed_data(),
@@ -305,14 +346,15 @@ static ffi::Error WKV7BwdHost(
     return ffi::Error::Success();
 }
 
+// RWKV-7 推理 host 函数（无 Mask）。
 static ffi::Error WKV7InferenceHost(
     cudaStream_t stream,
     ffi::Buffer<ffi::BF16> w,
     ffi::Buffer<ffi::BF16> q,
     ffi::Buffer<ffi::BF16> k,
     ffi::Buffer<ffi::BF16> v,
-    ffi::Buffer<ffi::BF16> a,  // 直接对应 kernel 的 a_
-    ffi::Buffer<ffi::BF16> b,  // 直接对应 kernel 的 b_
+    ffi::Buffer<ffi::BF16> a,
+    ffi::Buffer<ffi::BF16> b,
     ffi::Buffer<ffi::F32>  h0,
     ffi::ResultBuffer<ffi::BF16> y,
     ffi::ResultBuffer<ffi::F32>  s)
@@ -323,15 +365,14 @@ static ffi::Error WKV7InferenceHost(
     dim3 block(C);
     dim3 grid(H, B);
 
-    // 【关键】模板实例化调用，参数直接映射
     forward_inference_kernel<_C_><<<grid, block, 0, stream>>>(
         T, H,
         reinterpret_cast<bf *>(w.typed_data()),
         reinterpret_cast<bf *>(q.typed_data()),
         reinterpret_cast<bf *>(k.typed_data()),
         reinterpret_cast<bf *>(v.typed_data()),
-        reinterpret_cast<bf *>(a.typed_data()),  // 直接映射到 a_
-        reinterpret_cast<bf *>(b.typed_data()),  // 直接映射到 b_
+        reinterpret_cast<bf *>(a.typed_data()),
+        reinterpret_cast<bf *>(b.typed_data()),
         reinterpret_cast<bf *>(y->typed_data()),
         s->typed_data(),
         h0.typed_data());
@@ -343,7 +384,7 @@ static ffi::Error WKV7InferenceHost(
     return ffi::Error::Success();
 }
 
-/* -------------------- FFI 注册（参数名已对齐） -------------------- */
+//  FFI 注册（无 Mask） 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
     Wkv7Fwd, WKV7FwdHost,
     ffi::Ffi::Bind()
@@ -352,8 +393,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::BF16>>()   // q
         .Arg<ffi::Buffer<ffi::BF16>>()   // k
         .Arg<ffi::Buffer<ffi::BF16>>()   // v
-        .Arg<ffi::Buffer<ffi::BF16>>()   // a (原z)
-        .Arg<ffi::Buffer<ffi::BF16>>()   // b (原a)
+        .Arg<ffi::Buffer<ffi::BF16>>()   // a
+        .Arg<ffi::Buffer<ffi::BF16>>()   // b
         .Arg<ffi::Buffer<ffi::F32>>()    // h0
         .Ret<ffi::Buffer<ffi::BF16>>()   // y
         .Ret<ffi::Buffer<ffi::F32>>()    // s
@@ -368,13 +409,13 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::BF16>>()   // q
         .Arg<ffi::Buffer<ffi::BF16>>()   // k
         .Arg<ffi::Buffer<ffi::BF16>>()   // v
-        .Arg<ffi::Buffer<ffi::BF16>>()   // a (原z)
-        .Arg<ffi::Buffer<ffi::BF16>>()   // b (原a)
+        .Arg<ffi::Buffer<ffi::BF16>>()   // a
+        .Arg<ffi::Buffer<ffi::BF16>>()   // b
         .Arg<ffi::Buffer<ffi::BF16>>()   // dy
         .Arg<ffi::Buffer<ffi::F32>>()    // s
         .Arg<ffi::Buffer<ffi::F32>>()    // sa
         .Arg<ffi::Buffer<ffi::F32>>()    // dht
-        .Ret<ffi::Buffer<ffi::F32>>()   // dh0
+        .Ret<ffi::Buffer<ffi::F32>>()    // dh0
         .Ret<ffi::Buffer<ffi::BF16>>()   // dw
         .Ret<ffi::Buffer<ffi::BF16>>()   // dq
         .Ret<ffi::Buffer<ffi::BF16>>()   // dk
@@ -395,14 +436,28 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::BF16>>()   // b
         .Arg<ffi::Buffer<ffi::F32>>()    // h0
         .Ret<ffi::Buffer<ffi::BF16>>()   // y
-        .Ret<ffi::Buffer<ffi::F32>>()    // s (final state)
+        .Ret<ffi::Buffer<ffi::F32>>()    // s
 , {ffi::Traits::kCmdBufferCompatible});
 
-/* -------------------- 带 Mask 的前向 Kernel -------------------- */
+// RWKV-7 chunkwise 前向 CUDA kernel（带 Mask）。
+//
+// 每个 block 处理一个 (batch, head)，顺序扫描 T 步，按 mask 选择更新或冻结状态。
+//
+// Args:
+//   w_, q_, k_, v_, a_, b_: [B, T, H, K]，bfloat16，row-major。
+//   mask_: [B, T]，bfloat16，row-major。1 表示更新状态、0 表示冻结状态。
+//   h0_: [B, H, K, K]，float32，row-major。初始 state。
+//   y_: [B, T, H, K]，bfloat16，row-major。输出。
+//   sa_: [B, T, H, K]，float32，row-major。反向所需中间量。
+//   s_: [B, H, C, K, K]，float32，row-major。每 chunk 结束时的 state checkpoint。
+//
+// 编译期宏:
+//   _C_: head_size。
+//   _CHUNK_LEN_: chunk 长度，固定 16。
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_kernel_with_mask(int T, int H,
                                          F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
-                                         const bf* __restrict__ mask_,  // 【修改】改为 bf16 指针
+                                         const bf* __restrict__ mask_,
                                          bf *y_, float *s_, float *sa_, float *h0_) {
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
     float state[C] = {0};
@@ -415,7 +470,7 @@ __global__ void forward_kernel_with_mask(int T, int H,
 
     for (int t = 0; t < T; ++t) {
         int64_t ind = (int64_t)bb * T * H * C + (int64_t)t * H * C + hh * C + i;
-        float m = to_float(mask_[bb * T + t]);  // 【修改】BF16 加载 + 转换
+        float m = to_float(mask_[bb * T + t]);
         float one_minus_m = 1.0f - m;
         
         __syncthreads();
@@ -454,11 +509,26 @@ __global__ void forward_kernel_with_mask(int T, int H,
     }
 }
 
-/* -------------------- 带 Mask 的反向 Kernel -------------------- */
+// RWKV-7 chunkwise 反向 CUDA kernel（带 Mask）。
+//
+// 每个 block 处理一个 (batch, head)，逆序扫描 T 步，按 mask 拆分参数梯度与状态梯度。
+//
+// Args:
+//   w_, q_, k_, v_, a_, b_, dy_: [B, T, H, K]，bfloat16，row-major。
+//   mask_: [B, T]，bfloat16，row-major。
+//   s_: [B, H, C, K, K]，float32，row-major。前向保存的 state checkpoint。
+//   sa_: [B, T, H, K]，float32，row-major。前向保存的中间量。
+//   dht_: [B, H, K, K]，float32，row-major。最终状态梯度。
+//   dh0_: [B, H, K, K]，float32，row-major。初始状态梯度（输出）。
+//   dw_, dq_, dk_, dv_, da_, db_: [B, T, H, K]，bfloat16，row-major（输出）。
+//
+// 编译期宏:
+//   _C_: head_size。
+//   _CHUNK_LEN_: chunk 长度，固定 16。
 template<int C> __launch_bounds__(C, 2)
 __global__ void backward_kernel_with_mask(int T, int H,
                                           F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
-                                          const bf* __restrict__ mask_,  // 【修改】改为 bf16 指针
+                                          const bf* __restrict__ mask_,
                                           F_ dy_,
                                           float *s_, float *sa_, float *dht_, float *dh0_,
                                           bf *dw_, bf *dq_, bf *dk_, bf *dv_, bf *da_, bf *db_) {
@@ -477,7 +547,7 @@ __global__ void backward_kernel_with_mask(int T, int H,
 
     for (int t = T - 1; t >= 0; --t) {
         int64_t ind = (int64_t)bb * T * H * C + (int64_t)t * H * C + hh * C + i;
-        float m = to_float(mask_[bb * T + t]);  // 【修改】BF16 加载 + 转换
+        float m = to_float(mask_[bb * T + t]);
         float one_minus_m = 1.0f - m;
         
         __syncthreads();
@@ -574,7 +644,7 @@ __global__ void backward_kernel_with_mask(int T, int H,
         for (int j = 0; j < C; ++j) da += stateT[j] * dSb_shared[j];
         da_[ind] = to_bf(da);
         
-        // 状态梯度回传（关键修复）
+        // 状态梯度回传。
         #pragma unroll
         for (int j = 0; j < C; ++j) {
             float trans_row = dstate_param[j] * w[j] + dSb * a[j];
@@ -592,11 +662,23 @@ __global__ void backward_kernel_with_mask(int T, int H,
     }
 }
 
-/* -------------------- 带 Mask 的推理 Kernel -------------------- */
+// RWKV-7 推理 CUDA kernel（带 Mask）。
+//
+// 每个 block 处理一个 (batch, head)，顺序扫描 T 步，按 mask 选择更新或冻结状态。
+//
+// Args:
+//   w_, q_, k_, v_, a_, b_: [B, T, H, K]，bfloat16，row-major。
+//   mask_: [B, T]，bfloat16，row-major。
+//   h0_: [B, H, K, K]，float32，row-major。初始 state。
+//   y_: [B, T, H, K]，bfloat16，row-major。输出。
+//   s_: [B, H, K, K]，float32，row-major。最终 state（输出）。
+//
+// 编译期宏:
+//   _C_: head_size。
 template<int C> __launch_bounds__(C, 2)
 __global__ void forward_inference_kernel_with_mask(int T, int H,
                                                    F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_,
-                                                   const bf* __restrict__ mask_,  // 【修改】改为 bf16 指针
+                                                   const bf* __restrict__ mask_,
                                                    bf *y_, float *s_, float *h0_) {
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
     float state[C] = {0};
@@ -609,7 +691,7 @@ __global__ void forward_inference_kernel_with_mask(int T, int H,
 
     for (int t = 0; t < T; ++t) {
         int64_t ind = (int64_t)bb * T * H * C + (int64_t)t * H * C + hh * C + i;
-        float m = to_float(mask_[bb * T + t]);  // 【修改】BF16 加载 + 转换
+        float m = to_float(mask_[bb * T + t]);
         float one_minus_m = 1.0f - m;
         
         __syncthreads();
@@ -642,7 +724,7 @@ __global__ void forward_inference_kernel_with_mask(int T, int H,
     for (int j = 0; j < C; ++j) s_[base + j] = state[j];
 }
 
-/* -------------------- Host 函数（带 Mask） -------------------- */
+// RWKV-7 chunkwise 前向 host 函数（带 Mask）。
 static ffi::Error WKV7FwdWithMaskHost(
     cudaStream_t stream,
     ffi::Buffer<ffi::BF16> w,
@@ -651,7 +733,7 @@ static ffi::Error WKV7FwdWithMaskHost(
     ffi::Buffer<ffi::BF16> v,
     ffi::Buffer<ffi::BF16> a,
     ffi::Buffer<ffi::BF16> b,
-    ffi::Buffer<ffi::BF16> mask,  // 【修改】F32 -> BF16
+    ffi::Buffer<ffi::BF16> mask,
     ffi::Buffer<ffi::F32>  h0,
     ffi::ResultBuffer<ffi::BF16> y,
     ffi::ResultBuffer<ffi::F32>  s,
@@ -671,7 +753,7 @@ static ffi::Error WKV7FwdWithMaskHost(
         reinterpret_cast<bf *>(v.typed_data()),
         reinterpret_cast<bf *>(a.typed_data()),
         reinterpret_cast<bf *>(b.typed_data()),
-        reinterpret_cast<bf *>(mask.typed_data()),  // 【修改】类型转换
+        reinterpret_cast<bf *>(mask.typed_data()),
         reinterpret_cast<bf *>(y->typed_data()),
         s->typed_data(),
         sa->typed_data(),
@@ -684,6 +766,7 @@ static ffi::Error WKV7FwdWithMaskHost(
     return ffi::Error::Success();
 }
 
+// RWKV-7 chunkwise 反向 host 函数（带 Mask）。
 static ffi::Error WKV7BwdWithMaskHost(
     cudaStream_t stream,
     ffi::Buffer<ffi::BF16> w,
@@ -692,7 +775,7 @@ static ffi::Error WKV7BwdWithMaskHost(
     ffi::Buffer<ffi::BF16> v,
     ffi::Buffer<ffi::BF16> a,
     ffi::Buffer<ffi::BF16> b,
-    ffi::Buffer<ffi::BF16> mask,  // 【修改】F32 -> BF16
+    ffi::Buffer<ffi::BF16> mask,
     ffi::Buffer<ffi::BF16> dy,
     ffi::Buffer<ffi::F32>  s,
     ffi::Buffer<ffi::F32>  sa,
@@ -719,7 +802,7 @@ static ffi::Error WKV7BwdWithMaskHost(
         reinterpret_cast<bf *>(v.typed_data()),
         reinterpret_cast<bf *>(a.typed_data()),
         reinterpret_cast<bf *>(b.typed_data()),
-        reinterpret_cast<bf *>(mask.typed_data()),  // 【修改】类型转换
+        reinterpret_cast<bf *>(mask.typed_data()),
         reinterpret_cast<bf *>(dy.typed_data()),
         s.typed_data(),
         sa.typed_data(),
@@ -739,6 +822,7 @@ static ffi::Error WKV7BwdWithMaskHost(
     return ffi::Error::Success();
 }
 
+// RWKV-7 推理 host 函数（带 Mask）。
 static ffi::Error WKV7InferenceWithMaskHost(
     cudaStream_t stream,
     ffi::Buffer<ffi::BF16> w,
@@ -747,7 +831,7 @@ static ffi::Error WKV7InferenceWithMaskHost(
     ffi::Buffer<ffi::BF16> v,
     ffi::Buffer<ffi::BF16> a,
     ffi::Buffer<ffi::BF16> b,
-    ffi::Buffer<ffi::BF16> mask,  // 【修改】F32 -> BF16
+    ffi::Buffer<ffi::BF16> mask,
     ffi::Buffer<ffi::F32>  h0,
     ffi::ResultBuffer<ffi::BF16> y,
     ffi::ResultBuffer<ffi::F32>  s)
@@ -766,7 +850,7 @@ static ffi::Error WKV7InferenceWithMaskHost(
         reinterpret_cast<bf *>(v.typed_data()),
         reinterpret_cast<bf *>(a.typed_data()),
         reinterpret_cast<bf *>(b.typed_data()),
-        reinterpret_cast<bf *>(mask.typed_data()),  // 【修改】类型转换
+        reinterpret_cast<bf *>(mask.typed_data()),
         reinterpret_cast<bf *>(y->typed_data()),
         s->typed_data(),
         h0.typed_data());
@@ -778,7 +862,7 @@ static ffi::Error WKV7InferenceWithMaskHost(
     return ffi::Error::Success();
 }
 
-/* -------------------- FFI 注册（带 Mask） -------------------- */
+//  FFI 注册（带 Mask） 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
     Wkv7FwdWithMask, WKV7FwdWithMaskHost,
     ffi::Ffi::Bind()
@@ -789,7 +873,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::BF16>>()   // v
         .Arg<ffi::Buffer<ffi::BF16>>()   // a
         .Arg<ffi::Buffer<ffi::BF16>>()   // b
-        .Arg<ffi::Buffer<ffi::BF16>>()   // mask [B,T]  【修改】F32 -> BF16
+        .Arg<ffi::Buffer<ffi::BF16>>()   // mask [B,T]
         .Arg<ffi::Buffer<ffi::F32>>()    // h0
         .Ret<ffi::Buffer<ffi::BF16>>()   // y
         .Ret<ffi::Buffer<ffi::F32>>()    // s
@@ -806,7 +890,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::BF16>>()   // v
         .Arg<ffi::Buffer<ffi::BF16>>()   // a
         .Arg<ffi::Buffer<ffi::BF16>>()   // b
-        .Arg<ffi::Buffer<ffi::BF16>>()   // mask  【修改】F32 -> BF16
+        .Arg<ffi::Buffer<ffi::BF16>>()   // mask
         .Arg<ffi::Buffer<ffi::BF16>>()   // dy
         .Arg<ffi::Buffer<ffi::F32>>()    // s
         .Arg<ffi::Buffer<ffi::F32>>()    // sa
@@ -830,7 +914,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::BF16>>()   // v
         .Arg<ffi::Buffer<ffi::BF16>>()   // a
         .Arg<ffi::Buffer<ffi::BF16>>()   // b
-        .Arg<ffi::Buffer<ffi::BF16>>()   // mask  【修改】F32 -> BF16
+        .Arg<ffi::Buffer<ffi::BF16>>()   // mask
         .Arg<ffi::Buffer<ffi::F32>>()    // h0
         .Ret<ffi::Buffer<ffi::BF16>>()   // y
         .Ret<ffi::Buffer<ffi::F32>>()    // s

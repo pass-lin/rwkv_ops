@@ -1,3 +1,5 @@
+// RWKV-6 PyTorch CUDA 扩展内核。
+
 #include <stdio.h>
 #include <assert.h>
 #include "ATen/ATen.h"
@@ -9,6 +11,10 @@ typedef at::Half fp16;
 
 
 
+// RWKV-6 前向核心：每个 thread 负责 head 维度的一个位置 i，沿 T 扫描。
+//
+// 编译期宏:
+//   _N_: head size，必须被 4 整除。
 template <typename F_in,typename F_out>
 __device__ void kernel_forward_core(const int B, const int T, const int C, const int H, const int b, const int h, const int i, const float* state,
                                const F_in *__restrict__ const _r, const F_in *__restrict__ const _k, const F_in *__restrict__ const _v, const F_in *__restrict__ _w, const F_in *__restrict__ _u,
@@ -66,6 +72,9 @@ __device__ void kernel_forward_core(const int B, const int T, const int C, const
 
 
 
+// RWKV-6 前向（带初始/最终状态）。
+//
+// grid = (B * H, 1, 1)，block = (_N_, 1, 1)。
 template <typename F_in,typename F_out>
 __global__ void kernel_forward_state(const int B, const int T, const int C, const int H, const bool is_custom_state, const int64_t* state_map,
                                const F_in *__restrict__ const _r, const F_in *__restrict__ const _k, const F_in *__restrict__ const _v, const F_in *__restrict__ _w, const F_in *__restrict__ _u,
@@ -97,6 +106,9 @@ __global__ void kernel_forward_state(const int B, const int T, const int C, cons
 }
 
 
+// RWKV-6 前向（无状态）。
+//
+// grid = (B * H, 1, 1)，block = (_N_, 1, 1)。
 template <typename F_in,typename F_out>
 __global__ void kernel_forward(const int B, const int T, const int C, const int H,
                                const F_in *__restrict__ const _r, const F_in *__restrict__ const _k, const F_in *__restrict__ const _v, const F_in *__restrict__ _w, const F_in *__restrict__ _u,
@@ -112,6 +124,7 @@ __global__ void kernel_forward(const int B, const int T, const int C, const int 
 
 
 
+// RWKV-6 反向：计算 gr 与 gu。沿时间正序扫描，复用前向状态递推。
 template <typename F_in, typename F_out>
 __global__ void kernel_backward_101(const int B, const int T, const int C, const int H,
     const F_in *__restrict__ const _r, const F_in *__restrict__ const _k, const F_in *__restrict__ const _v, const F_in *__restrict__ _w,
@@ -159,6 +172,7 @@ __global__ void kernel_backward_101(const int B, const int T, const int C, const
     _gu[b*C + h*_N_ + i] = F_out(gu);
 }
 
+// RWKV-6 反向：计算 gk。沿时间逆序扫描，用独立状态数组 scccc 递推。
 template <typename F_in, typename F_out>
 __global__ void kernel_backward_102(const int B, const int T, const int C, const int H,
     const F_in *__restrict__ const _r, const F_in *__restrict__ const _k, const F_in *__restrict__ const _v,
@@ -202,6 +216,7 @@ __global__ void kernel_backward_102(const int B, const int T, const int C, const
     }
 }
 
+// RWKV-6 反向：计算 gv。沿时间逆序扫描。_u 指针先偏移到当前 head 起点。
 template <typename F_in, typename F_out>
 __global__ void kernel_backward_103(const int B, const int T, const int C, const int H,
     const F_in *__restrict__ const _r, const F_in *__restrict__ const _k, const F_in *__restrict__ const _v,
@@ -247,6 +262,7 @@ __global__ void kernel_backward_103(const int B, const int T, const int C, const
     }
 }
 
+// RWKV-6 反向：计算 gw。沿时间双向扫描：先逆序累加 sbbbb 缓存，再正序组合得到 gw。
 template <typename F_in, typename F_out>
 __global__ void kernel_backward_201(const int B, const int T, const int C, const int H,
     const F_in *__restrict__ const _r, const F_in *__restrict__ const _k, const F_in *__restrict__ const _v, const F_in *__restrict__ _w, 
@@ -322,7 +338,7 @@ __global__ void kernel_backward_201(const int B, const int T, const int C, const
 
 
 
-
+// Host 启动函数：无状态前向。
 template<typename F_in,typename F_out>
 void cuda_forward(int B, int T, int C, int H, F_in *r, F_in *k, F_in *v, F_in *w, F_in *u, F_out *y)
 {
@@ -331,6 +347,7 @@ void cuda_forward(int B, int T, int C, int H, F_in *r, F_in *k, F_in *v, F_in *w
     kernel_forward<<<dim3(B * H), dim3(_N_)>>>(B, T, C, H, r, k, v, w, u, y);
 }
 
+// Host 启动函数：带初始/最终状态前向。
 template<typename F_in,typename F_out>
 void cuda_forward_with_state(int B, int T, int C, int H, bool S, int64_t *map, F_in *r, F_in *k, F_in *v, F_in *w, F_in *u, F_out *s, F_out *y, F_out *ys)
 {
@@ -344,6 +361,7 @@ void cuda_forward_with_state(int B, int T, int C, int H, bool S, int64_t *map, F
 }
 
 
+// Host 启动函数：反向，启动 4 个 kernel 分别计算 gr/gu、gK、gv、gw。
 template<typename F_in,typename F_out>
 void cuda_backward(int B, int T, int C, int H, F_in *r, F_in *k, F_in *v, F_in *w, F_in *u, F_out *gy, F_out *gr, F_out *gk, F_out *gv, F_out *gw, F_out *gu)
 {
@@ -365,7 +383,6 @@ void cuda_backward_bf16(int B, int T, int C, int H, bf16 *r, bf16 *k, bf16 *v, b
 void cuda_forward_fp16(int B, int T, int C, int H, fp16 *r, fp16 *k, fp16 *v, fp16 *w, fp16 *u, fp32 *y){
     cuda_forward<fp16,fp32>(B, T, C, H, r, k, v, w, u, y);
 }
-
 void cuda_backward_fp16(int B, int T, int C, int H, fp16 *r, fp16 *k, fp16 *v, fp16 *w, fp16 *u, fp32 *gy, fp32 *gr, fp32 *gk, fp32 *gv, fp32 *gw, fp32 *gu){
     cuda_backward<fp16,fp32>(B, T, C, H, r, k, v, w, u, gy, gr, gk, gv, gw, gu);
 }
@@ -382,6 +399,7 @@ void cuda_backward_fp32(int B, int T, int C, int H, fp32 *r, fp32 *k, fp32 *v, f
 
 
 
+// 带状态前向的 dtype 特化导出。
 void cuda_forward_with_state_bf16(int B, int T, int C, int H, bool S, int64_t *map, bf16 *r, bf16 *k, bf16 *v, bf16 *w, bf16 *u, bf16 *s, bf16 *y, bf16 *ys){
     cuda_forward_with_state<bf16,bf16>(B, T, C, H, S, map, r, k, v, w, u, s, y, ys);
 }
