@@ -442,10 +442,78 @@ pytest tests/jax -v -m "not slow"
 - 函数式入口：每个 kernel 的 Python 入口返回 `out` 或 `(out, final_state)`。
 - 使用 `keras.ops` 编写后端无关逻辑；`torch.*` / `jax.*` / `tf.*` 只允许出现在
   对应后端绑定文件中。
-- 所有公开函数/类需要中文或英文 docstring，说明输入形状、输出形状、重要约束
-  （如 `T % 16 == 0`、`C % 128 == 0`）。
 
-### 7.2 CUDA/Triton/Pallas 代码
+### 7.2 注释与文档风格（**强制性约束**）
+
+本节为**强制规范**，新增/修改代码必须遵守；评审时应以本节为准驳回不合规
+注释。整体结构参照 Keras 3 的 docstring 风格，正文语言沿用项目现有的中文
+（小节标题用英文：`Args` / `Returns` / `Raises` / `Examples`）。
+禁止使用"------" "======="等分割线
+注释里禁止出现1. 2. 3. 4.等不便于修改的不符合人类注释风格的情况
+
+**模块 docstring（一行制）**
+
+- 只允许一行，声明模块职责，例如 `"""JAX 版 RWKV7 wkv kernel"""`。
+- **禁止**写入迭代痕迹与实现沿革：如"延迟编译"、"与 Torch 版 1:1 对齐"、
+  "重构后"、"新增"等。版本对齐关系属于 `AGENTS.md`，不进代码。
+
+**函数 docstring（公开函数必须完整，结构按序）**
+
+1. 一行描述；
+2. 可选的详细段落；
+3. 可选的 `Examples` 部分（**仅限公开 API 入口**，如
+   `generalized_delta_rule`、`rwkv6_op`、`mhc_pre_op`）；
+4. `Args` 部分：**每个参数必须带形状与 dtype**，关键约束写在该参数条目内
+   （如 `tau: [B, T//16, H], float32, 必须 > 1`；`x: [B, T, n, C], C 必须
+   被 128 整除`）；
+5. `Returns` 部分：同样带形状与 dtype；
+6. 可选的 `Raises` 部分：**所有显式 raise 的条件必须列出**（如
+   `T % 16 != 0`、`M % 32 != 0`）。
+
+私有函数（下划线开头）允许只写一行描述。
+
+**类 docstring（结构按序）**
+
+1. 一行描述；2. 可选详细段落；3. 可选 `Examples`；4. `Args`（对应
+   `__init__()` 参数）；5. 若是 Layer，另需 `Call arguments`（对应
+   `call()` 参数）与 `Returns`，可选 `Raises`。
+
+**inline comment：只写"为什么"，禁止写"改了什么"**
+
+- **禁止**任何迭代痕迹注释：`【修改】`、`【修复】`、`【新增】`、
+  `【稳定性修复 x/y】`、"暂时"、"之前是……" 等。历史由 git 管理。
+- 允许并鼓励写**设计约束/不变量**：如 "MINI_BSZ=1：限制单 block 寄存器
+  占用，规避 ROCm 编译器溢出问题"、"checkpoint 保存 SN 之前的 state 供反向
+  使用"。
+- Section banner 统一为单行 `# ===== 标题 =====`，不带版本备注。
+
+**禁止进入 docstring/注释的内容**
+
+- 性能数字、基准结论（会过时；README 已有此教训）；
+- 待办、吐槽、署名。
+
+**CUDA / C++ 源码注释（`.cu` / `.cpp` / `.h` / `.cuh`）**
+
+Keras 3 只规定 Python docstring；CUDA/C++ 按同等精神执行，同为强制约束：
+
+- **文件头注释（一行制）**：`//` 或 `/* */` 一行声明 kernel 职责，例如
+  `// RWKV-7 wkv forward/backward CUDA kernel`。禁止写入迭代沿革。
+- **kernel 入口函数必须有块注释**，包含：
+  - 一行描述（算的是什么）；
+  - 每个指针参数的**形状、内存布局（row-major/strides）与 dtype**；
+  - grid/block 的语义（如 "每个 block 处理一个 (batch, head)"）；
+  - 编译期宏表（如 `_C_`=head_size、`_T_`=max_sequence_length、
+    `CHUNK_LEN`=16），宏的取值约束写在内联注释里。
+- **inline comment 与 Python 同规**：只写"为什么"（如"用 64 位整数做指针
+  算术防止大 tensor 溢出"、"checkpoint 保存 SN 之前的 state 供反向使用"、
+  "blend 形式避免 warp 分支"），禁止 `【修复】`/`【修改】`/"暂时"类
+  迭代痕迹。
+- 数值相关的等价变换（如手写 tanh 的稳定形式）必须注明"为何不用朴素
+  写法"。
+- 禁止内容同 Python：性能数字、与 README 重复的教程、待办、吐槽、署名。
+- 语言与 Python 侧一致：中文正文，结构词（如 `Args:` 可选）用英文。
+
+### 7.3 CUDA/Triton/Pallas 代码
 
 - 编译期常量通过宏传入：`-D_N_=64 -D_T_=4096`。
 - CUDA 指针算术使用 64 位整数；Triton 内核使用 `tl.int64`。
