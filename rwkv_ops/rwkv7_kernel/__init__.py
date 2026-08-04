@@ -11,18 +11,50 @@ def transpose_head(x, head_first):
         return x
 
 
+def _force_keras_native():
+    """RWKV_OPS_KERAS_NATIVE=1 时，jax/torch 的 native 都强制为纯 keras ops。
+
+    用于无 kernel 的调试/数值对照。未设置或设为 0/false 时不强制。
+    """
+    v = os.environ.get("RWKV_OPS_KERAS_NATIVE", "").lower()
+    return v not in ("", "0", "false")
+
+
 def _use_pallas(KERNEL_TYPE):
     """jax + 非 CPU 平台时，native 默认使用 pallas kernel。
 
-    可用 RWKV_OPS_JAX_NATIVE=xla 强制回退纯 keras ops（调试用）。
+    可用 RWKV_OPS_KERAS_NATIVE=1 强制回退纯 keras ops（调试用）。
     """
-    if KERNEL_TYPE != "native":
-        return False
-    if os.environ.get("RWKV_OPS_JAX_NATIVE", "").lower() == "xla":
+    if KERNEL_TYPE != "native" or _force_keras_native():
         return False
     import jax
 
     return jax.devices()[0].platform in ("gpu", "tpu")
+
+
+def _use_triton(KERNEL_TYPE):
+    """torch + 非 CPU 平台（CUDA/ROCm/XPU）时，native 默认使用 triton kernel。
+
+    新版 torch 与 triton 强耦合（pip 版自带 triton），triton 之于 torch
+    相当于 pallas 之于 jax。XPU/ROCm 未实测，规则上按"非 CPU 且 triton
+    可导入"开放。可用 RWKV_OPS_KERAS_NATIVE=1 强制回退纯 keras ops。
+    """
+    if KERNEL_TYPE != "native" or _force_keras_native():
+        return False
+    try:
+        import torch
+        import triton  # noqa: F401
+    except Exception:
+        return False
+    if torch.cuda.is_available():
+        return True
+    xpu = getattr(torch, "xpu", None)
+    if xpu is not None:
+        try:
+            return bool(xpu.is_available())
+        except Exception:
+            return False
+    return False
 
 
 def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
@@ -60,6 +92,10 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                 from .torch_triton_kernel import generalized_delta_rule as triton_kernel
 
                 return triton_kernel, generalized_delta_rule
+        if _use_triton(KERNEL_TYPE):
+            from .torch_triton_kernel import generalized_delta_rule as triton_kernel
+
+            return triton_kernel, generalized_delta_rule
 
     return generalized_delta_rule, generalized_delta_rule
 

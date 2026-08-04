@@ -65,9 +65,9 @@ pip install rwkv_ops
 | `KERNEL_BACKEND` | Operator backend | `jax` / `torch` / `tensorflow` / `numpy` / `openvino` | `torch` | **High** |
 | `KERNEL_TYPE` | Implementation type | `triton` / `cuda` / `native` | `cuda` | — |
 | `RWKV_OPS_PALLAS_AUTOTUNE` | Pallas autotune switch | `1` / `0` | `1` | — |
-| `RWKV_OPS_JAX_NATIVE` | jax native impl choice | `pallas` (default) / `xla` | — | — |
+| `RWKV_OPS_KERAS_NATIVE` | Force native to pure keras ops | `1` / `0` | `0` | — |
 
-> With the JAX backend, when `KERNEL_TYPE=native` and the platform is GPU/TPU, the `native` implementation of rwkv7/rwkv7_sn is the Pallas kernel (pure Keras ops on other platforms, including CPU). The Pallas kernels only use public Pallas APIs, and autotune picks the fastest compilable backend candidate.
+> With `KERNEL_TYPE=native`, the implementation is dispatched per backend and platform: jax + GPU/TPU uses the Pallas kernel (rwkv7/rwkv7_sn); torch + non-CPU uses the Triton kernel (rwkv7/rwkv7_sn/mhc, since pip torch bundles triton); everything else (CPU, mhc on jax, etc.) uses pure Keras ops. Set `RWKV_OPS_KERAS_NATIVE=1` to force pure Keras ops everywhere (for debugging).
 
 > If `KERNEL_BACKEND` is set, it is used directly; if not, `KERAS_BACKEND` is used. If both are unset, `torch` is the default.
 
@@ -247,7 +247,7 @@ if padding_mask is not None:
 | NumPy       | ❌   | ❌     | ✅     |
 | OpenVINO    | ❌   | ❌     | ✅     |
 
-> ¹ With the JAX backend, `native` on GPU/TPU is the Pallas implementation (`jax_pallas_kernel.py`); on other platforms it is pure Keras ops.
+> ¹ With the JAX backend, `native` on GPU/TPU is the Pallas implementation (`jax_pallas_kernel.py`); with the Torch backend, `native` on non-CPU platforms is the Triton implementation; elsewhere it is pure Keras ops.
 
 
 ---

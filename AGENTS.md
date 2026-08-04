@@ -60,7 +60,7 @@ MANIFEST.in                  # 源码分发清单
 | `KERAS_BACKEND` | Keras 后端 | `jax` / `torch` / `tensorflow` / `numpy` / `openvino` | — | 低 |
 | `KERNEL_TYPE` | 实现类型 | `triton` / `cuda` / `native` | `cuda` | — |
 | `RWKV_OPS_PALLAS_AUTOTUNE` | Pallas autotune 开关 | `1` / `0` | `1` | — |
-| `RWKV_OPS_JAX_NATIVE` | jax 端 native 实现选择 | `pallas`（默认）/ `xla` | — | — |
+| `RWKV_OPS_KERAS_NATIVE` | 强制 native 为纯 keras ops | `1` / `0` | `0` | — |
 | `RWKV_OPS_PALLAS_BACKEND` | Pallas 后端强制覆盖 | `default` / `mgpu` / `triton` | — | — |
 
 选择逻辑（见 `rwkv_ops/__init__.py`）：
@@ -71,9 +71,15 @@ MANIFEST.in                  # 源码分发清单
 
 `KERNEL_TYPE` 决定具体实现：
 
-- `native`：可移植实现。CPU/非 jax 后端 = 纯 Keras ops（ground truth）；
-  **jax + GPU/TPU = Pallas kernel**（jax 平台上的可移植实现，见 §4.5）。
-  设 `RWKV_OPS_JAX_NATIVE=xla` 可强制 jax 端也用纯 keras ops（调试/对照用）。
+- `native`：可移植实现，"装好库即可用"。具体实现按后端与平台分发：
+  - **jax + GPU/TPU** = Pallas kernel（rwkv7/rwkv7_sn；pallas 随 jax 自带）。
+  - **torch + 非 CPU（CUDA/ROCm/XPU）** = Triton kernel（rwkv7/rwkv7_sn/mhc；
+    pip 版 torch 自带 triton；XPU/ROCm 未实测，按"非 CPU 且 triton 可导入"开放）。
+  - 其余（CPU、tensorflow、numpy、openvino、mhc 的 jax 侧）= 纯 Keras ops
+    （ground truth）。mhc 的 jax triton 桥接依赖额外的 jax-triton 包，
+    不属于"装好库即可用"，必须显式 `KERNEL_TYPE="triton"`。
+  - 设 `RWKV_OPS_KERAS_NATIVE=1` 可强制 jax/torch 的 native 都用纯 keras ops
+    （无 kernel 的调试/数值对照）。
 - `cuda`：手写 CUDA kernel（Torch C++ 扩展 / JAX FFI）。
 - `triton`：Triton 实现（rwkv7 / rwkv7_sn / mhc）。
 
@@ -97,7 +103,8 @@ MANIFEST.in                  # 源码分发清单
 同 rwkv7op（PyTorch/JAX 全后端 ✅，其余仅 native）。
 
 > ¹ JAX 后端的 `native` 在 GPU/TPU 上为 Pallas 实现（`jax_pallas_kernel.py`），
-> 其余平台为纯 Keras ops；单步 RNN 无 pallas 版本。
+> Torch 后端的 `native` 在非 CPU 平台为 Triton 实现，其余为纯 Keras ops；
+> 单步 RNN 无 pallas 版本。
 
 #### RWKV-7 `rwkv7_op_rnn` / SN `rwkv7_op_sn_rnn` (T=1)
 
@@ -127,11 +134,14 @@ MANIFEST.in                  # 源码分发清单
 
 | Framework | cuda | triton | native |
 |-----------|------|--------|--------|
-| PyTorch   | ❌   | ✅     | ✅     |
+| PyTorch   | ❌   | ✅     | ✅²    |
 | JAX       | ❌   | ✅     | ✅     |
 | TensorFlow| ❌   | ❌     | ✅     |
 | NumPy     | ❌   | ❌     | ✅     |
 | OpenVINO  | ❌   | ❌     | ✅     |
+
+> ² Torch 后端的 `native` 在非 CPU 平台默认为 Triton 实现；jax 侧 `native`
+> 保持纯 Keras ops（jax triton 桥接依赖额外的 jax-triton 包）。
 
 ---
 

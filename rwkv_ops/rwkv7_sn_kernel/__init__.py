@@ -1,7 +1,7 @@
 import keras
 from keras import ops
 
-from ..rwkv7_kernel import _use_pallas
+from ..rwkv7_kernel import _use_pallas, _use_triton
 
 
 def transpose_head(x, head_first):
@@ -47,6 +47,10 @@ def get_generalized_delta_rule_sn(HEAD_SIZE=64, KERNEL_TYPE="cuda"):
                 from .torch_triton_kernel import get_torch_generalized_delta_rule_sn
 
                 return get_torch_generalized_delta_rule_sn(HEAD_SIZE)
+        if _use_triton(KERNEL_TYPE):
+            from .torch_triton_kernel import get_torch_generalized_delta_rule_sn
+
+            return get_torch_generalized_delta_rule_sn(HEAD_SIZE)
 
     return generalized_delta_rule_sn, generalized_delta_rule_sn
 

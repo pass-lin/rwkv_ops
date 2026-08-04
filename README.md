@@ -65,9 +65,9 @@ pip install rwkv_ops
 | `KERNEL_BACKEND` | 算子后端 | `jax` / `torch` / `tensorflow` / `numpy` / `openvino` | `torch` | **高** |
 | `KERNEL_TYPE` | 实现类型 | `triton` / `cuda` / `native` | `cuda` | — |
 | `RWKV_OPS_PALLAS_AUTOTUNE` | Pallas autotune 开关 | `1` / `0` | `1` | — |
-| `RWKV_OPS_JAX_NATIVE` | jax 端 native 实现选择 | `pallas`（默认）/ `xla` | — | — |
+| `RWKV_OPS_KERAS_NATIVE` | 强制 native 为纯 keras ops | `1` / `0` | `0` | — |
 
-> JAX 后端下，`KERNEL_TYPE=native` 且平台为 GPU/TPU 时，rwkv7/rwkv7_sn 的 `native` 实现为 Pallas kernel（其余平台为纯 Keras ops，CPU 同）。Pallas kernel 只使用公开 Pallas API，autotune 会在候选后端中自动挑选可编译且最快者。
+> `KERNEL_TYPE=native` 时按后端与平台分发实现：jax + GPU/TPU 用 Pallas kernel（rwkv7/rwkv7_sn）；torch + 非 CPU 用 Triton kernel（rwkv7/rwkv7_sn/mhc，pip 版 torch 自带 triton）；其余（CPU、mhc 的 jax 侧等）为纯 Keras ops。设 `RWKV_OPS_KERAS_NATIVE=1` 可强制全部为纯 Keras ops（调试用）。
 
 > 若 `KERNEL_BACKEND` 有值，直接采用；若为空，则用 `KERAS_BACKEND`；两者皆空则默认 `torch`。  
 
@@ -244,7 +244,7 @@ if padding_mask is not None:
 | NumPy       | ❌   | ❌     | ✅     |
 | OpenVINO    | ❌   | ❌     | ✅     |
 
-> ¹ JAX 后端的 `native` 在 GPU/TPU 上为 Pallas 实现（`jax_pallas_kernel.py`），其余平台为纯 Keras ops。
+> ¹ JAX 后端的 `native` 在 GPU/TPU 上为 Pallas 实现（`jax_pallas_kernel.py`），Torch 后端的 `native` 在非 CPU 平台为 Triton 实现，其余为纯 Keras ops。
 
 
 ---

@@ -1,6 +1,8 @@
 import keras
 from keras import ops
 
+from ..rwkv7_kernel import _use_triton
+
 
 def get_mhc_kernel(KERNEL_TYPE="native"):
     from .native_op import (
@@ -10,7 +12,15 @@ def get_mhc_kernel(KERNEL_TYPE="native"):
         mhc_rmsnorm,
     )
 
-    if KERNEL_TYPE == "triton":
+    # native 的默认加速只对 torch 开放：pip 版 torch 自带 triton，
+    # 符合"装好库即可用"的 native 语义；jax 侧 triton 桥接依赖额外的
+    # jax-triton 包，必须显式 KERNEL_TYPE="triton" 才启用。
+    use_triton = KERNEL_TYPE == "triton" or (
+        KERNEL_TYPE == "native"
+        and keras.config.backend() == "torch"
+        and _use_triton(KERNEL_TYPE)
+    )
+    if use_triton:
         if keras.config.backend() == "jax":
             import jax
 
