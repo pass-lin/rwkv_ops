@@ -3,45 +3,45 @@
 
 using bf = __nv_bfloat16;
 
-void cuda_forward_sn(int B, int T, int H, bf *w, bf *q, bf *k, bf *v, bf *a,
+void cuda_forward_sane(int B, int T, int H, bf *w, bf *q, bf *k, bf *v, bf *a,
                      bf *b, const float *tau, const float *mask, bf *y,
                      float *s, float *sa, float *h0);
 
-void cuda_backward_sn(int B, int T, int H, bf *w, bf *q, bf *k, bf *v, bf *a,
+void cuda_backward_sane(int B, int T, int H, bf *w, bf *q, bf *k, bf *v, bf *a,
                       bf *b, const float *tau, const float *mask, bf *dy,
                       float *s, float *sa, float *dht, float *dh0, float *dtau,
                       bf *dw, bf *dq, bf *dk, bf *dv, bf *da, bf *db);
 
-void cuda_forward_inference_sn(int B, int T, int H, bf *w, bf *q, bf *k, bf *v,
+void cuda_forward_inference_sane(int B, int T, int H, bf *w, bf *q, bf *k, bf *v,
                                bf *a, bf *b, const float *tau,
                                const float *mask, bf *y, float *s, float *h0);
 
-void cuda_forward_sn_no_mask(int B, int T, int H, bf *w, bf *q, bf *k, bf *v,
+void cuda_forward_sane_no_mask(int B, int T, int H, bf *w, bf *q, bf *k, bf *v,
                              bf *a, bf *b, const float *tau, bf *y, float *s,
                              float *sa, float *h0);
 
-void cuda_backward_sn_no_mask(int B, int T, int H, bf *w, bf *q, bf *k, bf *v,
+void cuda_backward_sane_no_mask(int B, int T, int H, bf *w, bf *q, bf *k, bf *v,
                               bf *a, bf *b, const float *tau, bf *dy, float *s,
                               float *sa, float *dht, float *dh0, float *dtau,
                               bf *dw, bf *dq, bf *dk, bf *dv, bf *da, bf *db);
 
-void cuda_forward_inference_sn_no_mask(int B, int T, int H, bf *w, bf *q, bf *k,
+void cuda_forward_inference_sane_no_mask(int B, int T, int H, bf *w, bf *q, bf *k,
                                        bf *v, bf *a, bf *b, const float *tau,
                                        bf *y, float *s, float *h0);
 
-void forward_sn(torch::Tensor &w, torch::Tensor &q, torch::Tensor &k,
+void forward_sane(torch::Tensor &w, torch::Tensor &q, torch::Tensor &k,
                 torch::Tensor &v, torch::Tensor &a, torch::Tensor &b,
                 torch::Tensor &tau, torch::Tensor &mask, torch::Tensor &y,
                 torch::Tensor &s, torch::Tensor &sa, torch::Tensor &h0) {
   int B = w.sizes()[0], T = w.sizes()[1], H = w.sizes()[2];
-  cuda_forward_sn(
+  cuda_forward_sane(
       B, T, H, (bf *)w.data_ptr(), (bf *)q.data_ptr(), (bf *)k.data_ptr(),
       (bf *)v.data_ptr(), (bf *)a.data_ptr(), (bf *)b.data_ptr(),
       (float *)tau.data_ptr(), (float *)mask.data_ptr(), (bf *)y.data_ptr(),
       (float *)s.data_ptr(), (float *)sa.data_ptr(), (float *)h0.data_ptr());
 }
 
-void backward_sn(torch::Tensor &w, torch::Tensor &q, torch::Tensor &k,
+void backward_sane(torch::Tensor &w, torch::Tensor &q, torch::Tensor &k,
                  torch::Tensor &v, torch::Tensor &a, torch::Tensor &b,
                  torch::Tensor &tau, torch::Tensor &mask, torch::Tensor &dy,
                  torch::Tensor &s, torch::Tensor &sa, torch::Tensor &dht,
@@ -49,7 +49,7 @@ void backward_sn(torch::Tensor &w, torch::Tensor &q, torch::Tensor &k,
                  torch::Tensor &dq, torch::Tensor &dk, torch::Tensor &dv,
                  torch::Tensor &da, torch::Tensor &db) {
   int B = w.sizes()[0], T = w.sizes()[1], H = w.sizes()[2];
-  cuda_backward_sn(
+  cuda_backward_sane(
       B, T, H, (bf *)w.data_ptr(), (bf *)q.data_ptr(), (bf *)k.data_ptr(),
       (bf *)v.data_ptr(), (bf *)a.data_ptr(), (bf *)b.data_ptr(),
       (float *)tau.data_ptr(), (float *)mask.data_ptr(), (bf *)dy.data_ptr(),
@@ -59,32 +59,32 @@ void backward_sn(torch::Tensor &w, torch::Tensor &q, torch::Tensor &k,
       (bf *)da.data_ptr(), (bf *)db.data_ptr());
 }
 
-void forward_inference_sn(torch::Tensor &w, torch::Tensor &q, torch::Tensor &k,
+void forward_inference_sane(torch::Tensor &w, torch::Tensor &q, torch::Tensor &k,
                           torch::Tensor &v, torch::Tensor &a, torch::Tensor &b,
                           torch::Tensor &tau, torch::Tensor &mask,
                           torch::Tensor &y, torch::Tensor &s,
                           torch::Tensor &h0) {
   int B = w.sizes()[0], T = w.sizes()[1], H = w.sizes()[2];
-  cuda_forward_inference_sn(
+  cuda_forward_inference_sane(
       B, T, H, (bf *)w.data_ptr(), (bf *)q.data_ptr(), (bf *)k.data_ptr(),
       (bf *)v.data_ptr(), (bf *)a.data_ptr(), (bf *)b.data_ptr(),
       (float *)tau.data_ptr(), (float *)mask.data_ptr(), (bf *)y.data_ptr(),
       (float *)s.data_ptr(), (float *)h0.data_ptr());
 }
 
-void forward_sn_no_mask(torch::Tensor &w, torch::Tensor &q, torch::Tensor &k,
+void forward_sane_no_mask(torch::Tensor &w, torch::Tensor &q, torch::Tensor &k,
                         torch::Tensor &v, torch::Tensor &a, torch::Tensor &b,
                         torch::Tensor &tau, torch::Tensor &y, torch::Tensor &s,
                         torch::Tensor &sa, torch::Tensor &h0) {
   int B = w.sizes()[0], T = w.sizes()[1], H = w.sizes()[2];
-  cuda_forward_sn_no_mask(
+  cuda_forward_sane_no_mask(
       B, T, H, (bf *)w.data_ptr(), (bf *)q.data_ptr(), (bf *)k.data_ptr(),
       (bf *)v.data_ptr(), (bf *)a.data_ptr(), (bf *)b.data_ptr(),
       (float *)tau.data_ptr(), (bf *)y.data_ptr(), (float *)s.data_ptr(),
       (float *)sa.data_ptr(), (float *)h0.data_ptr());
 }
 
-void backward_sn_no_mask(torch::Tensor &w, torch::Tensor &q, torch::Tensor &k,
+void backward_sane_no_mask(torch::Tensor &w, torch::Tensor &q, torch::Tensor &k,
                          torch::Tensor &v, torch::Tensor &a, torch::Tensor &b,
                          torch::Tensor &tau, torch::Tensor &dy,
                          torch::Tensor &s, torch::Tensor &sa,
@@ -94,7 +94,7 @@ void backward_sn_no_mask(torch::Tensor &w, torch::Tensor &q, torch::Tensor &k,
                          torch::Tensor &dv, torch::Tensor &da,
                          torch::Tensor &db) {
   int B = w.sizes()[0], T = w.sizes()[1], H = w.sizes()[2];
-  cuda_backward_sn_no_mask(
+  cuda_backward_sane_no_mask(
       B, T, H, (bf *)w.data_ptr(), (bf *)q.data_ptr(), (bf *)k.data_ptr(),
       (bf *)v.data_ptr(), (bf *)a.data_ptr(), (bf *)b.data_ptr(),
       (float *)tau.data_ptr(), (bf *)dy.data_ptr(), (float *)s.data_ptr(),
@@ -104,47 +104,47 @@ void backward_sn_no_mask(torch::Tensor &w, torch::Tensor &q, torch::Tensor &k,
       (bf *)db.data_ptr());
 }
 
-void forward_inference_sn_no_mask(torch::Tensor &w, torch::Tensor &q,
+void forward_inference_sane_no_mask(torch::Tensor &w, torch::Tensor &q,
                                   torch::Tensor &k, torch::Tensor &v,
                                   torch::Tensor &a, torch::Tensor &b,
                                   torch::Tensor &tau, torch::Tensor &y,
                                   torch::Tensor &s, torch::Tensor &h0) {
   int B = w.sizes()[0], T = w.sizes()[1], H = w.sizes()[2];
-  cuda_forward_inference_sn_no_mask(
+  cuda_forward_inference_sane_no_mask(
       B, T, H, (bf *)w.data_ptr(), (bf *)q.data_ptr(), (bf *)k.data_ptr(),
       (bf *)v.data_ptr(), (bf *)a.data_ptr(), (bf *)b.data_ptr(),
       (float *)tau.data_ptr(), (bf *)y.data_ptr(), (float *)s.data_ptr(),
       (float *)h0.data_ptr());
 }
 
-TORCH_LIBRARY(wind_backstepping_sn, m) {
-  m.def("forward_sn(Tensor w, Tensor q, Tensor k, Tensor v, Tensor a, Tensor "
+TORCH_LIBRARY(wind_backstepping_sane, m) {
+  m.def("forward_sane(Tensor w, Tensor q, Tensor k, Tensor v, Tensor a, Tensor "
         "b, Tensor tau, Tensor mask, Tensor(a!) y, Tensor(b!) s, Tensor(c!) "
         "sa, Tensor(d!) h0) -> ()");
-  m.def("backward_sn(Tensor w, Tensor q, Tensor k, Tensor v, Tensor a, Tensor "
+  m.def("backward_sane(Tensor w, Tensor q, Tensor k, Tensor v, Tensor a, Tensor "
         "b, Tensor tau, Tensor mask, Tensor dy, Tensor s, Tensor sa, Tensor "
         "dht, Tensor(a!) dh0, Tensor(b!) dtau, Tensor(c!) dw, Tensor(d!) dq, "
         "Tensor(e!) dk, Tensor(f!) dv, Tensor(g!) da, Tensor(h!) db) -> ()");
-  m.def("forward_inference_sn(Tensor w, Tensor q, Tensor k, Tensor v, Tensor "
+  m.def("forward_inference_sane(Tensor w, Tensor q, Tensor k, Tensor v, Tensor "
         "a, Tensor b, Tensor tau, Tensor mask, Tensor(a!) y, Tensor(b!) s, "
         "Tensor(c!) h0) -> ()");
-  m.def("forward_sn_no_mask(Tensor w, Tensor q, Tensor k, Tensor v, Tensor a, "
+  m.def("forward_sane_no_mask(Tensor w, Tensor q, Tensor k, Tensor v, Tensor a, "
         "Tensor b, Tensor tau, Tensor(a!) y, Tensor(b!) s, Tensor(c!) sa, "
         "Tensor(d!) h0) -> ()");
-  m.def("backward_sn_no_mask(Tensor w, Tensor q, Tensor k, Tensor v, Tensor a, "
+  m.def("backward_sane_no_mask(Tensor w, Tensor q, Tensor k, Tensor v, Tensor a, "
         "Tensor b, Tensor tau, Tensor dy, Tensor s, Tensor sa, Tensor dht, "
         "Tensor(a!) dh0, Tensor(b!) dtau, Tensor(c!) dw, Tensor(d!) dq, "
         "Tensor(e!) dk, Tensor(f!) dv, Tensor(g!) da, Tensor(h!) db) -> ()");
-  m.def("forward_inference_sn_no_mask(Tensor w, Tensor q, Tensor k, Tensor v, "
+  m.def("forward_inference_sane_no_mask(Tensor w, Tensor q, Tensor k, Tensor v, "
         "Tensor a, Tensor b, Tensor tau, Tensor(a!) y, Tensor(b!) s, "
         "Tensor(c!) h0) -> ()");
 }
 
-TORCH_LIBRARY_IMPL(wind_backstepping_sn, CUDA, m) {
-  m.impl("forward_sn", &forward_sn);
-  m.impl("backward_sn", &backward_sn);
-  m.impl("forward_inference_sn", &forward_inference_sn);
-  m.impl("forward_sn_no_mask", &forward_sn_no_mask);
-  m.impl("backward_sn_no_mask", &backward_sn_no_mask);
-  m.impl("forward_inference_sn_no_mask", &forward_inference_sn_no_mask);
+TORCH_LIBRARY_IMPL(wind_backstepping_sane, CUDA, m) {
+  m.impl("forward_sane", &forward_sane);
+  m.impl("backward_sane", &backward_sane);
+  m.impl("forward_inference_sane", &forward_inference_sane);
+  m.impl("forward_sane_no_mask", &forward_sane_no_mask);
+  m.impl("backward_sane_no_mask", &backward_sane_no_mask);
+  m.impl("forward_inference_sane_no_mask", &forward_inference_sane_no_mask);
 }

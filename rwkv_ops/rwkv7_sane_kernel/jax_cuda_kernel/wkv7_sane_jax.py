@@ -1,4 +1,4 @@
-"""JAX 版 RWKV7-SN CUDA kernel 封装。"""
+"""JAX 版 RWKV7-SANE CUDA kernel 封装。"""
 
 from __future__ import annotations
 import pathlib
@@ -129,15 +129,15 @@ def _create_partition(impl_fn):
     return partition
 
 
-def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
+def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
     _BUILD_DIR = _CURRENT_DIR / f"build_{HEAD_SIZE}"
-    _SO_PATH = _BUILD_DIR / "wkv7_sn.so"
+    _SO_PATH = _BUILD_DIR / "wkv7_sane.so"
 
     def _ensure_compiled() -> pathlib.Path:
         if _SO_PATH.exists():
             return _SO_PATH
 
-        print("[rwkv7_sn_jax] First use – compiling CUDA kernel…")
+        print("[rwkv7_sane_jax] First use – compiling CUDA kernel…")
         src_dir = _CURRENT_DIR
         build_dir = _BUILD_DIR
         build_dir.mkdir(exist_ok=True)
@@ -176,37 +176,37 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         subprocess.check_call(["cmake", "--install", str(build_dir)])
 
         if not _SO_PATH.exists():
-            raise RuntimeError("Compilation failed – wkv7_sn.so not found.")
+            raise RuntimeError("Compilation failed – wkv7_sane.so not found.")
 
-        print("[rwkv7_sn_jax] Compilation finished – output at", _SO_PATH)
+        print("[rwkv7_sane_jax] Compilation finished – output at", _SO_PATH)
         return _SO_PATH
 
     _lib = ctypes.CDLL(_ensure_compiled())
 
     jax.ffi.register_ffi_target(
-        "wkv7_sn_fwd", jax.ffi.pycapsule(_lib.Wkv7SnFwd), platform="CUDA"
+        "wkv7_sane_fwd", jax.ffi.pycapsule(_lib.Wkv7SaneFwd), platform="CUDA"
     )
     jax.ffi.register_ffi_target(
-        "wkv7_sn_bwd", jax.ffi.pycapsule(_lib.Wkv7SnBwd), platform="CUDA"
+        "wkv7_sane_bwd", jax.ffi.pycapsule(_lib.Wkv7SaneBwd), platform="CUDA"
     )
     jax.ffi.register_ffi_target(
-        "wkv7_sn_inference",
-        jax.ffi.pycapsule(_lib.Wkv7SnInference),
+        "wkv7_sane_inference",
+        jax.ffi.pycapsule(_lib.Wkv7SaneInference),
         platform="CUDA",
     )
     jax.ffi.register_ffi_target(
-        "wkv7_sn_fwd_no_mask",
-        jax.ffi.pycapsule(_lib.Wkv7SnFwdNoMask),
+        "wkv7_sane_fwd_no_mask",
+        jax.ffi.pycapsule(_lib.Wkv7SaneFwdNoMask),
         platform="CUDA",
     )
     jax.ffi.register_ffi_target(
-        "wkv7_sn_bwd_no_mask",
-        jax.ffi.pycapsule(_lib.Wkv7SnBwdNoMask),
+        "wkv7_sane_bwd_no_mask",
+        jax.ffi.pycapsule(_lib.Wkv7SaneBwdNoMask),
         platform="CUDA",
     )
     jax.ffi.register_ffi_target(
-        "wkv7_sn_inference_no_mask",
-        jax.ffi.pycapsule(_lib.Wkv7SnInferenceNoMask),
+        "wkv7_sane_inference_no_mask",
+        jax.ffi.pycapsule(_lib.Wkv7SaneInferenceNoMask),
         platform="CUDA",
     )
 
@@ -217,7 +217,7 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         return x
 
     # 训练前向（带 mask）
-    def _wkv7_sn_kernel_impl(w, q, k, v, a, b, tau, mask, h0):
+    def _wkv7_sane_kernel_impl(w, q, k, v, a, b, tau, mask, h0):
         B, T, H, K = q.shape
         dtype = q.dtype
         chunk_num = int(T // CHUNK_LEN)
@@ -226,21 +226,21 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         sa_type = jax.ShapeDtypeStruct((B, T, H, K), jnp.float32)
 
         return jax.ffi.ffi_call(
-            "wkv7_sn_fwd", (out_type, s_type, sa_type), vmap_method="broadcast_all"
+            "wkv7_sane_fwd", (out_type, s_type, sa_type), vmap_method="broadcast_all"
         )(w, q, k, v, a, b, tau, mask, h0)
 
     @custom_partitioning
-    def _wkv7_sn_kernel(w, q, k, v, a, b, tau, mask, h0):
-        return _wkv7_sn_kernel_impl(w, q, k, v, a, b, tau, mask, h0)
+    def _wkv7_sane_kernel(w, q, k, v, a, b, tau, mask, h0):
+        return _wkv7_sane_kernel_impl(w, q, k, v, a, b, tau, mask, h0)
 
-    _wkv7_sn_kernel.def_partition(
+    _wkv7_sane_kernel.def_partition(
         infer_sharding_from_operands=_fwd_infer_sharding,
         sharding_rule=FWD_RULE,
-        partition=_create_partition(_wkv7_sn_kernel_impl),
+        partition=_create_partition(_wkv7_sane_kernel_impl),
     )
 
     # 训练前向（无 mask）
-    def _wkv7_sn_kernel_no_mask_impl(w, q, k, v, a, b, tau, h0):
+    def _wkv7_sane_kernel_no_mask_impl(w, q, k, v, a, b, tau, h0):
         B, T, H, K = q.shape
         dtype = q.dtype
         chunk_num = int(T // CHUNK_LEN)
@@ -249,30 +249,30 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         sa_type = jax.ShapeDtypeStruct((B, T, H, K), jnp.float32)
 
         return jax.ffi.ffi_call(
-            "wkv7_sn_fwd_no_mask",
+            "wkv7_sane_fwd_no_mask",
             (out_type, s_type, sa_type),
             vmap_method="broadcast_all",
         )(w, q, k, v, a, b, tau, h0)
 
     @custom_partitioning
-    def _wkv7_sn_kernel_no_mask(w, q, k, v, a, b, tau, h0):
-        return _wkv7_sn_kernel_no_mask_impl(w, q, k, v, a, b, tau, h0)
+    def _wkv7_sane_kernel_no_mask(w, q, k, v, a, b, tau, h0):
+        return _wkv7_sane_kernel_no_mask_impl(w, q, k, v, a, b, tau, h0)
 
-    _wkv7_sn_kernel_no_mask.def_partition(
+    _wkv7_sane_kernel_no_mask.def_partition(
         infer_sharding_from_operands=_fwd_infer_sharding,
         sharding_rule=FWD_NO_MASK_RULE,
-        partition=_create_partition(_wkv7_sn_kernel_no_mask_impl),
+        partition=_create_partition(_wkv7_sane_kernel_no_mask_impl),
     )
 
-    def _apply_sn_to_final_state(state, tau, mask):
+    def _apply_sane_to_final_state(state, tau, mask):
         # state: [B, H, K, K]; tau: [B, T//16, H]; mask: [B, T//16]
         last_tau = tau[:, -1][:, :, None, None]
         last_mask = mask[:, -1][:, None, None, None]
         tau_safe = jnp.maximum(last_tau, 1e-6)
-        sn_state = last_tau * jnp.tanh(state / tau_safe)
-        return jnp.where(last_mask > 0, sn_state, state)
+        sane_state = last_tau * jnp.tanh(state / tau_safe)
+        return jnp.where(last_mask > 0, sane_state, state)
 
-    def _apply_sn_to_final_state_no_mask(state, tau):
+    def _apply_sane_to_final_state_no_mask(state, tau):
         # state: [B, H, K, K]; tau: [B, T//16, H]
         last_tau = tau[:, -1][:, :, None, None]
         tau_safe = jnp.maximum(last_tau, 1e-6)
@@ -281,26 +281,26 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
     def _compute_outputs(y, s, tau, mask):
         final_state = s[:, :, -1]
         final_state = jnp.transpose(final_state, [0, 1, 3, 2])
-        final_state = _apply_sn_to_final_state(final_state, tau, mask)
+        final_state = _apply_sane_to_final_state(final_state, tau, mask)
         return y, final_state
 
     def _compute_outputs_no_mask(y, s, tau):
         final_state = s[:, :, -1]
         final_state = jnp.transpose(final_state, [0, 1, 3, 2])
-        final_state = _apply_sn_to_final_state_no_mask(final_state, tau)
+        final_state = _apply_sane_to_final_state_no_mask(final_state, tau)
         return y, final_state
 
     @jax.custom_vjp
-    def wk7_sn_kernel(w, q, k, v, a, b, tau, mask, h0):
-        y, s, sa = _wkv7_sn_kernel(w, q, k, v, a, b, tau, mask, h0)
+    def wk7_sane_kernel(w, q, k, v, a, b, tau, mask, h0):
+        y, s, sa = _wkv7_sane_kernel(w, q, k, v, a, b, tau, mask, h0)
         return _compute_outputs(y, s, tau, mask)
 
     def _fwd(w, q, k, v, a, b, tau, mask, h0):
-        y, s, sa = _wkv7_sn_kernel(w, q, k, v, a, b, tau, mask, h0)
+        y, s, sa = _wkv7_sane_kernel(w, q, k, v, a, b, tau, mask, h0)
         y_out, final_state = _compute_outputs(y, s, tau, mask)
         return (y_out, final_state), (w, q, k, v, a, b, tau, mask, s, sa)
 
-    def _wkv7_sn_bwd_kernel_impl(w, q, k, v, a, b, tau, mask, dy, s, sa, dht):
+    def _wkv7_sane_bwd_kernel_impl(w, q, k, v, a, b, tau, mask, dy, s, sa, dht):
         dh0_type = jax.ShapeDtypeStruct(dht.shape, dht.dtype)
         dtau_type = jax.ShapeDtypeStruct(tau.shape, tau.dtype)
         dw_type = jax.ShapeDtypeStruct(w.shape, w.dtype)
@@ -311,45 +311,45 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         db_type = jax.ShapeDtypeStruct(b.shape, b.dtype)
 
         dh0, dtau, dw, dq, dk, dv, da, db = jax.ffi.ffi_call(
-            "wkv7_sn_bwd",
+            "wkv7_sane_bwd",
             (dh0_type, dtau_type, dw_type, dq_type, dk_type, dv_type, da_type, db_type),
             vmap_method="broadcast_all",
         )(w, q, k, v, a, b, tau, mask, dy, s, sa, dht)
         return dw, dq, dk, dv, da, db, dtau, dh0
 
     @custom_partitioning
-    def _wkv7_sn_bwd_kernel(w, q, k, v, a, b, tau, mask, dy, s, sa, dht):
-        return _wkv7_sn_bwd_kernel_impl(w, q, k, v, a, b, tau, mask, dy, s, sa, dht)
+    def _wkv7_sane_bwd_kernel(w, q, k, v, a, b, tau, mask, dy, s, sa, dht):
+        return _wkv7_sane_bwd_kernel_impl(w, q, k, v, a, b, tau, mask, dy, s, sa, dht)
 
-    _wkv7_sn_bwd_kernel.def_partition(
+    _wkv7_sane_bwd_kernel.def_partition(
         infer_sharding_from_operands=_bwd_infer_sharding,
         sharding_rule=BWD_RULE,
-        partition=_create_partition(_wkv7_sn_bwd_kernel_impl),
+        partition=_create_partition(_wkv7_sane_bwd_kernel_impl),
     )
 
     def _bwd(res, grads):
         w, q, k, v, a, b, tau, mask, s, sa = res
         dy, dht = grads
         dy = jnp.asarray(dy, jnp.bfloat16)
-        dw, dq, dk, dv, da, db, dtau, dh0 = _wkv7_sn_bwd_kernel(
+        dw, dq, dk, dv, da, db, dtau, dh0 = _wkv7_sane_bwd_kernel(
             w, q, k, v, a, b, tau, mask, dy, s, sa, dht
         )
         return dw, dq, dk, dv, da, db, dtau, None, dh0
 
-    wk7_sn_kernel.defvjp(_fwd, _bwd)
+    wk7_sane_kernel.defvjp(_fwd, _bwd)
 
     # 训练前向/反向（无 mask）
     @jax.custom_vjp
-    def wk7_sn_kernel_no_mask(w, q, k, v, a, b, tau, h0):
-        y, s, sa = _wkv7_sn_kernel_no_mask(w, q, k, v, a, b, tau, h0)
+    def wk7_sane_kernel_no_mask(w, q, k, v, a, b, tau, h0):
+        y, s, sa = _wkv7_sane_kernel_no_mask(w, q, k, v, a, b, tau, h0)
         return _compute_outputs_no_mask(y, s, tau)
 
     def _fwd_no_mask(w, q, k, v, a, b, tau, h0):
-        y, s, sa = _wkv7_sn_kernel_no_mask(w, q, k, v, a, b, tau, h0)
+        y, s, sa = _wkv7_sane_kernel_no_mask(w, q, k, v, a, b, tau, h0)
         y_out, final_state = _compute_outputs_no_mask(y, s, tau)
         return (y_out, final_state), (w, q, k, v, a, b, tau, s, sa)
 
-    def _wkv7_sn_bwd_kernel_no_mask_impl(w, q, k, v, a, b, tau, dy, s, sa, dht):
+    def _wkv7_sane_bwd_kernel_no_mask_impl(w, q, k, v, a, b, tau, dy, s, sa, dht):
         dh0_type = jax.ShapeDtypeStruct(dht.shape, dht.dtype)
         dtau_type = jax.ShapeDtypeStruct(tau.shape, tau.dtype)
         dw_type = jax.ShapeDtypeStruct(w.shape, w.dtype)
@@ -360,81 +360,81 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         db_type = jax.ShapeDtypeStruct(b.shape, b.dtype)
 
         dh0, dtau, dw, dq, dk, dv, da, db = jax.ffi.ffi_call(
-            "wkv7_sn_bwd_no_mask",
+            "wkv7_sane_bwd_no_mask",
             (dh0_type, dtau_type, dw_type, dq_type, dk_type, dv_type, da_type, db_type),
             vmap_method="broadcast_all",
         )(w, q, k, v, a, b, tau, dy, s, sa, dht)
         return dw, dq, dk, dv, da, db, dtau, dh0
 
     @custom_partitioning
-    def _wkv7_sn_bwd_kernel_no_mask(w, q, k, v, a, b, tau, dy, s, sa, dht):
-        return _wkv7_sn_bwd_kernel_no_mask_impl(w, q, k, v, a, b, tau, dy, s, sa, dht)
+    def _wkv7_sane_bwd_kernel_no_mask(w, q, k, v, a, b, tau, dy, s, sa, dht):
+        return _wkv7_sane_bwd_kernel_no_mask_impl(w, q, k, v, a, b, tau, dy, s, sa, dht)
 
-    _wkv7_sn_bwd_kernel_no_mask.def_partition(
+    _wkv7_sane_bwd_kernel_no_mask.def_partition(
         infer_sharding_from_operands=_bwd_infer_sharding,
         sharding_rule=BWD_NO_MASK_RULE,
-        partition=_create_partition(_wkv7_sn_bwd_kernel_no_mask_impl),
+        partition=_create_partition(_wkv7_sane_bwd_kernel_no_mask_impl),
     )
 
     def _bwd_no_mask(res, grads):
         w, q, k, v, a, b, tau, s, sa = res
         dy, dht = grads
         dy = jnp.asarray(dy, jnp.bfloat16)
-        dw, dq, dk, dv, da, db, dtau, dh0 = _wkv7_sn_bwd_kernel_no_mask(
+        dw, dq, dk, dv, da, db, dtau, dh0 = _wkv7_sane_bwd_kernel_no_mask(
             w, q, k, v, a, b, tau, dy, s, sa, dht
         )
         return dw, dq, dk, dv, da, db, dtau, dh0
 
-    wk7_sn_kernel_no_mask.defvjp(_fwd_no_mask, _bwd_no_mask)
+    wk7_sane_kernel_no_mask.defvjp(_fwd_no_mask, _bwd_no_mask)
 
     # 推理前向（带 mask）
-    def _wkv7_sn_inference_kernel_impl(w, q, k, v, a, b, tau, mask, h0):
+    def _wkv7_sane_inference_kernel_impl(w, q, k, v, a, b, tau, mask, h0):
         B, T, H, K = q.shape
         dtype = q.dtype
         out_type = jax.ShapeDtypeStruct((B, T, H, K), dtype)
         s_type = jax.ShapeDtypeStruct((B, H, K, K), jnp.float32)
 
         y, s = jax.ffi.ffi_call(
-            "wkv7_sn_inference", (out_type, s_type), vmap_method="broadcast_all"
+            "wkv7_sane_inference", (out_type, s_type), vmap_method="broadcast_all"
         )(w, q, k, v, a, b, tau, mask, h0)
         return y, s
 
     @custom_partitioning
-    def _wkv7_sn_inference_kernel(w, q, k, v, a, b, tau, mask, h0):
-        return _wkv7_sn_inference_kernel_impl(w, q, k, v, a, b, tau, mask, h0)
+    def _wkv7_sane_inference_kernel(w, q, k, v, a, b, tau, mask, h0):
+        return _wkv7_sane_inference_kernel_impl(w, q, k, v, a, b, tau, mask, h0)
 
-    _wkv7_sn_inference_kernel.def_partition(
+    _wkv7_sane_inference_kernel.def_partition(
         infer_sharding_from_operands=_inf_infer_sharding,
         sharding_rule=INF_RULE,
-        partition=_create_partition(_wkv7_sn_inference_kernel_impl),
+        partition=_create_partition(_wkv7_sane_inference_kernel_impl),
     )
 
     # 推理前向（无 mask）
-    def _wkv7_sn_inference_kernel_no_mask_impl(w, q, k, v, a, b, tau, h0):
+    def _wkv7_sane_inference_kernel_no_mask_impl(w, q, k, v, a, b, tau, h0):
         B, T, H, K = q.shape
         dtype = q.dtype
         out_type = jax.ShapeDtypeStruct((B, T, H, K), dtype)
         s_type = jax.ShapeDtypeStruct((B, H, K, K), jnp.float32)
 
         y, s = jax.ffi.ffi_call(
-            "wkv7_sn_inference_no_mask",
+            "wkv7_sane_inference_no_mask",
             (out_type, s_type),
             vmap_method="broadcast_all",
         )(w, q, k, v, a, b, tau, h0)
         return y, s
 
     @custom_partitioning
-    def _wkv7_sn_inference_kernel_no_mask(w, q, k, v, a, b, tau, h0):
-        return _wkv7_sn_inference_kernel_no_mask_impl(w, q, k, v, a, b, tau, h0)
+    def _wkv7_sane_inference_kernel_no_mask(w, q, k, v, a, b, tau, h0):
+        return _wkv7_sane_inference_kernel_no_mask_impl(w, q, k, v, a, b, tau, h0)
 
-    _wkv7_sn_inference_kernel_no_mask.def_partition(
+    _wkv7_sane_inference_kernel_no_mask.def_partition(
         infer_sharding_from_operands=_inf_infer_sharding,
         sharding_rule=INF_NO_MASK_RULE,
-        partition=_create_partition(_wkv7_sn_inference_kernel_no_mask_impl),
+        partition=_create_partition(_wkv7_sane_inference_kernel_no_mask_impl),
     )
 
     # 公共 API
-    def generalized_delta_rule_sn(
+    def generalized_delta_rule_sane(
         r: jnp.ndarray,
         w: jnp.ndarray,
         k: jnp.ndarray,
@@ -447,7 +447,7 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         output_final_state: bool = True,
         head_first: bool = False,
     ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
-        """带 State Neutralization 的 RWKV-7 广义 delta 规则（训练版）。
+        """带 State Anomaly Neutralization 的 RWKV-7 广义 delta 规则（训练版）。
 
         当 mask=None 且 output_final_state=True 时，会发出 UserWarning 并将
         final_state 设为 None，避免 padding chunk 污染 state。
@@ -455,7 +455,7 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         Args:
             r, w, k, v, a, b: [B, T, H, K], bfloat16。T 必须被 16 整除。
             tau: [B, T//16, H], float32。阈值，必须严格 > 1。
-            mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SN。
+            mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SANE。
             initial_state: [B, H, K, K], float32, 可选。None 则零初始化。
             output_final_state: bool, 是否返回最终 state。
             head_first: bool, 输入是否 head 维优先 ([B, H, T, K])。
@@ -500,12 +500,12 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
                 raise ValueError(
                     f"mask shape {mask.shape} must match (B, T//16) = ({B}, {T // CHUNK_LEN})"
                 )
-            out, last_state = wk7_sn_kernel(w, r, k, v, a, b, tau, mask, h0)
+            out, last_state = wk7_sane_kernel(w, r, k, v, a, b, tau, mask, h0)
             out = jnp.asarray(out, dtype)
             return out, last_state
 
-        # 无 mask 路径：chunk 边界无条件执行 State Neutralization。
-        out, last_state = wk7_sn_kernel_no_mask(w, r, k, v, a, b, tau, h0)
+        # 无 mask 路径：chunk 边界无条件执行 State Anomaly Neutralization。
+        out, last_state = wk7_sane_kernel_no_mask(w, r, k, v, a, b, tau, h0)
         out = jnp.asarray(out, dtype)
 
         if not output_final_state:
@@ -513,10 +513,10 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
 
         # mask is None 且 output_final_state=True：警告并返回 None state。
         warnings.warn(
-            "[rwkv7_sn] mask is None: 使用无条件 State Neutralization 算子。"
+            "[rwkv7_sane] mask is None: 使用无条件 State Anomaly Neutralization 算子。"
             "由于未提供 padding mask，返回的 final_state 可能被污染，"
             "因此已将其设为 None。如需 final_state 请提供显式 mask。\n"
-            "[rwkv7_sn] mask is None: using unconditional State Neutralization. "
+            "[rwkv7_sane] mask is None: using unconditional State Anomaly Neutralization. "
             "The returned final_state is set to None because padding chunks "
             "may contaminate the state. Provide an explicit mask to obtain final_state.",
             UserWarning,
@@ -524,7 +524,7 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         )
         return out, None
 
-    def generalized_delta_rule_sn_inference(
+    def generalized_delta_rule_sane_inference(
         r: jnp.ndarray,
         w: jnp.ndarray,
         k: jnp.ndarray,
@@ -537,7 +537,7 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         output_final_state: bool = True,
         head_first: bool = False,
     ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
-        """带 State Neutralization 的 RWKV-7 推理入口（无梯度）。
+        """带 State Anomaly Neutralization 的 RWKV-7 推理入口（无梯度）。
 
         与训练版本数值等价，但不保存反向 checkpoint，显存占用更低。
         tau/mask 按 chunk 读取，T 不必被 16 整除。
@@ -545,7 +545,7 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         Args:
             r, w, k, v, a, b: [B, T, H, K], bfloat16。
             tau: [B, T//16, H], float32。
-            mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SN。
+            mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SANE。
             initial_state: [B, H, K, K], float32, 可选。
             output_final_state: bool, 是否返回最终 state。
             head_first: bool, 输入是否 head 维优先 ([B, H, T, K])。
@@ -586,23 +586,25 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
                 raise ValueError(
                     f"mask shape {mask.shape} must match (B, T//16) = ({B}, {T // CHUNK_LEN})"
                 )
-            out, final_state = _wkv7_sn_inference_kernel(
+            out, final_state = _wkv7_sane_inference_kernel(
                 w, r, k, v, a, b, tau, mask, h0
             )
             out = jnp.asarray(out, dtype)
             return out, final_state
 
-        out, final_state = _wkv7_sn_inference_kernel_no_mask(w, r, k, v, a, b, tau, h0)
+        out, final_state = _wkv7_sane_inference_kernel_no_mask(
+            w, r, k, v, a, b, tau, h0
+        )
         out = jnp.asarray(out, dtype)
 
         if not output_final_state:
             return out
 
         warnings.warn(
-            "[rwkv7_sn] mask is None: 使用无条件 State Neutralization 算子。"
+            "[rwkv7_sane] mask is None: 使用无条件 State Anomaly Neutralization 算子。"
             "由于未提供 padding mask，返回的 final_state 可能被污染，"
             "因此已将其设为 None。如需 final_state 请提供显式 mask。\n"
-            "[rwkv7_sn] mask is None: using unconditional State Neutralization. "
+            "[rwkv7_sane] mask is None: using unconditional State Anomaly Neutralization. "
             "The returned final_state is set to None because padding chunks "
             "may contaminate the state. Provide an explicit mask to obtain final_state.",
             UserWarning,
@@ -610,4 +612,4 @@ def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
         )
         return out, None
 
-    return [generalized_delta_rule_sn, generalized_delta_rule_sn_inference]
+    return [generalized_delta_rule_sane, generalized_delta_rule_sane_inference]

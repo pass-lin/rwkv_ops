@@ -1,4 +1,4 @@
-// RWKV-7 State Neutralization PyTorch 单步 CUDA kernel。
+// RWKV-7 State Anomaly Neutralization PyTorch 单步 CUDA kernel。
 #include <assert.h>
 #include <cstdint>
 #include <cuda_bf16.h>
@@ -11,15 +11,15 @@ __device__ inline bf to_bf(const float &u) { return __float2bfloat16_rn(u); }
 
 typedef bf *__restrict__ F_;
 
-// RWKV-7-SN 单步前向 kernel（T=1），按 do_sn 选择是否执行 State
+// RWKV-7-SANE 单步前向 kernel（T=1），按 do_sane 选择是否执行 State
 // Neutralization。
 //
 // 每个 block 处理一个 (batch, head)。
 //
 // Args:
 //   w_, q_, k_, v_, a_, b_: [B, H, C], bfloat16, row-major。
-//   tau_:  [B, H], float32。SN 阈值。
-//   do_sn_: [B], int8。非零表示对该 sample 执行 SN。
+//   tau_:  [B, H], float32。SANE 阈值。
+//   do_sane_: [B], int8。非零表示对该 sample 执行 SANE。
 //   h0_: [B, H, C, C], float32, row-major。初始状态。
 //   y_:  [B, H, C], bfloat16, row-major。输出 y。
 //   h1_: [B, H, C, C], float32, row-major。输出状态。
@@ -28,10 +28,10 @@ typedef bf *__restrict__ F_;
 // 编译期宏: _C_ 为 head_size。
 template <int C>
 __launch_bounds__(C, 2) __global__
-    void forward_single_step_sn_kernel(int B, int H, F_ w_, F_ q_, F_ k_, F_ v_,
+    void forward_single_step_sane_kernel(int B, int H, F_ w_, F_ q_, F_ k_, F_ v_,
                                        F_ a_, F_ b_,
                                        const float *__restrict__ tau_,
-                                       const int8_t *__restrict__ do_sn_,
+                                       const int8_t *__restrict__ do_sane_,
                                        float *h0_, bf *y_, float *h1_) {
   int bb = blockIdx.y;
   int hh = blockIdx.x;
@@ -80,7 +80,7 @@ __launch_bounds__(C, 2) __global__
   int64_t y_idx = (int64_t)bb * H * C + hh * C + i;
   y_[y_idx] = to_bf(y);
 
-  if (do_sn_ != nullptr && do_sn_[bb] != 0) {
+  if (do_sane_ != nullptr && do_sane_[bb] != 0) {
     float tau = tau_[bb * H + hh];
     if (tau > 0.0f) {
 #pragma unroll
@@ -97,22 +97,22 @@ __launch_bounds__(C, 2) __global__
   }
 }
 
-// PyTorch SN 单步前向 C 接口。
+// PyTorch SANE 单步前向 C 接口。
 //
 // Args:
 //   w, q, k, v, a, b: [B, H, C], bfloat16, row-major。
 //   tau:  [B, H], float32。
-//   do_sn: [B], int8。
+//   do_sane: [B], int8。
 //   h0: [B, H, C, C], float32, row-major。初始状态。
 //   y:  [B, H, C], bfloat16, row-major。输出 y。
 //   h1: [B, H, C, C], float32, row-major。输出状态。
-void cuda_forward_single_step_sn(int B, int H, bf *w, bf *q, bf *k, bf *v,
+void cuda_forward_single_step_sane(int B, int H, bf *w, bf *q, bf *k, bf *v,
                                  bf *a, bf *b, const float *tau,
-                                 const int8_t *do_sn, float *h0, bf *y,
+                                 const int8_t *do_sane, float *h0, bf *y,
                                  float *h1) {
   constexpr int C = _C_;
   dim3 blocks(H, B);
   dim3 threads(C);
-  forward_single_step_sn_kernel<C>
-      <<<blocks, threads>>>(B, H, w, q, k, v, a, b, tau, do_sn, h0, y, h1);
+  forward_single_step_sane_kernel<C>
+      <<<blocks, threads>>>(B, H, w, q, k, v, a, b, tau, do_sane, h0, y, h1);
 }

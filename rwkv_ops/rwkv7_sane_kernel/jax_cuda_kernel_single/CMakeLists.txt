@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(wkv7_sn_single_step LANGUAGES CXX CUDA)
+project(wkv7_sane_single_step LANGUAGES CXX CUDA)
 
 find_package(CUDAToolkit REQUIRED)
 
@@ -18,17 +18,17 @@ endif()
 message(STATUS "XLA include directory: ${XLA_INCLUDE_DIR}")
 
 # 生成共享库 
-add_library(wkv7_sn_single_step SHARED wkv7_sn_single_step_ffi.cu)
+add_library(wkv7_sane_single_step SHARED wkv7_sane_single_step_ffi.cu)
 
 # 头文件搜索路径
-target_include_directories(wkv7_sn_single_step PRIVATE ${XLA_INCLUDE_DIR})
+target_include_directories(wkv7_sane_single_step PRIVATE ${XLA_INCLUDE_DIR})
 
 # 链接 CUDA 运行时
-target_link_libraries(wkv7_sn_single_step PRIVATE CUDA::cudart)
+target_link_libraries(wkv7_sane_single_step PRIVATE CUDA::cudart)
 
 # 关键：C++17 / CUDA17 标准
-target_compile_features(wkv7_sn_single_step PUBLIC cxx_std_17)
-set_target_properties(wkv7_sn_single_step PROPERTIES
+target_compile_features(wkv7_sane_single_step PUBLIC cxx_std_17)
+set_target_properties(wkv7_sane_single_step PROPERTIES
     CUDA_STANDARD          17
     CUDA_SEPARABLE_COMPILATION ON
     POSITION_INDEPENDENT_CODE ON
@@ -36,6 +36,6 @@ set_target_properties(wkv7_sn_single_step PROPERTIES
 )
 
 # 安装 
-install(TARGETS wkv7_sn_single_step
+install(TARGETS wkv7_sane_single_step
         LIBRARY DESTINATION "${CMAKE_SOURCE_DIR}"
         RUNTIME DESTINATION "${CMAKE_SOURCE_DIR}")

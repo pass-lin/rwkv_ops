@@ -1,10 +1,10 @@
-"""RWKV-7-SN 共享 Triton kernel。"""
+"""RWKV-7-SANE 共享 Triton kernel。"""
 
 import triton
 import triton.language as tl
 
 
-#  无 mask 前向（chunk 边界无条件 SN）
+#  无 mask 前向（chunk 边界无条件 SANE）
 @triton.autotune(
     configs=[
         triton.Config({"MINI_BSZ": 1}, num_warps=num_warps, num_stages=num_stages)
@@ -14,7 +14,7 @@ import triton.language as tl
     key=["H_SIZE"],
 )
 @triton.jit
-def rwkv7_sn_fwd_kernel(
+def rwkv7_sane_fwd_kernel(
     R,
     W,
     K,
@@ -33,10 +33,10 @@ def rwkv7_sn_fwd_kernel(
     CHUNK_LEN: tl.constexpr,
     MINI_BSZ: tl.constexpr,
 ):
-    """RWKV-7-SN 训练前向 Triton kernel（无 mask）。
+    """RWKV-7-SANE 训练前向 Triton kernel（无 mask）。
 
     每个 block 处理一个 (batch, head)，顺序扫描 T 步，在每个 chunk 末尾
-    写出 SN 之前的 state checkpoint。
+    写出 SANE 之前的 state checkpoint。
 
     Args:
         R, W, K, V, A, B_param: [B, H, T, K], bfloat16, row-major。
@@ -45,7 +45,7 @@ def rwkv7_sn_fwd_kernel(
         B_BATCH, N_HEAD, T_LEN: int。batch / head / time 大小。
         OUT: [B, H, T, K], bfloat16, row-major。输出 y。
         SA_OUT: [B, H, T, K], float32, row-major。反向所需中间量。
-        STATE_CHKP: [B, H, T//16, K, K], float32, row-major。SN 之前的 state checkpoint。
+        STATE_CHKP: [B, H, T//16, K, K], float32, row-major。SANE 之前的 state checkpoint。
 
     编译期宏:
         H_SIZE: head_size，必须被 4 整除。
@@ -141,7 +141,7 @@ def rwkv7_sn_fwd_kernel(
                 mask=state_mask,
             )
 
-            # chunk 边界无条件执行 State Neutralization。
+            # chunk 边界无条件执行 State Anomaly Neutralization。
             tau_v = tl.load(TAU + tau_base_batch + chkp_t, mask=b_mask, other=1.0).to(
                 tl.float32
             )
@@ -165,7 +165,7 @@ def rwkv7_sn_fwd_kernel(
     key=["H_SIZE"],
 )
 @triton.jit
-def rwkv7_sn_bwd_kernel(
+def rwkv7_sane_bwd_kernel(
     R,
     W,
     K,
@@ -192,7 +192,7 @@ def rwkv7_sn_bwd_kernel(
     CHUNK_LEN: tl.constexpr,
     MINI_BSZ: tl.constexpr,
 ):
-    """RWKV-7-SN 训练反向 Triton kernel（无 mask）。
+    """RWKV-7-SANE 训练反向 Triton kernel（无 mask）。
 
     每个 block 处理一个 (batch, head)，逆序扫描 T 步，在每个 chunk 边界先算 dtau，
     再对下游梯度乘 sech2。
@@ -200,7 +200,7 @@ def rwkv7_sn_bwd_kernel(
     Args:
         R, W, K, V, A, B_param: [B, H, T, K], bfloat16, row-major。前向输入。
         SA: [B, H, T, K], float32, row-major。前向保存的 sa。
-        STATE_CHKP: [B, H, T//16, K, K], float32, row-major。SN 之前的 state。
+        STATE_CHKP: [B, H, T//16, K, K], float32, row-major。SANE 之前的 state。
         TAU: [B, H, T//16], float32, row-major。
         DY: [B, H, T, K], bfloat16, row-major。输出梯度。
         DHT: [B, H, K, K], float32, row-major。最终 state 梯度。
@@ -208,7 +208,7 @@ def rwkv7_sn_bwd_kernel(
         DTAU: [B, H, T//16], float32, row-major。
         DH0: [B, H, K, K], float32, row-major。
 
-    编译期宏同 rwkv7_sn_fwd_kernel。
+    编译期宏同 rwkv7_sane_fwd_kernel。
     """
     pid_b = tl.program_id(0)
     pid_h = tl.program_id(1)
@@ -288,7 +288,7 @@ def rwkv7_sn_bwd_kernel(
                 other=0.0,
             ).to(tl.float32)
 
-            # SN 反向：先对下游梯度 dS 应用 SN 导数。
+            # SANE 反向：先对下游梯度 dS 应用 SANE 导数。
             tau_v = tl.load(TAU + tau_base_batch + chkp_t, mask=b_mask, other=1.0).to(
                 tl.float32
             )
@@ -339,7 +339,7 @@ def rwkv7_sn_bwd_kernel(
             )
 
 
-#  带 mask 前向（chunk 边界按 mask 选择 SN）
+#  带 mask 前向（chunk 边界按 mask 选择 SANE）
 @triton.autotune(
     configs=[
         triton.Config({"MINI_BSZ": 1}, num_warps=num_warps, num_stages=num_stages)
@@ -349,7 +349,7 @@ def rwkv7_sn_bwd_kernel(
     key=["H_SIZE"],
 )
 @triton.jit
-def rwkv7_sn_fwd_kernel_with_mask(
+def rwkv7_sane_fwd_kernel_with_mask(
     R,
     W,
     K,
@@ -369,14 +369,14 @@ def rwkv7_sn_fwd_kernel_with_mask(
     CHUNK_LEN: tl.constexpr,
     MINI_BSZ: tl.constexpr,
 ):
-    """RWKV-7-SN 训练前向 Triton kernel（带 mask）。
+    """RWKV-7-SANE 训练前向 Triton kernel（带 mask）。
 
-    与无 mask 版本相同，但在 chunk 边界按 mask 选择是否执行 SN。
+    与无 mask 版本相同，但在 chunk 边界按 mask 选择是否执行 SANE。
 
     Args:
         R, W, K, V, A, B_param: [B, H, T, K], bfloat16, row-major。
         TAU: [B, H, T//16], float32, row-major。
-        MASK: [B, T//16], float32, row-major。>0 执行 SN。
+        MASK: [B, T//16], float32, row-major。>0 执行 SANE。
         H0, OUT, SA_OUT, STATE_CHKP: 同无 mask 版本。
     """
     pid_b = tl.program_id(0)
@@ -467,7 +467,7 @@ def rwkv7_sn_fwd_kernel_with_mask(
                 mask=state_mask,
             )
 
-            # 按 chunk-level mask 选择是否执行 State Neutralization（blend 形式避免 warp 分支）。
+            # 按 chunk-level mask 选择是否执行 State Anomaly Neutralization（blend 形式避免 warp 分支）。
             tau_v = tl.load(TAU + tau_base_batch + chkp_t, mask=b_mask, other=1.0).to(
                 tl.float32
             )
@@ -476,13 +476,13 @@ def rwkv7_sn_fwd_kernel_with_mask(
                 tl.float32
             )
             x2 = 2.0 * state / tau_safe[:, None, None]
-            sn_state = tau_safe[:, None, None] * tl.where(
+            sane_state = tau_safe[:, None, None] * tl.where(
                 state >= 0.0,
                 1.0 - 2.0 / (tl.exp(x2) + 1.0),
                 2.0 / (tl.exp(-x2) + 1.0) - 1.0,
             )
             state = (
-                state * (1.0 - m_val[:, None, None]) + sn_state * m_val[:, None, None]
+                state * (1.0 - m_val[:, None, None]) + sane_state * m_val[:, None, None]
             )
 
 
@@ -496,7 +496,7 @@ def rwkv7_sn_fwd_kernel_with_mask(
     key=["H_SIZE"],
 )
 @triton.jit
-def rwkv7_sn_bwd_kernel_with_mask(
+def rwkv7_sane_bwd_kernel_with_mask(
     R,
     W,
     K,
@@ -524,13 +524,13 @@ def rwkv7_sn_bwd_kernel_with_mask(
     CHUNK_LEN: tl.constexpr,
     MINI_BSZ: tl.constexpr,
 ):
-    """RWKV-7-SN 训练反向 Triton kernel（带 mask）。
+    """RWKV-7-SANE 训练反向 Triton kernel（带 mask）。
 
     与无 mask 版本相同，但在 chunk 边界按 mask 控制 dtau 与梯度 blend。
 
     Args:
         MASK: [B, T//16], float32, row-major。
-        其余同 rwkv7_sn_bwd_kernel。
+        其余同 rwkv7_sane_bwd_kernel。
     """
     pid_b = tl.program_id(0)
     pid_h = tl.program_id(1)

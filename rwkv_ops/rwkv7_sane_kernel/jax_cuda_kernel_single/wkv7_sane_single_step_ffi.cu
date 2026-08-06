@@ -1,4 +1,4 @@
-// RWKV-7-SN JAX FFI 单步 CUDA kernel。
+// RWKV-7-SANE JAX FFI 单步 CUDA kernel。
 
 #include <cstdint>
 #include <cuda_bf16.h>
@@ -13,14 +13,14 @@ __device__ inline float to_float(const bf &u) { return __bfloat162float(u); }
 __device__ inline bf to_bf(const float &u) { return __float2bfloat16_rn(u); }
 typedef bf *__restrict__ F_;
 
-// RWKV-7-SN 单步前向 CUDA kernel。
+// RWKV-7-SANE 单步前向 CUDA kernel。
 //
-// 每个 block 处理一个 (batch, head)，单步完成 delta-rule 更新并可选执行 SN。
+// 每个 block 处理一个 (batch, head)，单步完成 delta-rule 更新并可选执行 SANE。
 //
 // Args:
 //   w, q, k, v, a, b: [B, H, C], bfloat16, row-major。
 //   tau: [B, H], float32, row-major。阈值，必须 > 0。
-//   do_sn: [B], int32, row-major。非 0 表示对该 sample 执行 SN。
+//   do_sane: [B], int32, row-major。非 0 表示对该 sample 执行 SANE。
 //   y: [B, H, C], bfloat16, row-major。输出。
 //   s: [B, H, C, C], float32, row-major。输出 state。
 //   h0: [B, H, C, C], float32, row-major。初始 state。
@@ -29,10 +29,10 @@ typedef bf *__restrict__ F_;
 //   _C_: head_size，由 -D_C_ 传入。
 template <int C>
 __launch_bounds__(C, 2) __global__
-    void forward_kernel_single_step_sn(int B, int H, F_ w_, F_ q_, F_ k_, F_ v_,
+    void forward_kernel_single_step_sane(int B, int H, F_ w_, F_ q_, F_ k_, F_ v_,
                                        F_ a_, F_ b_,
                                        const float *__restrict__ tau_,
-                                       const int32_t *__restrict__ do_sn_,
+                                       const int32_t *__restrict__ do_sane_,
                                        bf *y_, float *s_, float *h0_) {
   int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
   float state[C] = {0};
@@ -68,7 +68,7 @@ __launch_bounds__(C, 2) __global__
   }
   y_[ind] = to_bf(y);
 
-  if (do_sn_[bb] != 0) {
+  if (do_sane_[bb] != 0) {
     float tau = tau_[bb * H + hh];
     if (tau > 0.0f) {
 #pragma unroll
@@ -83,13 +83,13 @@ __launch_bounds__(C, 2) __global__
     s_[s_base + j] = state[j];
 }
 
-// Host wrapper for forward_kernel_single_step_sn。
+// Host wrapper for forward_kernel_single_step_sane。
 static ffi::Error
-WKV7SnSingleStepFwdHost(cudaStream_t stream, ffi::Buffer<ffi::BF16> w,
+WKV7SaneSingleStepFwdHost(cudaStream_t stream, ffi::Buffer<ffi::BF16> w,
                         ffi::Buffer<ffi::BF16> q, ffi::Buffer<ffi::BF16> k,
                         ffi::Buffer<ffi::BF16> v, ffi::Buffer<ffi::BF16> a,
                         ffi::Buffer<ffi::BF16> b, ffi::Buffer<ffi::F32> tau,
-                        ffi::Buffer<ffi::S32> do_sn, ffi::Buffer<ffi::F32> h0,
+                        ffi::Buffer<ffi::S32> do_sane, ffi::Buffer<ffi::F32> h0,
                         ffi::ResultBuffer<ffi::BF16> y,
                         ffi::ResultBuffer<ffi::F32> s) {
   auto dims = w.dimensions();
@@ -98,26 +98,26 @@ WKV7SnSingleStepFwdHost(cudaStream_t stream, ffi::Buffer<ffi::BF16> w,
   dim3 block(C);
   dim3 grid(H, B);
 
-  forward_kernel_single_step_sn<_C_><<<grid, block, 0, stream>>>(
+  forward_kernel_single_step_sane<_C_><<<grid, block, 0, stream>>>(
       B, H, reinterpret_cast<bf *>(w.typed_data()),
       reinterpret_cast<bf *>(q.typed_data()),
       reinterpret_cast<bf *>(k.typed_data()),
       reinterpret_cast<bf *>(v.typed_data()),
       reinterpret_cast<bf *>(a.typed_data()),
       reinterpret_cast<bf *>(b.typed_data()), tau.typed_data(),
-      do_sn.typed_data(), reinterpret_cast<bf *>(y->typed_data()),
+      do_sane.typed_data(), reinterpret_cast<bf *>(y->typed_data()),
       s->typed_data(), h0.typed_data());
 
   cudaError_t err = cudaGetLastError();
   if (err != cudaSuccess)
     return ffi::Error::Internal(
-        std::string("CUDA forward_kernel_single_step_sn error: ") +
+        std::string("CUDA forward_kernel_single_step_sane error: ") +
         cudaGetErrorString(err));
   return ffi::Error::Success();
 }
 
 // XLA FFI handler 注册。
-XLA_FFI_DEFINE_HANDLER_SYMBOL(Wkv7SnSingleStepFwd, WKV7SnSingleStepFwdHost,
+XLA_FFI_DEFINE_HANDLER_SYMBOL(Wkv7SaneSingleStepFwd, WKV7SaneSingleStepFwdHost,
                               ffi::Ffi::Bind()
                                   .Ctx<ffi::PlatformStream<cudaStream_t>>()
                                   .Arg<ffi::Buffer<ffi::BF16>>()

@@ -1,4 +1,4 @@
-"""RWKV-7 State Neutralization JAX CUDA kernel 数值测试。"""
+"""RWKV-7 State Anomaly Neutralization JAX CUDA kernel 数值测试。"""
 
 import warnings
 
@@ -24,11 +24,11 @@ def _to_jax(arr, dtype):
     return jnp.asarray(arr, dtype=getattr(jnp, dtype))
 
 
-def _prepare_inputs(rwkv7_sn_inputs, head_first, dtype="bfloat16"):
-    """把 rwkv7_sn_inputs 转成 JAX 测试张量。
+def _prepare_inputs(rwkv7_sane_inputs, head_first, dtype="bfloat16"):
+    """把 rwkv7_sane_inputs 转成 JAX 测试张量。
 
     Args:
-        rwkv7_sn_inputs: dict, 来自 fixture 的 numpy 输入。
+        rwkv7_sane_inputs: dict, 来自 fixture 的 numpy 输入。
         dtype: str, r/k/v/a/b/w 的目标 dtype。
         head_first: bool, 是否将 layout 转置为 [B, H, T, K]。
 
@@ -37,24 +37,24 @@ def _prepare_inputs(rwkv7_sn_inputs, head_first, dtype="bfloat16"):
             r/k/v/a/b/w: dtype 的 JAX 数组。
             tau/mask/h0: float32 的 JAX 数组。
     """
-    B, T, H, _ = rwkv7_sn_inputs["r"].shape
+    B, T, H, _ = rwkv7_sane_inputs["r"].shape
     if head_first:
-        r = _to_jax(np.transpose(rwkv7_sn_inputs["r"], (0, 2, 1, 3)), dtype)
-        k = _to_jax(np.transpose(rwkv7_sn_inputs["k"], (0, 2, 1, 3)), dtype)
-        v = _to_jax(np.transpose(rwkv7_sn_inputs["v"], (0, 2, 1, 3)), dtype)
-        a = _to_jax(np.transpose(rwkv7_sn_inputs["a"], (0, 2, 1, 3)), dtype)
-        b = _to_jax(np.transpose(rwkv7_sn_inputs["b"], (0, 2, 1, 3)), dtype)
-        w = _to_jax(np.transpose(rwkv7_sn_inputs["w"], (0, 2, 1, 3)), dtype)
+        r = _to_jax(np.transpose(rwkv7_sane_inputs["r"], (0, 2, 1, 3)), dtype)
+        k = _to_jax(np.transpose(rwkv7_sane_inputs["k"], (0, 2, 1, 3)), dtype)
+        v = _to_jax(np.transpose(rwkv7_sane_inputs["v"], (0, 2, 1, 3)), dtype)
+        a = _to_jax(np.transpose(rwkv7_sane_inputs["a"], (0, 2, 1, 3)), dtype)
+        b = _to_jax(np.transpose(rwkv7_sane_inputs["b"], (0, 2, 1, 3)), dtype)
+        w = _to_jax(np.transpose(rwkv7_sane_inputs["w"], (0, 2, 1, 3)), dtype)
     else:
-        r = _to_jax(rwkv7_sn_inputs["r"], dtype)
-        k = _to_jax(rwkv7_sn_inputs["k"], dtype)
-        v = _to_jax(rwkv7_sn_inputs["v"], dtype)
-        a = _to_jax(rwkv7_sn_inputs["a"], dtype)
-        b = _to_jax(rwkv7_sn_inputs["b"], dtype)
-        w = _to_jax(rwkv7_sn_inputs["w"], dtype)
-    tau = _to_jax(rwkv7_sn_inputs["tau"], "float32")
+        r = _to_jax(rwkv7_sane_inputs["r"], dtype)
+        k = _to_jax(rwkv7_sane_inputs["k"], dtype)
+        v = _to_jax(rwkv7_sane_inputs["v"], dtype)
+        a = _to_jax(rwkv7_sane_inputs["a"], dtype)
+        b = _to_jax(rwkv7_sane_inputs["b"], dtype)
+        w = _to_jax(rwkv7_sane_inputs["w"], dtype)
+    tau = _to_jax(rwkv7_sane_inputs["tau"], "float32")
     mask = jnp.ones((B, T // 16), dtype=jnp.float32)
-    h0 = _to_jax(rwkv7_sn_inputs["h0"], "float32")
+    h0 = _to_jax(rwkv7_sane_inputs["h0"], "float32")
     return r, k, v, a, b, w, tau, mask, h0
 
 
@@ -90,18 +90,18 @@ def _test_is_close(name, ref, tgt, atol, rtol, min_exact_rate=None):
 
 @pytest.mark.jax
 @pytest.mark.parametrize("head_first", [False, True])
-def test_rwkv7_sn_forward_state(
-    rwkv7_sn_jax_op, rwkv7_sn_native_op, rwkv7_sn_inputs, head_first
+def test_rwkv7_sane_forward_state(
+    rwkv7_sane_jax_op, rwkv7_sane_native_op, rwkv7_sane_inputs, head_first
 ):
     """对比 CUDA 与 native 前向输出和最终 state（带 mask）。"""
     r_ref, k_ref, v_ref, a_ref, b_ref, w_ref, tau_ref, mask_ref, h0_ref = (
-        _prepare_inputs(rwkv7_sn_inputs, head_first, "bfloat16")
+        _prepare_inputs(rwkv7_sane_inputs, head_first, "bfloat16")
     )
     r_c, k_c, v_c, a_c, b_c, w_c, tau_c, mask_c, h0_c = _prepare_inputs(
-        rwkv7_sn_inputs, head_first, "bfloat16"
+        rwkv7_sane_inputs, head_first, "bfloat16"
     )
 
-    y_ref, s_ref = rwkv7_sn_native_op(
+    y_ref, s_ref = rwkv7_sane_native_op(
         r=r_ref,
         w=w_ref,
         k=k_ref,
@@ -114,7 +114,7 @@ def test_rwkv7_sn_forward_state(
         output_final_state=True,
         head_first=head_first,
     )
-    y_c, s_c = rwkv7_sn_jax_op(
+    y_c, s_c = rwkv7_sane_jax_op(
         r=r_c,
         w=w_c,
         k=k_c,
@@ -149,12 +149,12 @@ def test_rwkv7_sn_forward_state(
 @pytest.mark.jax
 @pytest.mark.slow
 @pytest.mark.parametrize("head_first", [False, True])
-def test_rwkv7_sn_backward(
-    rwkv7_sn_jax_op, rwkv7_sn_native_op, rwkv7_sn_inputs, head_first
+def test_rwkv7_sane_backward(
+    rwkv7_sane_jax_op, rwkv7_sane_native_op, rwkv7_sane_inputs, head_first
 ):
     """CUDA custom_vjp 反向梯度与 native Keras 实现逐元素对比（含 tau/mask）。"""
     r, k, v, a, b, w, tau, mask, h0 = _prepare_inputs(
-        rwkv7_sn_inputs, head_first, "bfloat16"
+        rwkv7_sane_inputs, head_first, "bfloat16"
     )
 
     def loss(op, params):
@@ -176,10 +176,10 @@ def test_rwkv7_sn_backward(
             jnp.asarray(state, jnp.float32) ** 2
         )
 
-    ref_grads = jax.grad(lambda *p: loss(rwkv7_sn_native_op, p), argnums=range(9))(
+    ref_grads = jax.grad(lambda *p: loss(rwkv7_sane_native_op, p), argnums=range(9))(
         w, r, k, v, a, b, tau, mask, h0
     )
-    cuda_grads = jax.grad(lambda *p: loss(rwkv7_sn_jax_op, p), argnums=range(9))(
+    cuda_grads = jax.grad(lambda *p: loss(rwkv7_sane_jax_op, p), argnums=range(9))(
         w, r, k, v, a, b, tau, mask, h0
     )
 
@@ -196,11 +196,11 @@ def test_rwkv7_sn_backward(
 
 @pytest.mark.jax
 @pytest.mark.slow
-def test_rwkv7_sn_rnn(
-    rwkv7_sn_jax_op, rwkv7_sn_rnn_op, rwkv7_sn_rnn_native_op, rwkv7_sn_inputs
+def test_rwkv7_sane_rnn(
+    rwkv7_sane_jax_op, rwkv7_sane_rnn_op, rwkv7_sane_rnn_native_op, rwkv7_sane_inputs
 ):
     """验证单步 RNN 与 native 单步在 16 步内一致。"""
-    inputs = {k: v.copy() for k, v in rwkv7_sn_inputs.items()}
+    inputs = {k: v.copy() for k, v in rwkv7_sane_inputs.items()}
     B, T, H, K = inputs["r"].shape
 
     prefill_len = 16
@@ -210,7 +210,7 @@ def test_rwkv7_sn_rnn(
         pre_inputs, head_first=False, dtype="bfloat16"
     )
 
-    _, state = rwkv7_sn_jax_op(
+    _, state = rwkv7_sane_jax_op(
         r=r_c,
         w=w_c,
         k=k_c,
@@ -235,7 +235,7 @@ def test_rwkv7_sn_rnn(
         bb = inputs["b"][:, prefill_len + step : prefill_len + step + 1]
         ww = inputs["w"][:, prefill_len + step : prefill_len + step + 1]
         tau = inputs["tau"][:, prefill_len // 16]
-        do_sn = step == 15
+        do_sane = step == 15
 
         r_s = _to_jax(rr, "bfloat16")
         k_s = _to_jax(kk, "bfloat16")
@@ -245,7 +245,7 @@ def test_rwkv7_sn_rnn(
         w_s = _to_jax(ww, "bfloat16")
         tau_s = _to_jax(tau, "float32")
 
-        cuda_y, cuda_state = rwkv7_sn_rnn_op(
+        cuda_y, cuda_state = rwkv7_sane_rnn_op(
             r=r_s,
             w=w_s,
             k=k_s,
@@ -253,13 +253,13 @@ def test_rwkv7_sn_rnn(
             a=a_s,
             b=b_s,
             tau=tau_s,
-            do_sn=do_sn,
+            do_sane=do_sane,
             initial_state=cuda_state,
             output_final_state=True,
             head_first=False,
         )
 
-        native_y, native_state = rwkv7_sn_rnn_native_op(
+        native_y, native_state = rwkv7_sane_rnn_native_op(
             r=r_s,
             w=w_s,
             k=k_s,
@@ -267,7 +267,7 @@ def test_rwkv7_sn_rnn(
             a=a_s,
             b=b_s,
             tau=tau_s,
-            do_sn=do_sn,
+            do_sane=do_sane,
             initial_state=native_state,
             output_final_state=True,
             head_first=False,
@@ -281,7 +281,7 @@ def test_rwkv7_sn_rnn(
             rtol=1e-2,
             min_exact_rate=99.0,
         )
-        # 单步 CUDA 使用 fast_math tanhf，SN 后与 native 的 ops.tanh 可能差几个 1e-5，
+        # 单步 CUDA 使用 fast_math tanhf，SANE 后与 native 的 ops.tanh 可能差几个 1e-5，
         # 完全一致率会下降，但 close_match/max_diff 仍能守住数值正确性。
         _test_is_close(
             f"rnn_state_step_{step}",
@@ -294,16 +294,16 @@ def test_rwkv7_sn_rnn(
 
 
 @pytest.mark.jax
-def test_rwkv7_sn_no_mask_y_matches_all_one(rwkv7_sn_jax_op, rwkv7_sn_inputs):
+def test_rwkv7_sane_no_mask_y_matches_all_one(rwkv7_sane_jax_op, rwkv7_sane_inputs):
     """无 mask 算子与全 1 mask 算子的 y 应一致；无 mask 路径返回 None state。"""
-    B, T, H, K = rwkv7_sn_inputs["r"].shape
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
     n_chunks = T // 16
     mask = jnp.ones((B, n_chunks), dtype=jnp.float32)
-    r, k, v, a, b, w, tau, _, h0 = _prepare_inputs(rwkv7_sn_inputs, head_first=False)
+    r, k, v, a, b, w, tau, _, h0 = _prepare_inputs(rwkv7_sane_inputs, head_first=False)
 
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
-        y_no_mask, s_no_mask = rwkv7_sn_jax_op(
+        y_no_mask, s_no_mask = rwkv7_sane_jax_op(
             r=r,
             w=w,
             k=k,
@@ -316,7 +316,7 @@ def test_rwkv7_sn_no_mask_y_matches_all_one(rwkv7_sn_jax_op, rwkv7_sn_inputs):
         )
         assert len(rec) == 1 and issubclass(rec[-1].category, UserWarning)
 
-    y_all_one, s_all_one = rwkv7_sn_jax_op(
+    y_all_one, s_all_one = rwkv7_sane_jax_op(
         r=r,
         w=w,
         k=k,
@@ -338,18 +338,18 @@ def test_rwkv7_sn_no_mask_y_matches_all_one(rwkv7_sn_jax_op, rwkv7_sn_inputs):
 
 @pytest.mark.jax
 @pytest.mark.parametrize("head_first", [False, True])
-def test_rwkv7_sn_no_mask_forward_state(
-    rwkv7_sn_jax_op, rwkv7_sn_native_op, rwkv7_sn_inputs, head_first
+def test_rwkv7_sane_no_mask_forward_state(
+    rwkv7_sane_jax_op, rwkv7_sane_native_op, rwkv7_sane_inputs, head_first
 ):
     """output_final_state=False 时走无 mask 算子，y 与 native 一致且不返回 state。"""
     r_ref, k_ref, v_ref, a_ref, b_ref, w_ref, tau_ref, _, h0_ref = _prepare_inputs(
-        rwkv7_sn_inputs, head_first, "bfloat16"
+        rwkv7_sane_inputs, head_first, "bfloat16"
     )
     r_c, k_c, v_c, a_c, b_c, w_c, tau_c, _, h0_c = _prepare_inputs(
-        rwkv7_sn_inputs, head_first, "bfloat16"
+        rwkv7_sane_inputs, head_first, "bfloat16"
     )
 
-    y_ref = rwkv7_sn_native_op(
+    y_ref = rwkv7_sane_native_op(
         r=r_ref,
         w=w_ref,
         k=k_ref,
@@ -361,7 +361,7 @@ def test_rwkv7_sn_no_mask_forward_state(
         output_final_state=False,
         head_first=head_first,
     )
-    y_c = rwkv7_sn_jax_op(
+    y_c = rwkv7_sane_jax_op(
         r=r_c,
         w=w_c,
         k=k_c,
@@ -387,12 +387,12 @@ def test_rwkv7_sn_no_mask_forward_state(
 @pytest.mark.jax
 @pytest.mark.slow
 @pytest.mark.parametrize("head_first", [False, True])
-def test_rwkv7_sn_no_mask_backward(
-    rwkv7_sn_jax_op, rwkv7_sn_native_op, rwkv7_sn_inputs, head_first
+def test_rwkv7_sane_no_mask_backward(
+    rwkv7_sane_jax_op, rwkv7_sane_native_op, rwkv7_sane_inputs, head_first
 ):
     """无 mask 路径反向梯度与 native 对比（output_final_state=False，仅对 y 求导）。"""
     r, k, v, a, b, w, tau, _, h0 = _prepare_inputs(
-        rwkv7_sn_inputs, head_first, "bfloat16"
+        rwkv7_sane_inputs, head_first, "bfloat16"
     )
 
     def loss(op, params):
@@ -411,10 +411,10 @@ def test_rwkv7_sn_no_mask_backward(
         )
         return jnp.mean(jnp.asarray(y, jnp.float32) ** 2)
 
-    ref_grads = jax.grad(lambda *p: loss(rwkv7_sn_native_op, p), argnums=range(8))(
+    ref_grads = jax.grad(lambda *p: loss(rwkv7_sane_native_op, p), argnums=range(8))(
         w, r, k, v, a, b, tau, h0
     )
-    cuda_grads = jax.grad(lambda *p: loss(rwkv7_sn_jax_op, p), argnums=range(8))(
+    cuda_grads = jax.grad(lambda *p: loss(rwkv7_sane_jax_op, p), argnums=range(8))(
         w, r, k, v, a, b, tau, h0
     )
 
@@ -430,21 +430,21 @@ def test_rwkv7_sn_no_mask_backward(
 
 
 @pytest.mark.jax
-def test_rwkv7_sn_inference_arbitrary_length(
-    rwkv7_sn_jax_op, rwkv7_sn_inference_op, rwkv7_sn_inputs
+def test_rwkv7_sane_inference_arbitrary_length(
+    rwkv7_sane_jax_op, rwkv7_sane_inference_op, rwkv7_sane_inputs
 ):
     """推理入口支持 T 不被 16 整除，此时 tau 长度只需等于 T // 16。"""
-    B, T, H, K = rwkv7_sn_inputs["r"].shape
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
     actual_len = 34
-    pre_inputs = {k: v[:, :actual_len] for k, v in rwkv7_sn_inputs.items()}
-    pre_inputs["tau"] = rwkv7_sn_inputs["tau"][:, : actual_len // 16]
+    pre_inputs = {k: v[:, :actual_len] for k, v in rwkv7_sane_inputs.items()}
+    pre_inputs["tau"] = rwkv7_sane_inputs["tau"][:, : actual_len // 16]
 
     r, k, v, a, b, w, tau, _, h0 = _prepare_inputs(
         pre_inputs, head_first=False, dtype="bfloat16"
     )
 
     # output_final_state=False 时不警告，也不返回 state。
-    y = rwkv7_sn_inference_op(
+    y = rwkv7_sane_inference_op(
         r=r,
         w=w,
         k=k,
@@ -461,7 +461,7 @@ def test_rwkv7_sn_inference_arbitrary_length(
     # output_final_state=True 且 mask=None 时返回 None state 并警告。
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
-        y2, s = rwkv7_sn_inference_op(
+        y2, s = rwkv7_sane_inference_op(
             r=r,
             w=w,
             k=k,
@@ -479,35 +479,35 @@ def test_rwkv7_sn_inference_arbitrary_length(
 
 
 @pytest.mark.jax
-def test_rwkv7_sn_irregular_padding(
-    rwkv7_sn_jax_op, rwkv7_sn_native_op, rwkv7_sn_rnn_native_op, rwkv7_sn_inputs
+def test_rwkv7_sane_irregular_padding(
+    rwkv7_sane_jax_op, rwkv7_sane_native_op, rwkv7_sane_rnn_native_op, rwkv7_sane_inputs
 ):
     """
     验证不规则长度 padding 场景：实际长度 34，pad 到 48，
     padding chunk mask=0，且 padding 位置 k=v=a=b=0, w=-inf。
     """
-    B, T, H, K = rwkv7_sn_inputs["r"].shape
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
     actual_len = 34
     pad_len = ((actual_len + 15) // 16) * 16  # 48
     assert pad_len <= T
 
     def _pad(name, val, pad_val):
-        full = rwkv7_sn_inputs[name][:, :pad_len].copy()
+        full = rwkv7_sane_inputs[name][:, :pad_len].copy()
         full[:, actual_len:] = pad_val
         return full
 
-    r = _pad("r", rwkv7_sn_inputs["r"][:, :pad_len], 0.0)
-    k = _pad("k", rwkv7_sn_inputs["k"][:, :pad_len], 0.0)
-    v = _pad("v", rwkv7_sn_inputs["v"][:, :pad_len], 0.0)
-    a = _pad("a", rwkv7_sn_inputs["a"][:, :pad_len], 0.0)
-    b = _pad("b", rwkv7_sn_inputs["b"][:, :pad_len], 0.0)
-    w = _pad("w", rwkv7_sn_inputs["w"][:, :pad_len], -1e9)
+    r = _pad("r", rwkv7_sane_inputs["r"][:, :pad_len], 0.0)
+    k = _pad("k", rwkv7_sane_inputs["k"][:, :pad_len], 0.0)
+    v = _pad("v", rwkv7_sane_inputs["v"][:, :pad_len], 0.0)
+    a = _pad("a", rwkv7_sane_inputs["a"][:, :pad_len], 0.0)
+    b = _pad("b", rwkv7_sane_inputs["b"][:, :pad_len], 0.0)
+    w = _pad("w", rwkv7_sane_inputs["w"][:, :pad_len], -1e9)
 
-    tau_full = rwkv7_sn_inputs["tau"][:, : pad_len // 16].copy()
+    tau_full = rwkv7_sane_inputs["tau"][:, : pad_len // 16].copy()
     mask_np = np.ones((B, pad_len // 16), dtype=np.float32)
     mask_np[:, actual_len // 16 :] = 0.0
 
-    h0 = rwkv7_sn_inputs["h0"]
+    h0 = rwkv7_sane_inputs["h0"]
 
     tensors = {
         "r": _to_jax(r, "bfloat16"),
@@ -521,7 +521,7 @@ def test_rwkv7_sn_irregular_padding(
         "h0": _to_jax(h0, "float32"),
     }
 
-    _, state_cuda = rwkv7_sn_jax_op(
+    _, state_cuda = rwkv7_sane_jax_op(
         r=tensors["r"],
         w=tensors["w"],
         k=tensors["k"],
@@ -547,7 +547,7 @@ def test_rwkv7_sn_irregular_padding(
         "mask": jnp.ones((B, 2), dtype=jnp.float32),
         "h0": _to_jax(h0, "float32"),
     }
-    _, state_ref = rwkv7_sn_native_op(
+    _, state_ref = rwkv7_sane_native_op(
         r=pre_tensors["r"],
         w=pre_tensors["w"],
         k=pre_tensors["k"],
@@ -561,16 +561,16 @@ def test_rwkv7_sn_irregular_padding(
         head_first=False,
     )
 
-    # 再用 native 单步跑 token 32,33（不触发 SN）
+    # 再用 native 单步跑 token 32,33（不触发 SANE）
     for step in range(32, actual_len):
-        rr = _to_jax(rwkv7_sn_inputs["r"][:, step : step + 1], "bfloat16")
-        kk = _to_jax(rwkv7_sn_inputs["k"][:, step : step + 1], "bfloat16")
-        vv = _to_jax(rwkv7_sn_inputs["v"][:, step : step + 1], "bfloat16")
-        aa = _to_jax(rwkv7_sn_inputs["a"][:, step : step + 1], "bfloat16")
-        bb = _to_jax(rwkv7_sn_inputs["b"][:, step : step + 1], "bfloat16")
-        ww = _to_jax(rwkv7_sn_inputs["w"][:, step : step + 1], "bfloat16")
-        tau_s = _to_jax(rwkv7_sn_inputs["tau"][:, 2], "float32")
-        _, state_ref = rwkv7_sn_rnn_native_op(
+        rr = _to_jax(rwkv7_sane_inputs["r"][:, step : step + 1], "bfloat16")
+        kk = _to_jax(rwkv7_sane_inputs["k"][:, step : step + 1], "bfloat16")
+        vv = _to_jax(rwkv7_sane_inputs["v"][:, step : step + 1], "bfloat16")
+        aa = _to_jax(rwkv7_sane_inputs["a"][:, step : step + 1], "bfloat16")
+        bb = _to_jax(rwkv7_sane_inputs["b"][:, step : step + 1], "bfloat16")
+        ww = _to_jax(rwkv7_sane_inputs["w"][:, step : step + 1], "bfloat16")
+        tau_s = _to_jax(rwkv7_sane_inputs["tau"][:, 2], "float32")
+        _, state_ref = rwkv7_sane_rnn_native_op(
             r=rr,
             w=ww,
             k=kk,
@@ -578,7 +578,7 @@ def test_rwkv7_sn_irregular_padding(
             a=aa,
             b=bb,
             tau=tau_s,
-            do_sn=False,
+            do_sane=False,
             initial_state=state_ref,
             output_final_state=True,
             head_first=False,
@@ -595,7 +595,7 @@ def test_rwkv7_sn_irregular_padding(
 
 
 @pytest.mark.jax
-def test_rwkv7_sn_head_sharding(rwkv7_sn_jax_op, rwkv7_sn_inputs):
+def test_rwkv7_sane_head_sharding(rwkv7_sane_jax_op, rwkv7_sane_inputs):
     """验证 head 维度可以沿 'h' 轴分片（TP）。单 GPU 下用 1-device mesh 模拟。"""
     devices = jax.devices()
     mesh = Mesh(devices, ("h",))
@@ -606,7 +606,7 @@ def test_rwkv7_sn_head_sharding(rwkv7_sn_jax_op, rwkv7_sn_inputs):
     mask_spec = PartitionSpec(None, None)
 
     r, k, v, a, b, w, tau, mask, h0 = _prepare_inputs(
-        rwkv7_sn_inputs, head_first=False, dtype="bfloat16"
+        rwkv7_sane_inputs, head_first=False, dtype="bfloat16"
     )
 
     in_shardings = (
@@ -622,7 +622,7 @@ def test_rwkv7_sn_head_sharding(rwkv7_sn_jax_op, rwkv7_sn_inputs):
     )
 
     def run(r, w, k, v, a, b, tau, mask, h0):
-        return rwkv7_sn_jax_op(
+        return rwkv7_sane_jax_op(
             r=r,
             w=w,
             k=k,

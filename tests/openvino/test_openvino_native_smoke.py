@@ -56,8 +56,8 @@ def test_rwkv7_native_openvino():
 
 
 @pytest.mark.openvino
-def test_rwkv7_sn_native_openvino():
-    from rwkv_ops.rwkv7_sn_kernel.native_keras_op import generalized_delta_rule_sn
+def test_rwkv7_sane_native_openvino():
+    from rwkv_ops.rwkv7_sane_kernel.native_keras_op import generalized_delta_rule_sane
 
     r, w, k, v, a, b, h0 = _inputs()
     rng = np.random.default_rng(1)
@@ -65,7 +65,7 @@ def test_rwkv7_sn_native_openvino():
         np.float32
     )
     mask = np.ones((B, T // 16), dtype=np.float32)
-    y, s = generalized_delta_rule_sn(
+    y, s = generalized_delta_rule_sane(
         r=r,
         w=w,
         k=k,
@@ -77,7 +77,7 @@ def test_rwkv7_sn_native_openvino():
         initial_state=h0,
         output_final_state=True,
     )
-    _check("rwkv7_sn", y, s, (B, T, H, K), (B, H, K, K))
+    _check("rwkv7_sane", y, s, (B, T, H, K), (B, H, K, K))
 
 
 @pytest.mark.openvino

@@ -1,4 +1,4 @@
-"""RWKV-7 State Neutralization 原生 Keras 参考实现。"""
+"""RWKV-7 State Anomaly Neutralization 原生 Keras 参考实现。"""
 
 import warnings
 
@@ -15,7 +15,7 @@ def transpose_head(x, head_first):
 
 
 def _apply_state_norm_cond(state, t, tau, mask):
-    """训练用：只在 chunk 边界按 mask 执行 State Neutralization。"""
+    """训练用：只在 chunk 边界按 mask 执行 State Anomaly Neutralization。"""
     is_boundary = ops.equal(ops.mod(t + 1, 16), 0)
 
     def _true_fn():
@@ -36,9 +36,9 @@ def _apply_state_norm_cond(state, t, tau, mask):
             tau_calc,
             [ops.shape(tau_calc)[0], ops.shape(tau_calc)[1], 1, 1],
         )
-        sn_state = tau_calc * ops.tanh(state / tau_calc)
+        sane_state = tau_calc * ops.tanh(state / tau_calc)
 
-        return state * (1.0 - m) + sn_state * m
+        return state * (1.0 - m) + sane_state * m
 
     def _false_fn():
         return state
@@ -47,7 +47,7 @@ def _apply_state_norm_cond(state, t, tau, mask):
 
 
 def _apply_state_norm_uncond(state, t, tau):
-    """训练用：在 chunk 边界无条件执行 State Neutralization。"""
+    """训练用：在 chunk 边界无条件执行 State Anomaly Neutralization。"""
     is_boundary = ops.equal(ops.mod(t + 1, 16), 0)
 
     def _true_fn():
@@ -70,7 +70,7 @@ def _apply_state_norm_uncond(state, t, tau):
     return ops.cond(is_boundary, _true_fn, _false_fn)
 
 
-def generalized_delta_rule_sn(
+def generalized_delta_rule_sane(
     r,
     w,
     k,
@@ -83,15 +83,15 @@ def generalized_delta_rule_sn(
     output_final_state=True,
     head_first=False,
 ):
-    """带 State Neutralization 的 RWKV-7 广义 delta 规则（chunkwise 训练版）。
+    """带 State Anomaly Neutralization 的 RWKV-7 广义 delta 规则（chunkwise 训练版）。
 
     在 chunk 边界（每 16 个 token）按 mask 对 state 执行
-    `state = tau * tanh(state / tau)`；输出始终基于 SN 之前的 state。
+    `state = tau * tanh(state / tau)`；输出始终基于 SANE 之前的 state。
 
     Args:
         r, w, k, v, a, b: [B, T, H, K]，bfloat16。T 必须被 16 整除。
         tau: [B, T//16, H]，float32。阈值，必须严格 > 1。
-        mask: [B, T//16]，float32 或 None。>0 的 chunk 边界执行 SN；
+        mask: [B, T//16]，float32 或 None。>0 的 chunk 边界执行 SANE；
             仅当 output_final_state=True 时生效。
         initial_state: [B, H, K, K] 或 [1, H, K, K]，float32，可选。
         output_final_state: bool，是否返回最终 state。
@@ -106,7 +106,7 @@ def generalized_delta_rule_sn(
         ValueError: T 不被 16 整除，或 tau/mask 形状不匹配。
 
     Examples:
-        >>> y, state = generalized_delta_rule_sn(
+        >>> y, state = generalized_delta_rule_sane(
         ...     r, w, k, v, a, b, tau, mask, initial_state=h0)
     """
     DTYPE = r.dtype
@@ -123,7 +123,7 @@ def generalized_delta_rule_sn(
 
     if ops.mod(T, 16) != 0:
         raise ValueError(
-            f"RWKV-SN training/prefill requires T divisible by 16, but got T={T}."
+            f"RWKV-SANE training/prefill requires T divisible by 16, but got T={T}."
         )
 
     tau = ops.cast(tau, "float32")
@@ -198,10 +198,10 @@ def generalized_delta_rule_sn(
 
     if mask is None:
         warnings.warn(
-            "[rwkv7_sn] mask is None: 使用无条件 State Neutralization 算子。"
+            "[rwkv7_sane] mask is None: 使用无条件 State Anomaly Neutralization 算子。"
             "由于未提供 padding mask，返回的 final_state 可能被污染，"
             "因此已将其设为 None。如需 final_state 请提供显式 mask。\n"
-            "[rwkv7_sn] mask is None: using unconditional State Neutralization. "
+            "[rwkv7_sane] mask is None: using unconditional State Anomaly Neutralization. "
             "The returned final_state is set to None because padding chunks "
             "may contaminate the state. Provide an explicit mask to obtain final_state.",
             UserWarning,
@@ -212,7 +212,7 @@ def generalized_delta_rule_sn(
     return out, state
 
 
-def rwkv7_step_sn(
+def rwkv7_step_sane(
     r,
     w,
     k,
@@ -221,15 +221,15 @@ def rwkv7_step_sn(
     b,
     state,
     tau,
-    do_sn,
+    do_sane,
 ):
-    """RWKV-7 单步推理（RNN 模式），带 State Neutralization。
+    """RWKV-7 单步推理（RNN 模式），带 State Anomaly Neutralization。
 
     Args:
         r, w, k, v, a, b: [B, H, N]，单步输入，已 head-first。
         state: [B, H, N, N]，float32。
         tau: [B, H] 或 [H]，float32，必须 > 0。
-        do_sn: [B]，bool。
+        do_sane: [B]，bool。
 
     Returns:
         o: [B, H, N]。
@@ -255,19 +255,19 @@ def rwkv7_step_sn(
 
     tau_safe = ops.maximum(tau, 1e-6)
     tau_safe = ops.reshape(tau_safe, [B, H, 1, 1])
-    sn_state = tau_safe * ops.tanh(new_state / tau_safe)
+    sane_state = tau_safe * ops.tanh(new_state / tau_safe)
 
-    do_sn_f = ops.cast(do_sn, state.dtype)
-    if len(ops.shape(do_sn_f)) == 0:
-        do_sn_f = ops.broadcast_to(do_sn_f, (B,))
-    do_sn_f = ops.reshape(do_sn_f, [B, 1, 1, 1])
+    do_sane_f = ops.cast(do_sane, state.dtype)
+    if len(ops.shape(do_sane_f)) == 0:
+        do_sane_f = ops.broadcast_to(do_sane_f, (B,))
+    do_sane_f = ops.reshape(do_sane_f, [B, 1, 1, 1])
 
-    state_out = ops.where(do_sn_f > 0.0, sn_state, new_state)
+    state_out = ops.where(do_sane_f > 0.0, sane_state, new_state)
 
     return o, state_out
 
 
-def generalized_delta_rule_sn_single_step(
+def generalized_delta_rule_sane_single_step(
     r,
     w,
     k,
@@ -275,17 +275,17 @@ def generalized_delta_rule_sn_single_step(
     a,
     b,
     tau,
-    do_sn,
+    do_sane,
     initial_state=None,
     output_final_state=True,
     head_first=False,
 ):
-    """带 State Neutralization 的 RWKV-7 单步推理（native 入口）。
+    """带 State Anomaly Neutralization 的 RWKV-7 单步推理（native 入口）。
 
     Args:
         r, w, k, v, a, b: [B, 1, H, N]（head_first=False）或 [B, H, 1, N]（head_first=True）。
         tau: [B, H]，float32，必须 > 0。
-        do_sn: [B]，bool。
+        do_sane: [B]，bool。
         initial_state: [B, H, N, N] 或 [1, H, N, N]，float32，可选。
         output_final_state: bool，是否返回最终 state。
         head_first: bool，输入输出是否 head 维优先。
@@ -328,7 +328,7 @@ def generalized_delta_rule_sn_single_step(
         if ops.shape(state)[0] == 1:
             state = ops.broadcast_to(state, (B, H, N, N))
 
-    o, state_out = rwkv7_step_sn(
+    o, state_out = rwkv7_step_sane(
         r=ops.cast(r, "float32"),
         w=ops.cast(w, "float32"),
         k=ops.cast(k, "float32"),
@@ -337,7 +337,7 @@ def generalized_delta_rule_sn_single_step(
         b=ops.cast(b, "float32"),
         state=state,
         tau=ops.cast(tau, "float32"),
-        do_sn=ops.cast(do_sn, "bool"),
+        do_sane=ops.cast(do_sane, "bool"),
     )
 
     out = ops.expand_dims(o, axis=1)

@@ -123,8 +123,8 @@ def rwkv7_inputs(rng, rwkv7_shape):
 
 
 @pytest.fixture(scope="session")
-def rwkv7_sn_inputs(rng, rwkv7_inputs):
-    """RWKV-7-SN 测试输入，在 rwkv7_inputs 基础上补充 tau。
+def rwkv7_sane_inputs(rng, rwkv7_inputs):
+    """RWKV-7-SANE 测试输入，在 rwkv7_inputs 基础上补充 tau。
 
     tau = softplus(x) + 1，x 均值约 7 使 tau 接近 1000，近似恒等映射。
 

@@ -1,8 +1,8 @@
 """
-RWKV-7 State Neutralization Torch CUDA kernel 数值测试。
+RWKV-7 State Anomaly Neutralization Torch CUDA kernel 数值测试。
 
 运行方式：
-    KERAS_BACKEND=torch pytest tests/torch/test_rwkv7_sn.py -v
+    KERAS_BACKEND=torch pytest tests/torch/test_rwkv7_sane.py -v
 """
 
 import warnings
@@ -18,16 +18,16 @@ def _to_torch(arr, dtype, device):
     return torch.tensor(arr, dtype=getattr(torch, dtype), device=device)
 
 
-def _make_inputs(rwkv7_sn_inputs, device, dtype="bfloat16", grad=False):
+def _make_inputs(rwkv7_sane_inputs, device, dtype="bfloat16", grad=False):
     tensors = {
-        name: _to_torch(rwkv7_sn_inputs[name], dtype, device)
+        name: _to_torch(rwkv7_sane_inputs[name], dtype, device)
         for name in ["r", "k", "v", "a", "b", "w"]
     }
-    tensors["tau"] = _to_torch(rwkv7_sn_inputs["tau"], "float32", device)
-    # mask 默认全 1：每个 chunk 边界都执行 State Neutralization
-    B, n_chunks, _ = rwkv7_sn_inputs["tau"].shape
+    tensors["tau"] = _to_torch(rwkv7_sane_inputs["tau"], "float32", device)
+    # mask 默认全 1：每个 chunk 边界都执行 State Anomaly Neutralization
+    B, n_chunks, _ = rwkv7_sane_inputs["tau"].shape
     tensors["mask"] = torch.ones(B, n_chunks, dtype=torch.float32, device=device)
-    tensors["h0"] = _to_torch(rwkv7_sn_inputs["h0"], "float32", device)
+    tensors["h0"] = _to_torch(rwkv7_sane_inputs["h0"], "float32", device)
     if grad:
         for name in ["r", "k", "v", "a", "b", "w", "tau", "h0"]:
             tensors[name].requires_grad_(True)
@@ -73,14 +73,14 @@ def _test_is_close(name, ref, tgt, atol, rtol, min_exact_rate=None):
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_sn_forward_state(
-    rwkv7_sn_op, rwkv7_sn_native_op, rwkv7_sn_inputs, device
+def test_rwkv7_sane_forward_state(
+    rwkv7_sane_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device
 ):
-    ref = _make_inputs(rwkv7_sn_inputs, device, "bfloat16")
-    tgt = _make_inputs(rwkv7_sn_inputs, device, "bfloat16")
+    ref = _make_inputs(rwkv7_sane_inputs, device, "bfloat16")
+    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16")
 
-    y_ref, s_ref = _call_op(rwkv7_sn_native_op, ref, output_final_state=True)
-    y_tgt, s_tgt = _call_op(rwkv7_sn_op, tgt, output_final_state=True)
+    y_ref, s_ref = _call_op(rwkv7_sane_native_op, ref, output_final_state=True)
+    y_tgt, s_tgt = _call_op(rwkv7_sane_op, tgt, output_final_state=True)
 
     _test_is_close("y", y_ref, y_tgt, atol=1e-4, rtol=1e-2, min_exact_rate=99.0)
     _test_is_close(
@@ -90,7 +90,9 @@ def test_rwkv7_sn_forward_state(
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_sn_backward(rwkv7_sn_op, rwkv7_sn_native_op, rwkv7_sn_inputs, device):
+def test_rwkv7_sane_backward(
+    rwkv7_sane_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device
+):
     def grads(op, tensors):
         t = {
             k: v.clone().detach().requires_grad_(True)
@@ -103,11 +105,11 @@ def test_rwkv7_sn_backward(rwkv7_sn_op, rwkv7_sn_native_op, rwkv7_sn_inputs, dev
         loss.backward()
         return {k: t[k].grad for k in ["r", "k", "v", "a", "b", "w", "tau", "h0"]}
 
-    ref = _make_inputs(rwkv7_sn_inputs, device, "bfloat16", grad=True)
-    tgt = _make_inputs(rwkv7_sn_inputs, device, "bfloat16", grad=True)
+    ref = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", grad=True)
+    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", grad=True)
 
-    g_ref = grads(rwkv7_sn_native_op, ref)
-    g_tgt = grads(rwkv7_sn_op, tgt)
+    g_ref = grads(rwkv7_sane_native_op, ref)
+    g_tgt = grads(rwkv7_sane_op, tgt)
 
     thresholds = {
         "r": (1e-4, 1e-2, 98.0),
@@ -126,10 +128,10 @@ def test_rwkv7_sn_backward(rwkv7_sn_op, rwkv7_sn_native_op, rwkv7_sn_inputs, dev
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_sn_forward_state_masked(
-    rwkv7_sn_op, rwkv7_sn_native_op, rwkv7_sn_inputs, device, rng
+def test_rwkv7_sane_forward_state_masked(
+    rwkv7_sane_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
 ):
-    B, T, H, K = rwkv7_sn_inputs["r"].shape
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
     n_chunks = T // 16
     mask_np = np.ones((B, n_chunks), dtype=np.float32)
     freeze = rng.random((B, n_chunks)) < 0.3
@@ -137,11 +139,13 @@ def test_rwkv7_sn_forward_state_masked(
     mask_np[:, -1] = 0.0
     mask = torch.tensor(mask_np, dtype=torch.float32, device=device)
 
-    ref = _make_inputs(rwkv7_sn_inputs, device, "bfloat16")
-    tgt = _make_inputs(rwkv7_sn_inputs, device, "bfloat16")
+    ref = _make_inputs(rwkv7_sane_inputs, device, "bfloat16")
+    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16")
 
-    y_ref, s_ref = _call_op(rwkv7_sn_native_op, ref, output_final_state=True, mask=mask)
-    y_tgt, s_tgt = _call_op(rwkv7_sn_op, tgt, output_final_state=True, mask=mask)
+    y_ref, s_ref = _call_op(
+        rwkv7_sane_native_op, ref, output_final_state=True, mask=mask
+    )
+    y_tgt, s_tgt = _call_op(rwkv7_sane_op, tgt, output_final_state=True, mask=mask)
 
     _test_is_close("y_mask", y_ref, y_tgt, atol=1e-4, rtol=1e-2, min_exact_rate=99.0)
     _test_is_close(
@@ -151,10 +155,10 @@ def test_rwkv7_sn_forward_state_masked(
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_sn_backward_masked(
-    rwkv7_sn_op, rwkv7_sn_native_op, rwkv7_sn_inputs, device, rng
+def test_rwkv7_sane_backward_masked(
+    rwkv7_sane_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
 ):
-    B, T, H, K = rwkv7_sn_inputs["r"].shape
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
     n_chunks = T // 16
     mask_np = np.ones((B, n_chunks), dtype=np.float32)
     freeze = rng.random((B, n_chunks)) < 0.3
@@ -174,11 +178,11 @@ def test_rwkv7_sn_backward_masked(
         loss.backward()
         return {k: t[k].grad for k in ["r", "k", "v", "a", "b", "w", "tau", "h0"]}
 
-    ref = _make_inputs(rwkv7_sn_inputs, device, "bfloat16", grad=True)
-    tgt = _make_inputs(rwkv7_sn_inputs, device, "bfloat16", grad=True)
+    ref = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", grad=True)
+    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", grad=True)
 
-    g_ref = grads(rwkv7_sn_native_op, ref, mask)
-    g_tgt = grads(rwkv7_sn_op, tgt, mask)
+    g_ref = grads(rwkv7_sane_native_op, ref, mask)
+    g_tgt = grads(rwkv7_sane_op, tgt, mask)
 
     thresholds = {
         "r": (1e-4, 1e-2, 98.0),
@@ -196,24 +200,24 @@ def test_rwkv7_sn_backward_masked(
 
 
 @pytest.mark.torch
-def test_rwkv7_sn_no_mask_y_matches_all_one(rwkv7_sn_op, rwkv7_sn_inputs, device):
+def test_rwkv7_sane_no_mask_y_matches_all_one(rwkv7_sane_op, rwkv7_sane_inputs, device):
     """无 mask 算子与全 1 mask 算子的 y 应一致；无 mask 路径返回 None state。"""
-    B, T, H, K = rwkv7_sn_inputs["r"].shape
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
     n_chunks = T // 16
     mask = torch.ones(B, n_chunks, dtype=torch.float32, device=device)
-    tgt = _make_inputs(rwkv7_sn_inputs, device, "bfloat16")
+    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16")
 
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
         with torch.no_grad():
             y_no_mask, s_no_mask = _call_op(
-                rwkv7_sn_op, tgt, output_final_state=True, mask=None
+                rwkv7_sane_op, tgt, output_final_state=True, mask=None
             )
         assert len(rec) == 1 and issubclass(rec[-1].category, UserWarning)
 
     with torch.no_grad():
         y_all_one, s_all_one = _call_op(
-            rwkv7_sn_op, tgt, output_final_state=True, mask=mask
+            rwkv7_sane_op, tgt, output_final_state=True, mask=mask
         )
 
     assert s_no_mask is None
@@ -226,24 +230,24 @@ def test_rwkv7_sn_no_mask_y_matches_all_one(rwkv7_sn_op, rwkv7_sn_inputs, device
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_sn_no_mask_forward_state(
-    rwkv7_sn_op, rwkv7_sn_native_op, rwkv7_sn_inputs, device
+def test_rwkv7_sane_no_mask_forward_state(
+    rwkv7_sane_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device
 ):
     """output_final_state=False 时走无 mask 算子，y 与 native 一致且不返回 state。"""
-    ref = _make_inputs(rwkv7_sn_inputs, device, "bfloat16")
-    tgt = _make_inputs(rwkv7_sn_inputs, device, "bfloat16")
+    ref = _make_inputs(rwkv7_sane_inputs, device, "bfloat16")
+    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16")
 
     with torch.no_grad():
-        y_ref = _call_op(rwkv7_sn_native_op, ref, output_final_state=False)
-        y_tgt = _call_op(rwkv7_sn_op, tgt, output_final_state=False)
+        y_ref = _call_op(rwkv7_sane_native_op, ref, output_final_state=False)
+        y_tgt = _call_op(rwkv7_sane_op, tgt, output_final_state=False)
 
     _test_is_close("y_no_mask", y_ref, y_tgt, atol=1e-4, rtol=1e-2, min_exact_rate=99.0)
 
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_sn_no_mask_backward(
-    rwkv7_sn_op, rwkv7_sn_native_op, rwkv7_sn_inputs, device
+def test_rwkv7_sane_no_mask_backward(
+    rwkv7_sane_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device
 ):
     """无 mask 路径反向梯度与 native 对比（output_final_state=False，仅对 y 求导）。"""
 
@@ -259,11 +263,11 @@ def test_rwkv7_sn_no_mask_backward(
         loss.backward()
         return {k: t[k].grad for k in ["r", "k", "v", "a", "b", "w", "tau", "h0"]}
 
-    ref = _make_inputs(rwkv7_sn_inputs, device, "bfloat16", grad=True)
-    tgt = _make_inputs(rwkv7_sn_inputs, device, "bfloat16", grad=True)
+    ref = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", grad=True)
+    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", grad=True)
 
-    g_ref = grads(rwkv7_sn_native_op, ref)
-    g_tgt = grads(rwkv7_sn_op, tgt)
+    g_ref = grads(rwkv7_sane_native_op, ref)
+    g_tgt = grads(rwkv7_sane_op, tgt)
 
     thresholds = {
         "r": (1e-4, 1e-2, 98.0),
@@ -283,24 +287,24 @@ def test_rwkv7_sn_no_mask_backward(
 
 
 @pytest.mark.torch
-def test_rwkv7_sn_inference_arbitrary_length(
-    rwkv7_sn_op, rwkv7_sn_inference_op, rwkv7_sn_inputs, device
+def test_rwkv7_sane_inference_arbitrary_length(
+    rwkv7_sane_op, rwkv7_sane_inference_op, rwkv7_sane_inputs, device
 ):
     """推理入口支持 T 不被 16 整除，此时 tau 长度只需等于 T // 16。"""
-    B, T, H, K = rwkv7_sn_inputs["r"].shape
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
     actual_len = 34
 
     tensors = {
-        name: _to_torch(rwkv7_sn_inputs[name][:, :actual_len], "bfloat16", device)
+        name: _to_torch(rwkv7_sane_inputs[name][:, :actual_len], "bfloat16", device)
         for name in ["r", "k", "v", "a", "b", "w"]
     }
     tensors["tau"] = _to_torch(
-        rwkv7_sn_inputs["tau"][:, : actual_len // 16], "float32", device
+        rwkv7_sane_inputs["tau"][:, : actual_len // 16], "float32", device
     )
-    tensors["h0"] = _to_torch(rwkv7_sn_inputs["h0"], "float32", device)
+    tensors["h0"] = _to_torch(rwkv7_sane_inputs["h0"], "float32", device)
 
     with torch.no_grad():
-        y = rwkv7_sn_inference_op(
+        y = rwkv7_sane_inference_op(
             r=tensors["r"],
             w=tensors["w"],
             k=tensors["k"],
@@ -317,7 +321,7 @@ def test_rwkv7_sn_inference_arbitrary_length(
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
         with torch.no_grad():
-            y2, s = rwkv7_sn_inference_op(
+            y2, s = rwkv7_sane_inference_op(
                 r=tensors["r"],
                 w=tensors["w"],
                 k=tensors["k"],
@@ -335,37 +339,41 @@ def test_rwkv7_sn_inference_arbitrary_length(
 
 
 @pytest.mark.torch
-def test_rwkv7_sn_irregular_padding(
-    rwkv7_sn_op, rwkv7_sn_native_op, rwkv7_sn_rnn_native_op, rwkv7_sn_inputs, device
+def test_rwkv7_sane_irregular_padding(
+    rwkv7_sane_op,
+    rwkv7_sane_native_op,
+    rwkv7_sane_rnn_native_op,
+    rwkv7_sane_inputs,
+    device,
 ):
     """
     验证不规则长度 padding 场景：实际长度 34，pad 到 48，
     padding chunk mask=0，且 padding 位置 k=v=a=b=0, w=-inf，
     最终 state 应与逐 native 单步跑完 34 个 token 一致。
     """
-    B, T, H, K = rwkv7_sn_inputs["r"].shape
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
     actual_len = 34
     pad_len = ((actual_len + 15) // 16) * 16  # 48
     assert pad_len <= T
 
     def _pad(name, val, pad_val):
-        full = rwkv7_sn_inputs[name][:, :pad_len].copy()
+        full = rwkv7_sane_inputs[name][:, :pad_len].copy()
         full[:, actual_len:] = pad_val
         return full
 
-    r = _pad("r", rwkv7_sn_inputs["r"][:, :pad_len], 0.0)
-    k = _pad("k", rwkv7_sn_inputs["k"][:, :pad_len], 0.0)
-    v = _pad("v", rwkv7_sn_inputs["v"][:, :pad_len], 0.0)
-    a = _pad("a", rwkv7_sn_inputs["a"][:, :pad_len], 0.0)
-    b = _pad("b", rwkv7_sn_inputs["b"][:, :pad_len], 0.0)
+    r = _pad("r", rwkv7_sane_inputs["r"][:, :pad_len], 0.0)
+    k = _pad("k", rwkv7_sane_inputs["k"][:, :pad_len], 0.0)
+    v = _pad("v", rwkv7_sane_inputs["v"][:, :pad_len], 0.0)
+    a = _pad("a", rwkv7_sane_inputs["a"][:, :pad_len], 0.0)
+    b = _pad("b", rwkv7_sane_inputs["b"][:, :pad_len], 0.0)
     # w = -inf 对应 decay=1，状态不更新
-    w = _pad("w", rwkv7_sn_inputs["w"][:, :pad_len], -1e9)
+    w = _pad("w", rwkv7_sane_inputs["w"][:, :pad_len], -1e9)
 
-    tau_full = rwkv7_sn_inputs["tau"][:, : pad_len // 16].copy()
+    tau_full = rwkv7_sane_inputs["tau"][:, : pad_len // 16].copy()
     mask_np = np.ones((B, pad_len // 16), dtype=np.float32)
     mask_np[:, actual_len // 16 :] = 0.0
 
-    h0 = rwkv7_sn_inputs["h0"]
+    h0 = rwkv7_sane_inputs["h0"]
 
     tensors = {
         "r": _to_torch(r, "bfloat16", device),
@@ -380,7 +388,7 @@ def test_rwkv7_sn_irregular_padding(
     }
 
     with torch.no_grad():
-        _, state_cuda = _call_op(rwkv7_sn_op, tensors, output_final_state=True)
+        _, state_cuda = _call_op(rwkv7_sane_op, tensors, output_final_state=True)
 
     # 参考：先跑完前 32 个 token 的训练版本（mask [1,1]）
     pre_tensors = {
@@ -396,20 +404,20 @@ def test_rwkv7_sn_irregular_padding(
     }
     with torch.no_grad():
         _, state_ref = _call_op(
-            rwkv7_sn_native_op, pre_tensors, output_final_state=True
+            rwkv7_sane_native_op, pre_tensors, output_final_state=True
         )
 
-    # 再用 native 单步跑 token 32,33（不触发 SN）
+    # 再用 native 单步跑 token 32,33（不触发 SANE）
     state_ref = state_ref.to(device)
     for step in range(32, actual_len):
-        rr = _to_torch(rwkv7_sn_inputs["r"][:, step : step + 1], "bfloat16", device)
-        kk = _to_torch(rwkv7_sn_inputs["k"][:, step : step + 1], "bfloat16", device)
-        vv = _to_torch(rwkv7_sn_inputs["v"][:, step : step + 1], "bfloat16", device)
-        aa = _to_torch(rwkv7_sn_inputs["a"][:, step : step + 1], "bfloat16", device)
-        bb = _to_torch(rwkv7_sn_inputs["b"][:, step : step + 1], "bfloat16", device)
-        ww = _to_torch(rwkv7_sn_inputs["w"][:, step : step + 1], "bfloat16", device)
-        tau_s = _to_torch(rwkv7_sn_inputs["tau"][:, 2], "float32", device)
-        _, state_ref = rwkv7_sn_rnn_native_op(
+        rr = _to_torch(rwkv7_sane_inputs["r"][:, step : step + 1], "bfloat16", device)
+        kk = _to_torch(rwkv7_sane_inputs["k"][:, step : step + 1], "bfloat16", device)
+        vv = _to_torch(rwkv7_sane_inputs["v"][:, step : step + 1], "bfloat16", device)
+        aa = _to_torch(rwkv7_sane_inputs["a"][:, step : step + 1], "bfloat16", device)
+        bb = _to_torch(rwkv7_sane_inputs["b"][:, step : step + 1], "bfloat16", device)
+        ww = _to_torch(rwkv7_sane_inputs["w"][:, step : step + 1], "bfloat16", device)
+        tau_s = _to_torch(rwkv7_sane_inputs["tau"][:, 2], "float32", device)
+        _, state_ref = rwkv7_sane_rnn_native_op(
             r=rr,
             w=ww,
             k=kk,
@@ -417,7 +425,7 @@ def test_rwkv7_sn_irregular_padding(
             a=aa,
             b=bb,
             tau=tau_s,
-            do_sn=False,
+            do_sane=False,
             initial_state=state_ref,
             output_final_state=True,
             head_first=False,

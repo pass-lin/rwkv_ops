@@ -1,4 +1,4 @@
-"""JAX 版 RWKV7-SN Pallas kernel 封装。"""
+"""JAX 版 RWKV7-SANE Pallas kernel 封装。"""
 
 from __future__ import annotations
 
@@ -120,12 +120,12 @@ def _transpose_tau(tau: jnp.ndarray) -> jnp.ndarray:
     return jnp.transpose(tau, (0, 2, 1))
 
 
-def _apply_sn_to_final_state(
+def _apply_sane_to_final_state(
     state: jnp.ndarray,
     tau: jnp.ndarray,
     mask: Optional[jnp.ndarray] = None,
 ) -> jnp.ndarray:
-    """对最终 state 应用 State Neutralization。
+    """对最终 state 应用 State Anomaly Neutralization。
 
     Args:
         state: [B, N, H, H], float32。
@@ -137,15 +137,15 @@ def _apply_sn_to_final_state(
     """
     last_tau = tau[:, :, -1][:, :, None, None]
     tau_safe = jnp.maximum(last_tau, 1e-6)
-    sn_state = last_tau * jnp.tanh(state / tau_safe)
+    sane_state = last_tau * jnp.tanh(state / tau_safe)
     if mask is None:
-        return sn_state
+        return sane_state
     last_mask = mask[:, -1][:, None, None, None]
-    return jnp.where(last_mask > 0, sn_state, state)
+    return jnp.where(last_mask > 0, sane_state, state)
 
 
 #  Pallas kernel 本体（纯公开 API）
-def _rwkv7_sn_fwd_kernel(
+def _rwkv7_sane_fwd_kernel(
     r_ref,
     w_ref,
     k_ref,
@@ -161,7 +161,7 @@ def _rwkv7_sn_fwd_kernel(
     """无 mask 前向 Pallas kernel。
 
     grid 为 (B, N)，每个 program 处理一个 (batch, head)。
-    chunk 内静态展开 16 步，chunk 边界无条件执行 SN。
+    chunk 内静态展开 16 步，chunk 边界无条件执行 SANE。
     """
     b = pl.program_id(0)
     h = pl.program_id(1)
@@ -192,7 +192,7 @@ def _rwkv7_sn_fwd_kernel(
             y_vec = jnp.sum(state * rv[None, :], axis=1)
             o_ref[b, h, t, :] = y_vec.astype(o_ref.dtype)
 
-        # checkpoint 保存 SN 之前的 state 供反向使用。
+        # checkpoint 保存 SANE 之前的 state 供反向使用。
         chkp_ref[b, h, c] = state
         tau_v = tau_ref[b, h, c].astype(jnp.float32)
         tau_safe = jnp.maximum(tau_v, 1e-6)
@@ -202,7 +202,7 @@ def _rwkv7_sn_fwd_kernel(
     jax.lax.fori_loop(0, num_chunks, chunk_body, state)
 
 
-def _rwkv7_sn_fwd_kernel_with_mask(
+def _rwkv7_sane_fwd_kernel_with_mask(
     r_ref,
     w_ref,
     k_ref,
@@ -218,7 +218,7 @@ def _rwkv7_sn_fwd_kernel_with_mask(
 ):
     """带 mask 前向 Pallas kernel。
 
-    与无 mask 版本相同，但按 mask 选择是否执行 SN。
+    与无 mask 版本相同，但按 mask 选择是否执行 SANE。
     """
     b = pl.program_id(0)
     h = pl.program_id(1)
@@ -249,19 +249,19 @@ def _rwkv7_sn_fwd_kernel_with_mask(
             y_vec = jnp.sum(state * rv[None, :], axis=1)
             o_ref[b, h, t, :] = y_vec.astype(o_ref.dtype)
 
-        # checkpoint 保存 SN 之前的 state 供反向使用。
+        # checkpoint 保存 SANE 之前的 state 供反向使用。
         chkp_ref[b, h, c] = state
         tau_v = tau_ref[b, h, c].astype(jnp.float32)
         tau_safe = jnp.maximum(tau_v, 1e-6)
-        sn_state = tau_safe * jnp.tanh(state / tau_safe)
+        sane_state = tau_safe * jnp.tanh(state / tau_safe)
         m = mask_ref[b, c].astype(jnp.float32)
-        state = state * (1.0 - m) + sn_state * m
+        state = state * (1.0 - m) + sane_state * m
         return state
 
     jax.lax.fori_loop(0, num_chunks, chunk_body, state)
 
 
-def _rwkv7_sn_bwd_kernel(
+def _rwkv7_sane_bwd_kernel(
     r_ref,
     w_ref,
     k_ref,
@@ -291,10 +291,10 @@ def _rwkv7_sn_bwd_kernel(
 
     def chunk_body(c_rev, dS):
         c = num_chunks - 1 - c_rev
-        # chkp 保存的是 SN 之前的 state。
+        # chkp 保存的是 SANE 之前的 state。
         S_t = chkp_ref[b, h, c].astype(jnp.float32)
 
-        # 先对下游梯度 dS 应用 SN 导数。
+        # 先对下游梯度 dS 应用 SANE 导数。
         tau_v = tau_ref[b, h, c].astype(jnp.float32)
         tau_safe = jnp.maximum(tau_v, 1e-6)
         u = S_t / tau_safe
@@ -348,7 +348,7 @@ def _rwkv7_sn_bwd_kernel(
     dh0_ref[b, h] = dS.astype(dh0_ref.dtype)
 
 
-def _rwkv7_sn_bwd_kernel_with_mask(
+def _rwkv7_sane_bwd_kernel_with_mask(
     r_ref,
     w_ref,
     k_ref,
@@ -379,10 +379,10 @@ def _rwkv7_sn_bwd_kernel_with_mask(
 
     def chunk_body(c_rev, dS):
         c = num_chunks - 1 - c_rev
-        # chkp 保存的是 SN 之前的 state。
+        # chkp 保存的是 SANE 之前的 state。
         S_t = chkp_ref[b, h, c].astype(jnp.float32)
 
-        # 先对下游梯度 dS 应用 SN 导数（按 mask blend）。
+        # 先对下游梯度 dS 应用 SANE 导数（按 mask blend）。
         tau_v = tau_ref[b, h, c].astype(jnp.float32)
         tau_safe = jnp.maximum(tau_v, 1e-6)
         m = mask_ref[b, c].astype(jnp.float32)
@@ -462,33 +462,33 @@ def _bwd_out_shape(r):
     ]
 
 
-def _wkv7_sn_fwd_pallas_call(r, w, k, v, a, b, tau, h0):
+def _wkv7_sane_fwd_pallas_call(r, w, k, v, a, b, tau, h0):
     B, N, T, H = r.shape
     return launch(
-        "wkv7_sn_fwd",
-        _rwkv7_sn_fwd_kernel,
+        "wkv7_sane_fwd",
+        _rwkv7_sane_fwd_kernel,
         _fwd_out_shape(r),
         (B, N),
         (r, w, k, v, a, b, tau, h0),
     )
 
 
-def _wkv7_sn_fwd_warmup(r, w, k, v, a, b, tau, h0):
+def _wkv7_sane_fwd_warmup(r, w, k, v, a, b, tau, h0):
     B, N, T, H = r.shape
     ensure_config(
-        "wkv7_sn_fwd",
-        _rwkv7_sn_fwd_kernel,
+        "wkv7_sane_fwd",
+        _rwkv7_sane_fwd_kernel,
         _fwd_out_shape(r),
         (B, N),
         (r, w, k, v, a, b, tau, h0),
     )
 
 
-def _wkv7_sn_bwd_warmup(r, w, k, v, a, b, sa, state_chkp, tau, dy, dht):
+def _wkv7_sane_bwd_warmup(r, w, k, v, a, b, sa, state_chkp, tau, dy, dht):
     B, N, T, H = r.shape
     ensure_config(
-        "wkv7_sn_bwd",
-        _rwkv7_sn_bwd_kernel,
+        "wkv7_sane_bwd",
+        _rwkv7_sane_bwd_kernel,
         _bwd_out_shape(r),
         (B, N),
         (r, w, k, v, a, b, sa, state_chkp, tau, dy, dht),
@@ -496,22 +496,22 @@ def _wkv7_sn_bwd_warmup(r, w, k, v, a, b, sa, state_chkp, tau, dy, dht):
 
 
 @custom_partitioning
-def _wkv7_sn_fwd_spmd(r, w, k, v, a, b, tau, h0):
-    return _wkv7_sn_fwd_pallas_call(r, w, k, v, a, b, tau, h0)
+def _wkv7_sane_fwd_spmd(r, w, k, v, a, b, tau, h0):
+    return _wkv7_sane_fwd_pallas_call(r, w, k, v, a, b, tau, h0)
 
 
-_wkv7_sn_fwd_spmd.def_partition(
+_wkv7_sane_fwd_spmd.def_partition(
     infer_sharding_from_operands=_fwd_infer_sharding,
     sharding_rule=FWD_RULE,
-    partition=create_partition(_wkv7_sn_fwd_pallas_call),
+    partition=create_partition(_wkv7_sane_fwd_pallas_call),
 )
 
 
-def _wkv7_sn_bwd_pallas_call(r, w, k, v, a, b, sa, state_chkp, tau, dy, dht):
+def _wkv7_sane_bwd_pallas_call(r, w, k, v, a, b, sa, state_chkp, tau, dy, dht):
     B, N, T, H = r.shape
     return launch(
-        "wkv7_sn_bwd",
-        _rwkv7_sn_bwd_kernel,
+        "wkv7_sane_bwd",
+        _rwkv7_sane_bwd_kernel,
         _bwd_out_shape(r),
         (B, N),
         (r, w, k, v, a, b, sa, state_chkp, tau, dy, dht),
@@ -519,30 +519,30 @@ def _wkv7_sn_bwd_pallas_call(r, w, k, v, a, b, sa, state_chkp, tau, dy, dht):
 
 
 @custom_partitioning
-def _wkv7_sn_bwd_spmd(r, w, k, v, a, b, sa, state_chkp, tau, dy, dht):
-    return _wkv7_sn_bwd_pallas_call(r, w, k, v, a, b, sa, state_chkp, tau, dy, dht)
+def _wkv7_sane_bwd_spmd(r, w, k, v, a, b, sa, state_chkp, tau, dy, dht):
+    return _wkv7_sane_bwd_pallas_call(r, w, k, v, a, b, sa, state_chkp, tau, dy, dht)
 
 
-_wkv7_sn_bwd_spmd.def_partition(
+_wkv7_sane_bwd_spmd.def_partition(
     infer_sharding_from_operands=_bwd_infer_sharding,
     sharding_rule=BWD_RULE,
-    partition=create_partition(_wkv7_sn_bwd_pallas_call),
+    partition=create_partition(_wkv7_sane_bwd_pallas_call),
 )
 
 
 @jax.custom_vjp
-def rwkv7_sn_kernel_pallas(r, w, k, v, a, b, tau, h0):
+def rwkv7_sane_kernel_pallas(r, w, k, v, a, b, tau, h0):
     """无 mask Pallas 训练 kernel 公开入口。"""
-    _wkv7_sn_fwd_warmup(r, w, k, v, a, b, tau, h0)
-    out, sa_out, state_chkp = _wkv7_sn_fwd_spmd(r, w, k, v, a, b, tau, h0)
-    final_state = _apply_sn_to_final_state(state_chkp[:, :, -1, :, :], tau)
+    _wkv7_sane_fwd_warmup(r, w, k, v, a, b, tau, h0)
+    out, sa_out, state_chkp = _wkv7_sane_fwd_spmd(r, w, k, v, a, b, tau, h0)
+    final_state = _apply_sane_to_final_state(state_chkp[:, :, -1, :, :], tau)
     return out, final_state
 
 
 def _fwd(r, w, k, v, a, b, tau, h0):
-    _wkv7_sn_fwd_warmup(r, w, k, v, a, b, tau, h0)
-    out, sa_out, state_chkp = _wkv7_sn_fwd_spmd(r, w, k, v, a, b, tau, h0)
-    final_state = _apply_sn_to_final_state(state_chkp[:, :, -1, :, :], tau)
+    _wkv7_sane_fwd_warmup(r, w, k, v, a, b, tau, h0)
+    out, sa_out, state_chkp = _wkv7_sane_fwd_spmd(r, w, k, v, a, b, tau, h0)
+    final_state = _apply_sane_to_final_state(state_chkp[:, :, -1, :, :], tau)
     return (out, final_state), (r, w, k, v, a, b, tau, sa_out, state_chkp)
 
 
@@ -556,44 +556,46 @@ def _bwd(res, grads):
     else:
         dht = jnp.asarray(dht, jnp.float32)
 
-    _wkv7_sn_bwd_warmup(r, w, k, v, a, b, sa_out, state_chkp, tau, dy, dht)
-    dr, dw, dk, dv, da, db, dtau, dh0 = _wkv7_sn_bwd_spmd(
+    _wkv7_sane_bwd_warmup(r, w, k, v, a, b, sa_out, state_chkp, tau, dy, dht)
+    dr, dw, dk, dv, da, db, dtau, dh0 = _wkv7_sane_bwd_spmd(
         r, w, k, v, a, b, sa_out, state_chkp, tau, dy, dht
     )
     return dr, dw, dk, dv, da, db, dtau, dh0
 
 
-rwkv7_sn_kernel_pallas.defvjp(_fwd, _bwd)
+rwkv7_sane_kernel_pallas.defvjp(_fwd, _bwd)
 
 
 #  带 mask launcher
-def _wkv7_sn_fwd_with_mask_pallas_call(r, w, k, v, a, b, tau, mask, h0):
+def _wkv7_sane_fwd_with_mask_pallas_call(r, w, k, v, a, b, tau, mask, h0):
     B, N, T, H = r.shape
     return launch(
-        "wkv7_sn_fwd_mask",
-        _rwkv7_sn_fwd_kernel_with_mask,
+        "wkv7_sane_fwd_mask",
+        _rwkv7_sane_fwd_kernel_with_mask,
         _fwd_out_shape(r),
         (B, N),
         (r, w, k, v, a, b, tau, mask, h0),
     )
 
 
-def _wkv7_sn_fwd_with_mask_warmup(r, w, k, v, a, b, tau, mask, h0):
+def _wkv7_sane_fwd_with_mask_warmup(r, w, k, v, a, b, tau, mask, h0):
     B, N, T, H = r.shape
     ensure_config(
-        "wkv7_sn_fwd_mask",
-        _rwkv7_sn_fwd_kernel_with_mask,
+        "wkv7_sane_fwd_mask",
+        _rwkv7_sane_fwd_kernel_with_mask,
         _fwd_out_shape(r),
         (B, N),
         (r, w, k, v, a, b, tau, mask, h0),
     )
 
 
-def _wkv7_sn_bwd_with_mask_warmup(r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht):
+def _wkv7_sane_bwd_with_mask_warmup(
+    r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht
+):
     B, N, T, H = r.shape
     ensure_config(
-        "wkv7_sn_bwd_mask",
-        _rwkv7_sn_bwd_kernel_with_mask,
+        "wkv7_sane_bwd_mask",
+        _rwkv7_sane_bwd_kernel_with_mask,
         _bwd_out_shape(r),
         (B, N),
         (r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht),
@@ -601,24 +603,24 @@ def _wkv7_sn_bwd_with_mask_warmup(r, w, k, v, a, b, sa, state_chkp, tau, mask, d
 
 
 @custom_partitioning
-def _wkv7_sn_fwd_with_mask_spmd(r, w, k, v, a, b, tau, mask, h0):
-    return _wkv7_sn_fwd_with_mask_pallas_call(r, w, k, v, a, b, tau, mask, h0)
+def _wkv7_sane_fwd_with_mask_spmd(r, w, k, v, a, b, tau, mask, h0):
+    return _wkv7_sane_fwd_with_mask_pallas_call(r, w, k, v, a, b, tau, mask, h0)
 
 
-_wkv7_sn_fwd_with_mask_spmd.def_partition(
+_wkv7_sane_fwd_with_mask_spmd.def_partition(
     infer_sharding_from_operands=_fwd_infer_sharding,
     sharding_rule=FWD_MASK_RULE,
-    partition=create_partition(_wkv7_sn_fwd_with_mask_pallas_call),
+    partition=create_partition(_wkv7_sane_fwd_with_mask_pallas_call),
 )
 
 
-def _wkv7_sn_bwd_with_mask_pallas_call(
+def _wkv7_sane_bwd_with_mask_pallas_call(
     r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht
 ):
     B, N, T, H = r.shape
     return launch(
-        "wkv7_sn_bwd_mask",
-        _rwkv7_sn_bwd_kernel_with_mask,
+        "wkv7_sane_bwd_mask",
+        _rwkv7_sane_bwd_kernel_with_mask,
         _bwd_out_shape(r),
         (B, N),
         (r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht),
@@ -626,36 +628,36 @@ def _wkv7_sn_bwd_with_mask_pallas_call(
 
 
 @custom_partitioning
-def _wkv7_sn_bwd_with_mask_spmd(r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht):
-    return _wkv7_sn_bwd_with_mask_pallas_call(
+def _wkv7_sane_bwd_with_mask_spmd(r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht):
+    return _wkv7_sane_bwd_with_mask_pallas_call(
         r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht
     )
 
 
-_wkv7_sn_bwd_with_mask_spmd.def_partition(
+_wkv7_sane_bwd_with_mask_spmd.def_partition(
     infer_sharding_from_operands=_bwd_infer_sharding,
     sharding_rule=BWD_MASK_RULE,
-    partition=create_partition(_wkv7_sn_bwd_with_mask_pallas_call),
+    partition=create_partition(_wkv7_sane_bwd_with_mask_pallas_call),
 )
 
 
 @jax.custom_vjp
-def rwkv7_sn_kernel_with_mask_pallas(r, w, k, v, a, b, tau, mask, h0):
+def rwkv7_sane_kernel_with_mask_pallas(r, w, k, v, a, b, tau, mask, h0):
     """带 mask Pallas 训练 kernel 公开入口。"""
-    _wkv7_sn_fwd_with_mask_warmup(r, w, k, v, a, b, tau, mask, h0)
-    out, sa_out, state_chkp = _wkv7_sn_fwd_with_mask_spmd(
+    _wkv7_sane_fwd_with_mask_warmup(r, w, k, v, a, b, tau, mask, h0)
+    out, sa_out, state_chkp = _wkv7_sane_fwd_with_mask_spmd(
         r, w, k, v, a, b, tau, mask, h0
     )
-    final_state = _apply_sn_to_final_state(state_chkp[:, :, -1, :, :], tau, mask=mask)
+    final_state = _apply_sane_to_final_state(state_chkp[:, :, -1, :, :], tau, mask=mask)
     return out, final_state
 
 
 def _fwd_with_mask(r, w, k, v, a, b, tau, mask, h0):
-    _wkv7_sn_fwd_with_mask_warmup(r, w, k, v, a, b, tau, mask, h0)
-    out, sa_out, state_chkp = _wkv7_sn_fwd_with_mask_spmd(
+    _wkv7_sane_fwd_with_mask_warmup(r, w, k, v, a, b, tau, mask, h0)
+    out, sa_out, state_chkp = _wkv7_sane_fwd_with_mask_spmd(
         r, w, k, v, a, b, tau, mask, h0
     )
-    final_state = _apply_sn_to_final_state(state_chkp[:, :, -1, :, :], tau, mask=mask)
+    final_state = _apply_sane_to_final_state(state_chkp[:, :, -1, :, :], tau, mask=mask)
     return (out, final_state), (r, w, k, v, a, b, tau, mask, sa_out, state_chkp)
 
 
@@ -669,20 +671,20 @@ def _bwd_with_mask(res, grads):
     else:
         dht = jnp.asarray(dht, jnp.float32)
 
-    _wkv7_sn_bwd_with_mask_warmup(
+    _wkv7_sane_bwd_with_mask_warmup(
         r, w, k, v, a, b, sa_out, state_chkp, tau, mask, dy, dht
     )
-    dr, dw, dk, dv, da, db, dtau, dh0 = _wkv7_sn_bwd_with_mask_spmd(
+    dr, dw, dk, dv, da, db, dtau, dh0 = _wkv7_sane_bwd_with_mask_spmd(
         r, w, k, v, a, b, sa_out, state_chkp, tau, mask, dy, dht
     )
     return dr, dw, dk, dv, da, db, dtau, None, dh0
 
 
-rwkv7_sn_kernel_with_mask_pallas.defvjp(_fwd_with_mask, _bwd_with_mask)
+rwkv7_sane_kernel_with_mask_pallas.defvjp(_fwd_with_mask, _bwd_with_mask)
 
 
 #  对外 API
-def generalized_delta_rule_sn(
+def generalized_delta_rule_sane(
     r: jnp.ndarray,
     w: jnp.ndarray,
     k: jnp.ndarray,
@@ -695,12 +697,12 @@ def generalized_delta_rule_sn(
     output_final_state: bool = True,
     head_first: bool = False,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
-    """带 State Neutralization 的 RWKV-7 广义 delta 规则（Pallas chunkwise 训练版）。
+    """带 State Anomaly Neutralization 的 RWKV-7 广义 delta 规则（Pallas chunkwise 训练版）。
 
     Args:
         r, w, k, v, a, b: [B, T, H, K], bfloat16。T 必须被 16 整除。
         tau: [B, T//16, H], float32。阈值，必须严格 > 1。
-        mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SN；
+        mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SANE；
             仅当 output_final_state=True 时生效。
         initial_state: [B, H, K, K] 或 [1, H, K, K]，float32，可选。
         output_final_state: bool，是否返回最终 state。
@@ -728,7 +730,7 @@ def generalized_delta_rule_sn(
     B, N, T, H = r.shape
     if T % CHUNK_LEN != 0:
         raise ValueError(
-            f"Pallas SN kernel requires sequence length T={T} to be divisible by {CHUNK_LEN}"
+            f"Pallas SANE kernel requires sequence length T={T} to be divisible by {CHUNK_LEN}"
         )
 
     if tau.shape != (B, N, T // CHUNK_LEN):
@@ -749,15 +751,15 @@ def generalized_delta_rule_sn(
             raise ValueError(
                 f"mask shape {mask.shape} must match (B, T//16) = ({B}, {T // CHUNK_LEN})"
             )
-        out, last_state = rwkv7_sn_kernel_with_mask_pallas(
+        out, last_state = rwkv7_sane_kernel_with_mask_pallas(
             r, w, k, v, a, b, tau, mask, h0
         )
         out = jnp.transpose(out, (0, 2, 1, 3))
         out = jnp.asarray(out, dtype)
         return (out, last_state) if output_final_state else out
 
-    # 无 mask 路径：chunk 边界无条件执行 SN。
-    out, _ = rwkv7_sn_kernel_pallas(r, w, k, v, a, b, tau, h0)
+    # 无 mask 路径：chunk 边界无条件执行 SANE。
+    out, _ = rwkv7_sane_kernel_pallas(r, w, k, v, a, b, tau, h0)
     out = jnp.transpose(out, (0, 2, 1, 3))
     out = jnp.asarray(out, dtype)
 
@@ -765,10 +767,10 @@ def generalized_delta_rule_sn(
         return out
 
     warnings.warn(
-        "[rwkv7_sn] mask is None: 使用无条件 State Neutralization 算子。"
+        "[rwkv7_sane] mask is None: 使用无条件 State Anomaly Neutralization 算子。"
         "由于未提供 padding mask，返回的 final_state 可能被污染，"
         "因此已将其设为 None。如需 final_state 请提供显式 mask。\n"
-        "[rwkv7_sn] mask is None: using unconditional State Neutralization. "
+        "[rwkv7_sane] mask is None: using unconditional State Anomaly Neutralization. "
         "The returned final_state is set to None because padding chunks "
         "may contaminate the state. Provide an explicit mask to obtain final_state.",
         UserWarning,
@@ -777,7 +779,7 @@ def generalized_delta_rule_sn(
     return out, None
 
 
-def generalized_delta_rule_sn_inference(
+def generalized_delta_rule_sane_inference(
     r: jnp.ndarray,
     w: jnp.ndarray,
     k: jnp.ndarray,
@@ -791,7 +793,7 @@ def generalized_delta_rule_sn_inference(
     head_first: bool = False,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
     """Pallas 版本推理入口：直接复用训练 kernel，T 仍需被 16 整除。"""
-    return generalized_delta_rule_sn(
+    return generalized_delta_rule_sane(
         r=r,
         w=w,
         k=k,
@@ -806,6 +808,6 @@ def generalized_delta_rule_sn_inference(
     )
 
 
-def get_jax_generalized_delta_rule_sn(HEAD_SIZE=64):
+def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
     """返回 Pallas 后端的 (训练算子, 推理算子)。"""
-    return [generalized_delta_rule_sn, generalized_delta_rule_sn_inference]
+    return [generalized_delta_rule_sane, generalized_delta_rule_sane_inference]

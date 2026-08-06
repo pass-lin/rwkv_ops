@@ -1,4 +1,4 @@
-"""RWKV-7 State Neutralization Torch Triton kernel 数值测试。"""
+"""RWKV-7 State Anomaly Neutralization Torch Triton kernel 数值测试。"""
 
 import warnings
 
@@ -15,15 +15,15 @@ def _to_torch(arr, dtype, device):
     return torch.tensor(arr, dtype=getattr(torch, dtype), device=device)
 
 
-def _make_inputs(rwkv7_sn_inputs, device, dtype="bfloat16", grad=False):
-    B, T, H, K = rwkv7_sn_inputs["r"].shape
+def _make_inputs(rwkv7_sane_inputs, device, dtype="bfloat16", grad=False):
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
     tensors = {
-        name: _to_torch(rwkv7_sn_inputs[name], dtype, device)
+        name: _to_torch(rwkv7_sane_inputs[name], dtype, device)
         for name in ["r", "k", "v", "a", "b", "w"]
     }
-    tensors["tau"] = _to_torch(rwkv7_sn_inputs["tau"], "float32", device)
+    tensors["tau"] = _to_torch(rwkv7_sane_inputs["tau"], "float32", device)
     tensors["mask"] = torch.ones(B, T // 16, dtype=torch.float32, device=device)
-    tensors["h0"] = _to_torch(rwkv7_sn_inputs["h0"], "float32", device)
+    tensors["h0"] = _to_torch(rwkv7_sane_inputs["h0"], "float32", device)
     if grad:
         for name in ["r", "k", "v", "a", "b", "w", "tau", "h0"]:
             tensors[name].requires_grad_(True)
@@ -66,14 +66,14 @@ def _test_is_close(name, ref, tgt, atol, rtol):
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_sn_triton_forward_state(
-    rwkv7_sn_triton_op, rwkv7_sn_native_op, rwkv7_sn_inputs, device
+def test_rwkv7_sane_triton_forward_state(
+    rwkv7_sane_triton_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device
 ):
-    ref = _make_inputs(rwkv7_sn_inputs, device, "bfloat16")
-    tgt = _make_inputs(rwkv7_sn_inputs, device, "bfloat16")
+    ref = _make_inputs(rwkv7_sane_inputs, device, "bfloat16")
+    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16")
 
-    y_ref, s_ref = _call_op(rwkv7_sn_native_op, ref, output_final_state=True)
-    y_tgt, s_tgt = _call_op(rwkv7_sn_triton_op, tgt, output_final_state=True)
+    y_ref, s_ref = _call_op(rwkv7_sane_native_op, ref, output_final_state=True)
+    y_tgt, s_tgt = _call_op(rwkv7_sane_triton_op, tgt, output_final_state=True)
 
     _test_is_close("y", y_ref, y_tgt, atol=1e-4, rtol=1e-2)
     _test_is_close("final_state", s_ref, s_tgt, atol=1e-5, rtol=1e-3)
@@ -81,8 +81,8 @@ def test_rwkv7_sn_triton_forward_state(
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_sn_triton_backward(
-    rwkv7_sn_triton_op, rwkv7_sn_native_op, rwkv7_sn_inputs, device
+def test_rwkv7_sane_triton_backward(
+    rwkv7_sane_triton_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device
 ):
     def grads(op, tensors):
         t = {
@@ -96,11 +96,11 @@ def test_rwkv7_sn_triton_backward(
         loss.backward()
         return {k: t[k].grad for k in ["r", "k", "v", "a", "b", "w", "tau", "h0"]}
 
-    ref = _make_inputs(rwkv7_sn_inputs, device, "bfloat16", grad=True)
-    tgt = _make_inputs(rwkv7_sn_inputs, device, "bfloat16", grad=True)
+    ref = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", grad=True)
+    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", grad=True)
 
-    g_ref = grads(rwkv7_sn_native_op, ref)
-    g_tgt = grads(rwkv7_sn_triton_op, tgt)
+    g_ref = grads(rwkv7_sane_native_op, ref)
+    g_tgt = grads(rwkv7_sane_triton_op, tgt)
 
     thresholds = {
         "r": (1e-4, 1e-2),
@@ -119,10 +119,10 @@ def test_rwkv7_sn_triton_backward(
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_sn_triton_forward_state_masked(
-    rwkv7_sn_triton_op, rwkv7_sn_native_op, rwkv7_sn_inputs, device, rng
+def test_rwkv7_sane_triton_forward_state_masked(
+    rwkv7_sane_triton_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
 ):
-    B, T, H, K = rwkv7_sn_inputs["r"].shape
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
     n_chunks = T // 16
     mask_np = np.ones((B, n_chunks), dtype=np.float32)
     freeze = rng.random((B, n_chunks)) < 0.3
@@ -130,11 +130,15 @@ def test_rwkv7_sn_triton_forward_state_masked(
     mask_np[:, -1] = 0.0
     mask = torch.tensor(mask_np, dtype=torch.float32, device=device)
 
-    ref = _make_inputs(rwkv7_sn_inputs, device, "bfloat16")
-    tgt = _make_inputs(rwkv7_sn_inputs, device, "bfloat16")
+    ref = _make_inputs(rwkv7_sane_inputs, device, "bfloat16")
+    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16")
 
-    y_ref, s_ref = _call_op(rwkv7_sn_native_op, ref, output_final_state=True, mask=mask)
-    y_tgt, s_tgt = _call_op(rwkv7_sn_triton_op, tgt, output_final_state=True, mask=mask)
+    y_ref, s_ref = _call_op(
+        rwkv7_sane_native_op, ref, output_final_state=True, mask=mask
+    )
+    y_tgt, s_tgt = _call_op(
+        rwkv7_sane_triton_op, tgt, output_final_state=True, mask=mask
+    )
 
     _test_is_close("y_mask", y_ref, y_tgt, atol=1e-4, rtol=1e-2)
     _test_is_close("final_state_mask", s_ref, s_tgt, atol=1e-5, rtol=1e-3)
@@ -142,10 +146,10 @@ def test_rwkv7_sn_triton_forward_state_masked(
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_sn_triton_backward_masked(
-    rwkv7_sn_triton_op, rwkv7_sn_native_op, rwkv7_sn_inputs, device, rng
+def test_rwkv7_sane_triton_backward_masked(
+    rwkv7_sane_triton_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
 ):
-    B, T, H, K = rwkv7_sn_inputs["r"].shape
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
     n_chunks = T // 16
     mask_np = np.ones((B, n_chunks), dtype=np.float32)
     freeze = rng.random((B, n_chunks)) < 0.3
@@ -165,11 +169,11 @@ def test_rwkv7_sn_triton_backward_masked(
         loss.backward()
         return {k: t[k].grad for k in ["r", "k", "v", "a", "b", "w", "tau", "h0"]}
 
-    ref = _make_inputs(rwkv7_sn_inputs, device, "bfloat16", grad=True)
-    tgt = _make_inputs(rwkv7_sn_inputs, device, "bfloat16", grad=True)
+    ref = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", grad=True)
+    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", grad=True)
 
-    g_ref = grads(rwkv7_sn_native_op, ref, mask)
-    g_tgt = grads(rwkv7_sn_triton_op, tgt, mask)
+    g_ref = grads(rwkv7_sane_native_op, ref, mask)
+    g_tgt = grads(rwkv7_sane_triton_op, tgt, mask)
 
     thresholds = {
         "r": (1e-4, 1e-2),
@@ -187,25 +191,25 @@ def test_rwkv7_sn_triton_backward_masked(
 
 
 @pytest.mark.torch
-def test_rwkv7_sn_triton_no_mask_y_matches_all_one(
-    rwkv7_sn_triton_op, rwkv7_sn_inputs, device
+def test_rwkv7_sane_triton_no_mask_y_matches_all_one(
+    rwkv7_sane_triton_op, rwkv7_sane_inputs, device
 ):
-    B, T, H, K = rwkv7_sn_inputs["r"].shape
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
     n_chunks = T // 16
     mask = torch.ones(B, n_chunks, dtype=torch.float32, device=device)
-    tgt = _make_inputs(rwkv7_sn_inputs, device, "bfloat16")
+    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16")
 
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
         with torch.no_grad():
             y_no_mask, s_no_mask = _call_op(
-                rwkv7_sn_triton_op, tgt, output_final_state=True, mask=None
+                rwkv7_sane_triton_op, tgt, output_final_state=True, mask=None
             )
         assert len(rec) == 1 and issubclass(rec[-1].category, UserWarning)
 
     with torch.no_grad():
         y_all_one, s_all_one = _call_op(
-            rwkv7_sn_triton_op, tgt, output_final_state=True, mask=mask
+            rwkv7_sane_triton_op, tgt, output_final_state=True, mask=mask
         )
 
     assert s_no_mask is None
@@ -218,23 +222,23 @@ def test_rwkv7_sn_triton_no_mask_y_matches_all_one(
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_sn_triton_no_mask_forward_state(
-    rwkv7_sn_triton_op, rwkv7_sn_native_op, rwkv7_sn_inputs, device
+def test_rwkv7_sane_triton_no_mask_forward_state(
+    rwkv7_sane_triton_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device
 ):
-    ref = _make_inputs(rwkv7_sn_inputs, device, "bfloat16")
-    tgt = _make_inputs(rwkv7_sn_inputs, device, "bfloat16")
+    ref = _make_inputs(rwkv7_sane_inputs, device, "bfloat16")
+    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16")
 
     with torch.no_grad():
-        y_ref = _call_op(rwkv7_sn_native_op, ref, output_final_state=False)
-        y_tgt = _call_op(rwkv7_sn_triton_op, tgt, output_final_state=False)
+        y_ref = _call_op(rwkv7_sane_native_op, ref, output_final_state=False)
+        y_tgt = _call_op(rwkv7_sane_triton_op, tgt, output_final_state=False)
 
     _test_is_close("y_no_mask", y_ref, y_tgt, atol=1e-4, rtol=1e-2)
 
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_sn_triton_no_mask_backward(
-    rwkv7_sn_triton_op, rwkv7_sn_native_op, rwkv7_sn_inputs, device
+def test_rwkv7_sane_triton_no_mask_backward(
+    rwkv7_sane_triton_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device
 ):
     def grads(op, tensors):
         t = {
@@ -248,11 +252,11 @@ def test_rwkv7_sn_triton_no_mask_backward(
         loss.backward()
         return {k: t[k].grad for k in ["r", "k", "v", "a", "b", "w", "tau", "h0"]}
 
-    ref = _make_inputs(rwkv7_sn_inputs, device, "bfloat16", grad=True)
-    tgt = _make_inputs(rwkv7_sn_inputs, device, "bfloat16", grad=True)
+    ref = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", grad=True)
+    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", grad=True)
 
-    g_ref = grads(rwkv7_sn_native_op, ref)
-    g_tgt = grads(rwkv7_sn_triton_op, tgt)
+    g_ref = grads(rwkv7_sane_native_op, ref)
+    g_tgt = grads(rwkv7_sane_triton_op, tgt)
 
     thresholds = {
         "r": (1e-4, 1e-2),

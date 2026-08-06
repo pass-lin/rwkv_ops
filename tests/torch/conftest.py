@@ -118,94 +118,94 @@ def rwkv7_rnn_op(rwkv7_shape):
 
 
 @pytest.fixture(scope="session")
-def rwkv7_sn_op(rwkv7_shape):
-    """RWKV-7-SN Torch CUDA 训练算子。
+def rwkv7_sane_op(rwkv7_shape):
+    """RWKV-7-SANE Torch CUDA 训练算子。
 
     Args:
         rwkv7_shape: tuple, (B, T, H, K)。
 
     Returns:
-        Callable: HEAD_SIZE=K 的 RWKV-7-SN CUDA 训练 kernel。
+        Callable: HEAD_SIZE=K 的 RWKV-7-SANE CUDA 训练 kernel。
     """
-    from rwkv_ops import get_generalized_delta_rule_sn
+    from rwkv_ops import get_generalized_delta_rule_sane
 
     _, _, _, K = rwkv7_shape
-    op, _ = get_generalized_delta_rule_sn(HEAD_SIZE=K, KERNEL_TYPE="cuda")
+    op, _ = get_generalized_delta_rule_sane(HEAD_SIZE=K, KERNEL_TYPE="cuda")
     return op
 
 
 @pytest.fixture(scope="session")
-def rwkv7_sn_inference_op(rwkv7_shape):
-    """RWKV-7-SN Torch CUDA 推理算子。
+def rwkv7_sane_inference_op(rwkv7_shape):
+    """RWKV-7-SANE Torch CUDA 推理算子。
 
     Args:
         rwkv7_shape: tuple, (B, T, H, K)。
 
     Returns:
-        Callable: HEAD_SIZE=K 的 RWKV-7-SN CUDA 推理 kernel。
+        Callable: HEAD_SIZE=K 的 RWKV-7-SANE CUDA 推理 kernel。
     """
-    from rwkv_ops import get_generalized_delta_rule_sn
+    from rwkv_ops import get_generalized_delta_rule_sane
 
     _, _, _, K = rwkv7_shape
-    _, op = get_generalized_delta_rule_sn(HEAD_SIZE=K, KERNEL_TYPE="cuda")
+    _, op = get_generalized_delta_rule_sane(HEAD_SIZE=K, KERNEL_TYPE="cuda")
     return op
 
 
 @pytest.fixture(scope="session")
-def rwkv7_sn_native_op(rwkv7_shape):
-    """RWKV-7-SN native Keras 参考算子。
+def rwkv7_sane_native_op(rwkv7_shape):
+    """RWKV-7-SANE native Keras 参考算子。
 
     Returns:
-        Callable: RWKV-7-SN native_keras_op.generalized_delta_rule_sn。
+        Callable: RWKV-7-SANE native_keras_op.generalized_delta_rule_sane。
     """
-    from rwkv_ops.rwkv7_sn_kernel.native_keras_op import generalized_delta_rule_sn
+    from rwkv_ops.rwkv7_sane_kernel.native_keras_op import generalized_delta_rule_sane
 
-    return generalized_delta_rule_sn
+    return generalized_delta_rule_sane
 
 
 @pytest.fixture(scope="session")
-def rwkv7_sn_rnn_native_op(rwkv7_shape):
-    """RWKV-7-SN native Keras 单步 RNN 参考算子。
+def rwkv7_sane_rnn_native_op(rwkv7_shape):
+    """RWKV-7-SANE native Keras 单步 RNN 参考算子。
 
     Returns:
-        Callable: RWKV-7-SN native_keras_op.generalized_delta_rule_sn_single_step。
+        Callable: RWKV-7-SANE native_keras_op.generalized_delta_rule_sane_single_step。
     """
-    from rwkv_ops.rwkv7_sn_kernel.native_keras_op import (
-        generalized_delta_rule_sn_single_step,
+    from rwkv_ops.rwkv7_sane_kernel.native_keras_op import (
+        generalized_delta_rule_sane_single_step,
     )
 
-    return generalized_delta_rule_sn_single_step
+    return generalized_delta_rule_sane_single_step
 
 
 @pytest.fixture(scope="session")
-def rwkv7_sn_rnn_op(rwkv7_shape):
-    """RWKV-7-SN Torch CUDA 单步 RNN 算子。
+def rwkv7_sane_rnn_op(rwkv7_shape):
+    """RWKV-7-SANE Torch CUDA 单步 RNN 算子。
 
     Args:
         rwkv7_shape: tuple, (B, T, H, K)。
 
     Returns:
-        Callable: HEAD_SIZE=K 的 RWKV-7-SN 单步 CUDA kernel。
+        Callable: HEAD_SIZE=K 的 RWKV-7-SANE 单步 CUDA kernel。
     """
-    from rwkv_ops import get_rnn_generalized_delta_rule_sn
+    from rwkv_ops import get_rnn_generalized_delta_rule_sane
 
     _, _, _, K = rwkv7_shape
-    return get_rnn_generalized_delta_rule_sn(HEAD_SIZE=K, KERNEL_TYPE="cuda")
+    return get_rnn_generalized_delta_rule_sane(HEAD_SIZE=K, KERNEL_TYPE="cuda")
 
 
 @pytest.fixture(scope="session")
-def rwkv7_sn_triton_op(rwkv7_shape):
-    """RWKV-7-SN Torch Triton 训练算子。
+def rwkv7_sane_triton_op(rwkv7_shape):
+    """RWKV-7-SANE Torch Triton 训练算子。
 
     Args:
         rwkv7_shape: tuple, (B, T, H, K)。
 
     Returns:
-        Callable: HEAD_SIZE=K 的 RWKV-7-SN Triton 训练 kernel。
+        Callable: HEAD_SIZE=K 的 RWKV-7-SANE Triton 训练 kernel。
     """
     pytest.importorskip("triton")
-    from rwkv_ops import get_generalized_delta_rule_sn
+    from rwkv_ops import get_generalized_delta_rule_sane
 
     _, _, _, K = rwkv7_shape
-    op, _ = get_generalized_delta_rule_sn(HEAD_SIZE=K, KERNEL_TYPE="triton")
+    op, _ = get_generalized_delta_rule_sane(HEAD_SIZE=K, KERNEL_TYPE="triton")
     return op

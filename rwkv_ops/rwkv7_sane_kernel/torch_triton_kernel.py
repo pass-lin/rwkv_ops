@@ -1,4 +1,4 @@
-"""PyTorch 版 RWKV7-SN Triton kernel 封装。"""
+"""PyTorch 版 RWKV7-SANE Triton kernel 封装。"""
 
 import warnings
 
@@ -7,10 +7,10 @@ from keras.src.backend.torch.core import cast
 from keras.src.backend.torch.numpy import transpose
 
 from .triton_kernel import (
-    rwkv7_sn_bwd_kernel,
-    rwkv7_sn_bwd_kernel_with_mask,
-    rwkv7_sn_fwd_kernel,
-    rwkv7_sn_fwd_kernel_with_mask,
+    rwkv7_sane_bwd_kernel,
+    rwkv7_sane_bwd_kernel_with_mask,
+    rwkv7_sane_fwd_kernel,
+    rwkv7_sane_fwd_kernel_with_mask,
 )
 
 
@@ -21,8 +21,8 @@ def transpose_head(x, head_first):
     return x
 
 
-def _apply_sn_to_final_state(state, tau, mask=None):
-    """对最终 state 应用 State Neutralization。
+def _apply_sane_to_final_state(state, tau, mask=None):
+    """对最终 state 应用 State Anomaly Neutralization。
 
     Args:
         state: [B, N, H, H], float32。
@@ -35,15 +35,15 @@ def _apply_sn_to_final_state(state, tau, mask=None):
     B, N, H, _ = state.shape
     last_tau = tau[:, :, -1].view(B, N, 1, 1)
     tau_safe = torch.clamp(last_tau, min=1e-6)
-    sn_state = last_tau * torch.tanh(state / tau_safe)
+    sane_state = last_tau * torch.tanh(state / tau_safe)
     if mask is None:
-        return sn_state
+        return sane_state
     last_mask = mask[:, -1].view(B, 1, 1, 1)
-    return torch.where(last_mask > 0, sn_state, state)
+    return torch.where(last_mask > 0, sane_state, state)
 
 
 class TritonSnWindBacksteppingWithMask(torch.autograd.Function):
-    """带 mask 的 SN Triton 训练算子。"""
+    """带 mask 的 SANE Triton 训练算子。"""
 
     @staticmethod
     def forward(ctx, w, q, k, v, a, b, tau, mask, h0):
@@ -55,7 +55,7 @@ class TritonSnWindBacksteppingWithMask(torch.autograd.Function):
             raise ValueError(f"Sequence length T={T} must be divisible by {CHUNK_LEN}")
         if H != 64:
             raise ValueError(
-                f"Triton SN kernel currently only supports Head Size = 64, got {H}"
+                f"Triton SANE kernel currently only supports Head Size = 64, got {H}"
             )
 
         out = torch.empty_like(v)
@@ -67,7 +67,7 @@ class TritonSnWindBacksteppingWithMask(torch.autograd.Function):
         def grid(META):
             return ((B + META["MINI_BSZ"] - 1) // META["MINI_BSZ"], N)
 
-        rwkv7_sn_fwd_kernel_with_mask[grid](
+        rwkv7_sane_fwd_kernel_with_mask[grid](
             R=q,
             W=w,
             K=k,
@@ -90,7 +90,7 @@ class TritonSnWindBacksteppingWithMask(torch.autograd.Function):
         ctx.save_for_backward(w, q, k, v, a, b, tau, mask, state_chkp, sa_out)
 
         last_state = state_chkp[:, :, -1, :, :].clone()
-        last_state = _apply_sn_to_final_state(last_state, tau, mask=mask)
+        last_state = _apply_sane_to_final_state(last_state, tau, mask=mask)
         return out.to(DTYPE), last_state
 
     @staticmethod
@@ -118,7 +118,7 @@ class TritonSnWindBacksteppingWithMask(torch.autograd.Function):
         def grid(META):
             return ((B + META["MINI_BSZ"] - 1) // META["MINI_BSZ"], N)
 
-        rwkv7_sn_bwd_kernel_with_mask[grid](
+        rwkv7_sane_bwd_kernel_with_mask[grid](
             R=q,
             W=w,
             K=k,
@@ -160,7 +160,7 @@ class TritonSnWindBacksteppingWithMask(torch.autograd.Function):
 
 
 class TritonSnWindBacksteppingNoMask(torch.autograd.Function):
-    """无 mask 的 SN Triton 训练算子（chunk 边界无条件 SN）。"""
+    """无 mask 的 SANE Triton 训练算子（chunk 边界无条件 SANE）。"""
 
     @staticmethod
     def forward(ctx, w, q, k, v, a, b, tau, h0):
@@ -172,7 +172,7 @@ class TritonSnWindBacksteppingNoMask(torch.autograd.Function):
             raise ValueError(f"Sequence length T={T} must be divisible by {CHUNK_LEN}")
         if H != 64:
             raise ValueError(
-                f"Triton SN kernel currently only supports Head Size = 64, got {H}"
+                f"Triton SANE kernel currently only supports Head Size = 64, got {H}"
             )
 
         out = torch.empty_like(v)
@@ -184,7 +184,7 @@ class TritonSnWindBacksteppingNoMask(torch.autograd.Function):
         def grid(META):
             return ((B + META["MINI_BSZ"] - 1) // META["MINI_BSZ"], N)
 
-        rwkv7_sn_fwd_kernel[grid](
+        rwkv7_sane_fwd_kernel[grid](
             R=q,
             W=w,
             K=k,
@@ -206,7 +206,7 @@ class TritonSnWindBacksteppingNoMask(torch.autograd.Function):
         ctx.save_for_backward(w, q, k, v, a, b, tau, state_chkp, sa_out)
 
         last_state = state_chkp[:, :, -1, :, :].clone()
-        last_state = _apply_sn_to_final_state(last_state, tau, mask=None)
+        last_state = _apply_sane_to_final_state(last_state, tau, mask=None)
         return out.to(DTYPE), last_state
 
     @staticmethod
@@ -234,7 +234,7 @@ class TritonSnWindBacksteppingNoMask(torch.autograd.Function):
         def grid(META):
             return ((B + META["MINI_BSZ"] - 1) // META["MINI_BSZ"], N)
 
-        rwkv7_sn_bwd_kernel[grid](
+        rwkv7_sane_bwd_kernel[grid](
             R=q,
             W=w,
             K=k,
@@ -273,7 +273,7 @@ class TritonSnWindBacksteppingNoMask(torch.autograd.Function):
         )
 
 
-def generalized_delta_rule_sn(
+def generalized_delta_rule_sane(
     r,
     w,
     k,
@@ -286,13 +286,13 @@ def generalized_delta_rule_sn(
     output_final_state=True,
     head_first=False,
 ):
-    """带 State Neutralization 的 RWKV-7 广义 delta 规则（Torch-Triton chunkwise 训练版）。
+    """带 State Anomaly Neutralization 的 RWKV-7 广义 delta 规则（Torch-Triton chunkwise 训练版）。
 
     Args:
         r, w, k, v, a, b: [B, T, H, K]（head_first=False）或 [B, H, T, K]（head_first=True），bfloat16。
             T 必须被 16 整除；当前 Triton kernel 仅支持 K=64。
         tau: [B, T//16, H]，float32。阈值，必须严格 > 1。
-        mask: [B, T//16]，float32 或 None。>0 的 chunk 边界执行 SN；
+        mask: [B, T//16]，float32 或 None。>0 的 chunk 边界执行 SANE；
             仅当 output_final_state=True 时生效。
         initial_state: [B, H, K, K] 或 [1, H, K, K]，float32，可选。
         output_final_state: bool，是否返回最终 state。
@@ -307,9 +307,9 @@ def generalized_delta_rule_sn(
         ValueError: T 不被 16 整除，或 K 不等于 64，或 tau/mask 形状不匹配。
     """
     if w.device.type != "cuda":
-        from .native_keras_op import generalized_delta_rule_sn
+        from .native_keras_op import generalized_delta_rule_sane
 
-        return generalized_delta_rule_sn(
+        return generalized_delta_rule_sane(
             r=r,
             w=w,
             k=k,
@@ -339,7 +339,7 @@ def generalized_delta_rule_sn(
 
     if T % CHUNK_LEN != 0:
         raise ValueError(
-            f"Triton SN kernel requires sequence length T={T} to be divisible by {CHUNK_LEN}"
+            f"Triton SANE kernel requires sequence length T={T} to be divisible by {CHUNK_LEN}"
         )
 
     # tau 公共接口为 [B, T//16, N]；转成 [B, N, T//16]。
@@ -382,10 +382,10 @@ def generalized_delta_rule_sn(
         return out, state
 
     warnings.warn(
-        "[rwkv7_sn] mask is None: 使用无条件 State Neutralization 算子。"
+        "[rwkv7_sane] mask is None: 使用无条件 State Anomaly Neutralization 算子。"
         "由于未提供 padding mask，返回的 final_state 可能被污染，"
         "因此已将其设为 None。如需 final_state 请提供显式 mask。\n"
-        "[rwkv7_sn] mask is None: using unconditional State Neutralization. "
+        "[rwkv7_sane] mask is None: using unconditional State Anomaly Neutralization. "
         "The returned final_state is set to None because padding chunks "
         "may contaminate the state. Provide an explicit mask to obtain final_state.",
         UserWarning,
@@ -394,7 +394,7 @@ def generalized_delta_rule_sn(
     return out, None
 
 
-def generalized_delta_rule_sn_inference(
+def generalized_delta_rule_sane_inference(
     r,
     w,
     k,
@@ -408,7 +408,7 @@ def generalized_delta_rule_sn_inference(
     head_first=False,
 ):
     """Triton 版本推理入口：直接复用训练 kernel，T 仍需被 16 整除。"""
-    return generalized_delta_rule_sn(
+    return generalized_delta_rule_sane(
         r=r,
         w=w,
         k=k,
@@ -423,6 +423,6 @@ def generalized_delta_rule_sn_inference(
     )
 
 
-def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
+def get_torch_generalized_delta_rule_sane(HEAD_SIZE=64):
     """返回 Torch-Triton 后端的 (训练算子, 推理算子)。"""
-    return [generalized_delta_rule_sn, generalized_delta_rule_sn_inference]
+    return [generalized_delta_rule_sane, generalized_delta_rule_sane_inference]

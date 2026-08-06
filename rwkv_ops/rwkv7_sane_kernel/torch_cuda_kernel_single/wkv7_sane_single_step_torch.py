@@ -3,7 +3,7 @@ import torch
 from torch.utils.cpp_extension import load
 
 
-def get_torch_generalized_delta_rule_sn_single_step(HEAD_SIZE=64):
+def get_torch_generalized_delta_rule_sane_single_step(HEAD_SIZE=64):
     flags = [
         "-res-usage",
         f"-D_C_={HEAD_SIZE}",
@@ -15,19 +15,19 @@ def get_torch_generalized_delta_rule_sn_single_step(HEAD_SIZE=64):
     ]
     current_dir = os.path.dirname(os.path.abspath(__file__))
     load(
-        name="wind_backstepping_sn_single_step",
+        name="wind_backstepping_sane_single_step",
         sources=[
-            os.path.join(current_dir, "wkv7_sn_single_step_cuda.cu"),
-            os.path.join(current_dir, "wkv7_sn_single_step_op.cpp"),
+            os.path.join(current_dir, "wkv7_sane_single_step_cuda.cu"),
+            os.path.join(current_dir, "wkv7_sane_single_step_op.cpp"),
         ],
         is_python_module=False,
         verbose=False,
         extra_cuda_cflags=flags,
     )
 
-    class WindBacksteppingSNSingleStep(torch.autograd.Function):
+    class WindBacksteppingSANESingleStep(torch.autograd.Function):
         @staticmethod
-        def forward(ctx, w, q, k, v, a, b, tau, do_sn, h0):
+        def forward(ctx, w, q, k, v, a, b, tau, do_sane, h0):
             DTYPE = q.dtype
             w = w.contiguous().bfloat16()
             q = q.contiguous().bfloat16()
@@ -36,12 +36,12 @@ def get_torch_generalized_delta_rule_sn_single_step(HEAD_SIZE=64):
             a = a.contiguous().bfloat16()
             b = b.contiguous().bfloat16()
             tau = tau.contiguous().float()
-            do_sn = do_sn.contiguous().to(torch.int8)
+            do_sane = do_sane.contiguous().to(torch.int8)
             h0 = h0.contiguous().float()
             y = torch.empty_like(v)
             h1 = torch.empty_like(h0)
-            torch.ops.wind_backstepping_sn_single_step.forward_single_step_sn(
-                w, q, k, v, a, b, tau, do_sn, h0, y, h1
+            torch.ops.wind_backstepping_sane_single_step.forward_single_step_sane(
+                w, q, k, v, a, b, tau, do_sane, h0, y, h1
             )
             return y.to(DTYPE), h1
 
@@ -49,10 +49,10 @@ def get_torch_generalized_delta_rule_sn_single_step(HEAD_SIZE=64):
         def backward(ctx, *grads):
             raise NotImplementedError("single-step kernel does not support backward")
 
-    def run_single_step(w, q, k, v, a, b, tau, do_sn, h0):
-        return WindBacksteppingSNSingleStep.apply(w, q, k, v, a, b, tau, do_sn, h0)
+    def run_single_step(w, q, k, v, a, b, tau, do_sane, h0):
+        return WindBacksteppingSANESingleStep.apply(w, q, k, v, a, b, tau, do_sane, h0)
 
-    def generalized_delta_rule_sn_single_step(
+    def generalized_delta_rule_sane_single_step(
         r,
         w,
         k,
@@ -60,15 +60,15 @@ def get_torch_generalized_delta_rule_sn_single_step(HEAD_SIZE=64):
         a,
         b,
         tau,
-        do_sn,
+        do_sane,
         initial_state=None,
         output_final_state=True,
         head_first=False,
     ):
         if w.device.type != "cuda":
-            from ..native_keras_op import generalized_delta_rule_sn_single_step
+            from ..native_keras_op import generalized_delta_rule_sane_single_step
 
-            return generalized_delta_rule_sn_single_step(
+            return generalized_delta_rule_sane_single_step(
                 r=r,
                 w=w,
                 k=k,
@@ -76,7 +76,7 @@ def get_torch_generalized_delta_rule_sn_single_step(HEAD_SIZE=64):
                 a=a,
                 b=b,
                 tau=tau,
-                do_sn=do_sn,
+                do_sane=do_sane,
                 initial_state=initial_state,
                 output_final_state=output_final_state,
                 head_first=head_first,
@@ -110,14 +110,14 @@ def get_torch_generalized_delta_rule_sn_single_step(HEAD_SIZE=64):
                 B, H, K, K, dtype=torch.float32, device=r.device
             )
 
-        if isinstance(do_sn, bool):
-            do_sn = torch.full((B,), int(do_sn), dtype=torch.int8, device=r.device)
+        if isinstance(do_sane, bool):
+            do_sane = torch.full((B,), int(do_sane), dtype=torch.int8, device=r.device)
         else:
-            do_sn = do_sn.to(torch.int8)
+            do_sane = do_sane.to(torch.int8)
 
-        y, h1 = run_single_step(w, r, k, v, a, b, tau, do_sn, initial_state)
+        y, h1 = run_single_step(w, r, k, v, a, b, tau, do_sane, initial_state)
         y = y.unsqueeze(1)
 
         return (y, h1) if output_final_state else y
 
-    return generalized_delta_rule_sn_single_step
+    return generalized_delta_rule_sane_single_step

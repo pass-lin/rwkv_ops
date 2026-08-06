@@ -16,12 +16,12 @@ _CLEAN_PATTERNS = [
     # RWKV-7 single-step JAX FFI
     "rwkv_ops/rwkv7_kernel/jax_cuda_kernel_single/build_*",
     "rwkv_ops/rwkv7_kernel/jax_cuda_kernel_single/*.so",
-    # RWKV-7-sn single-step JAX FFI
-    "rwkv_ops/rwkv7_sn_kernel/jax_cuda_kernel/build_*",
-    "rwkv_ops/rwkv7_sn_kernel/jax_cuda_kernel/*.so",
-    # RWKV-7-sn single-step JAX FFI
-    "rwkv_ops/rwkv7_sn_kernel/jax_cuda_kernel_single/build_*",
-    "rwkv_ops/rwkv7_sn_kernel/jax_cuda_kernel_single/*.so",
+    # RWKV-7-sane single-step JAX FFI
+    "rwkv_ops/rwkv7_sane_kernel/jax_cuda_kernel/build_*",
+    "rwkv_ops/rwkv7_sane_kernel/jax_cuda_kernel/*.so",
+    # RWKV-7-sane single-step JAX FFI
+    "rwkv_ops/rwkv7_sane_kernel/jax_cuda_kernel_single/build_*",
+    "rwkv_ops/rwkv7_sane_kernel/jax_cuda_kernel_single/*.so",
     # 根目录 ninja 日志
     ".ninja_log",
     ".ninja_deps",

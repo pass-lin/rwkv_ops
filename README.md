@@ -34,10 +34,10 @@
   - [背景](#背景)
   - [使用方法](#使用方法)
   - [rwkv7_op_rnn 实现状态](#rwkv7_op_rnn-实现状态)
-- [rwkv7op_sn 使用方法](#rwkv7op_sn-使用方法)
-  - [rwkv7op_sn 实现状态](#rwkv7op_sn-实现状态)
-- [rwkv7_op_sn_rnn 使用方法](#rwkv7_op_sn_rnn-使用方法)
-  - [rwkv7_op_sn_rnn 实现状态](#rwkv7_op_sn_rnn-实现状态)
+- [rwkv7op_sane 使用方法](#rwkv7op_sane-使用方法)
+  - [rwkv7op_sane 实现状态](#rwkv7op_sane-实现状态)
+- [rwkv7_op_sane_rnn 使用方法](#rwkv7_op_sane_rnn-使用方法)
+  - [rwkv7_op_sane_rnn 实现状态](#rwkv7_op_sane_rnn-实现状态)
 - [rwkv6op 使用方法](#rwkv6op-使用方法)
 - [分布式并行（JAX）](#分布式并行)
   - [PyTorch 使用注意事项](#pytorch-使用注意事项)
@@ -68,7 +68,7 @@ pip install rwkv_ops
 | `RWKV_OPS_PALLAS_AUTOTUNE` | Pallas autotune 开关 | `1` / `0` | `1` | — |
 | `RWKV_OPS_KERAS_NATIVE` | 强制 native 为纯 keras ops | `1` / `0` | `0` | — |
 
-> `KERNEL_TYPE=native` 时按后端与平台分发实现：jax + GPU/TPU 用 Pallas kernel（rwkv7/rwkv7_sn）；torch + 非 CPU 用 Triton kernel（rwkv7/rwkv7_sn/mhc，pip 版 torch 自带 triton）；其余（CPU、mhc 的 jax 侧等）为纯 Keras ops。设 `RWKV_OPS_KERAS_NATIVE=1` 可强制全部为纯 Keras ops（调试用）。
+> `KERNEL_TYPE=native` 时按后端与平台分发实现：jax + GPU/TPU 用 Pallas kernel（rwkv7/rwkv7_sane）；torch + 非 CPU 用 Triton kernel（rwkv7/rwkv7_sane/mhc，pip 版 torch 自带 triton）；其余（CPU、mhc 的 jax 侧等）为纯 Keras ops。设 `RWKV_OPS_KERAS_NATIVE=1` 可强制全部为纯 Keras ops（调试用）。
 
 > 若 `KERNEL_BACKEND` 有值，直接采用；若为空，则用 `KERAS_BACKEND`；两者皆空则默认 `torch`。  
 
@@ -301,13 +301,13 @@ def rwkv7_op_rnn(
 1. native实现我们直接复用了rwkv7_op的native实现
 2. **这个算子没有梯度**
 
-<a id="rwkv7op_sn-使用方法"></a>
-## rwkv7op_sn 使用方法
+<a id="rwkv7op_sane-使用方法"></a>
+## rwkv7op_sane 使用方法
 
 ```python
-from rwkv_ops import generalized_delta_rule_sn, generalized_delta_rule_sn_inference
+from rwkv_ops import generalized_delta_rule_sane, generalized_delta_rule_sane_inference
 
-def generalized_delta_rule_sn(
+def generalized_delta_rule_sane(
     r,
     w,
     k,
@@ -315,17 +315,17 @@ def generalized_delta_rule_sn(
     a,
     b,
     tau,                  # [B, T//16, H]，float32，已预处理为 softplus(param)+1，必须 > 0
-    mask=None,            # [B, T//16]，float32，1 表示执行 SN，0 表示跳过；所有 head 共享
+    mask=None,            # [B, T//16]，float32，1 表示执行 SANE，0 表示跳过；所有 head 共享
     initial_state=None,
     output_final_state: bool = True,
     head_first: bool = False,
 ):
     """
-    带 State Neutralization 的 RWKV-7 广义 Delta 规则（训练 / prefill 通用）。
+    带 State Anomaly Neutralization 的 RWKV-7 广义 Delta 规则（训练 / prefill 通用）。
 
     调度规则：
     - 当 ``output_final_state=False`` 时，内部调用无 mask 算子，chunk 边界无条件
-      执行 State Neutralization，以节省 mask 读取/分支开销。
+      执行 State Anomaly Neutralization，以节省 mask 读取/分支开销。
     - 当 ``mask=None`` 且 ``output_final_state=True`` 时，同样调用无 mask 算子，
       但会弹出警告并把返回的 ``final_state`` 设为 ``None``，避免用户误用可能被
       padding 污染的 state。
@@ -334,7 +334,7 @@ def generalized_delta_rule_sn(
     Args:
         r, w, k, v, a, b: [B, T, H, K] 或 [B, H, T, K]，T 必须被 16 整除。
         tau: [B, T//16, H]，float32，必须 > 0。
-        mask: [B, T//16]，float32，0/1 标记每个 chunk 是否执行 State Neutralization；
+        mask: [B, T//16]，float32，0/1 标记每个 chunk 是否执行 State Anomaly Neutralization；
               只有需要返回 final_state 且显式提供时才生效。padding chunk 请置 0，
               并配合 k=0, a=0, w=-inf。
         initial_state: [B, H, K, K] 或 [1, H, K, K]。
@@ -347,12 +347,12 @@ def generalized_delta_rule_sn(
     """
 ```
 
-`generalized_delta_rule_sn_inference` 与 `generalized_delta_rule_sn` 接口一致，但**不计算梯度**，可节省显存。
+`generalized_delta_rule_sane_inference` 与 `generalized_delta_rule_sane` 接口一致，但**不计算梯度**，可节省显存。
 注意：推理 kernel 按 chunk 读取 `tau`，因此 `tau` 的长度只需等于 `T // 16`，
 **T 不再强制要求被 16 整除**；若需要任意长度 prefill，也可使用下方的单步 RNN 接口。
 
-<a id="rwkv7op_sn-实现状态"></a>
-### rwkv7op_sn 实现状态
+<a id="rwkv7op_sane-实现状态"></a>
+### rwkv7op_sane 实现状态
 
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
@@ -362,13 +362,13 @@ def generalized_delta_rule_sn(
 | NumPy       | ❌   | ❌     | ✅     |
 | OpenVINO    | ❌   | ❌     | ✅     |
 
-<a id="rwkv7_op_sn_rnn-使用方法"></a>
-## rwkv7_op_sn_rnn 使用方法
+<a id="rwkv7_op_sane_rnn-使用方法"></a>
+## rwkv7_op_sane_rnn 使用方法
 
 ```python
-from rwkv_ops import rwkv7_op_sn_rnn
+from rwkv_ops import rwkv7_op_sane_rnn
 
-def rwkv7_op_sn_rnn(
+def rwkv7_op_sane_rnn(
     r,                    # [B, 1, H, K] 或 [B, H, 1, K]
     w,
     k,
@@ -376,30 +376,30 @@ def rwkv7_op_sn_rnn(
     a,
     b,
     tau,                  # [B, H]，float32
-    do_sn,                # bool 或 [B] bool，True 表示本步后执行 State Neutralization
+    do_sane,                # bool 或 [B] bool，True 表示本步后执行 State Anomaly Neutralization
     initial_state=None,
     output_final_state: bool = True,
     head_first: bool = False,
 ):
     """
-    带 State Neutralization 的 RWKV-7 单步推理（RNN 模式）。
-    输出基于 SN 前的 State，state_out 已按 do_sn 应用 SN。
+    带 State Anomaly Neutralization 的 RWKV-7 单步推理（RNN 模式）。
+    输出基于 SANE 前的 State，state_out 已按 do_sane 应用 SANE。
     """
 ```
 
-调用示例（每 16 步触发一次 SN）：
+调用示例（每 16 步触发一次 SANE）：
 
 ```python
 for step in range(seq_len):
-    do_sn = (step % 16 == 15)
-    out, state = rwkv7_op_sn_rnn(
+    do_sane = (step % 16 == 15)
+    out, state = rwkv7_op_sane_rnn(
         r[step], w[step], k[step], v[step], a[step], b[step],
-        tau=tau, do_sn=do_sn, initial_state=state
+        tau=tau, do_sane=do_sane, initial_state=state
     )
 ```
 
-<a id="rwkv7_op_sn_rnn-实现状态"></a>
-### rwkv7_op_sn_rnn 实现状态
+<a id="rwkv7_op_sane_rnn-实现状态"></a>
+### rwkv7_op_sane_rnn 实现状态
 
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
@@ -422,15 +422,15 @@ JAX 侧所有加速算子都通过 `custom_partitioning` + einsum 风格 `shardi
 | 算子（jax） | DP (batch) | TP (head) |
 |---|---|---|
 | rwkv7 cuda / triton / pallas | ✅ | ✅ |
-| rwkv7_sn cuda / triton / pallas | ✅ | ✅ |
-| rwkv7 / rwkv7_sn 单步 cuda | ✅ | ✅ |
+| rwkv7_sane cuda / triton / pallas | ✅ | ✅ |
+| rwkv7 / rwkv7_sane 单步 cuda | ✅ | ✅ |
 | rwkv6 cuda | ✅ | ❌ |
 
 > rwkv6 的 channel 维（C = H × N）在分片规则中是一个整体，head 维未暴露，
-> 因此只支持按 batch 的数据并行；需要 TP 请使用 rwkv7 / rwkv7_sn。
+> 因此只支持按 batch 的数据并行；需要 TP 请使用 rwkv7 / rwkv7_sane。
 
 **只允许切 batch 或 head 维**；切 time 或 head_size 维会得到错误结果
-（扫描需要完整 T，state 需要完整 head_size）。SN 的 `tau` 带 head 维
+（扫描需要完整 T，state 需要完整 head_size）。SANE 的 `tau` 带 head 维
 （TP 可切）、`mask` 无 head 维（TP 下自动复制）。
 
 使用示例（TP：沿 head 维切分）：

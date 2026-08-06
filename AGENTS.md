@@ -16,7 +16,7 @@ rwkv_ops/
 ├── mhc_kernel/              # mHC (Multi-Head Control) 算子
 ├── rwkv6_kernel/            # RWKV-6 算子
 ├── rwkv7_kernel/            # RWKV-7 广义 delta rule 算子
-└── rwkv7_sn_kernel/         # RWKV-7 State Neutralization 算子
+└── rwkv7_sane_kernel/         # RWKV-7 State Anomaly Neutralization 算子
 
 tests/                       # pytest 测试目录（按后端隔离）
 ├── conftest.py              # 公共 fixtures / 数值对比工具（不 import 任何后端！）
@@ -41,9 +41,9 @@ MANIFEST.in                  # 源码分发清单
 | `generalized_delta_rule` / `rwkv7_op` | RWKV-7 训练算子（chunkwise） |
 | `generalized_delta_rule_inference` / `rwkv7_op_inference` | RWKV-7 推理算子（无梯度，省显存） |
 | `rnn_generalized_delta_rule` / `rwkv7_op_rnn` | RWKV-7 单步算子（T=1，用于 decode） |
-| `generalized_delta_rule_sn` / `rwkv7_op_sn` | RWKV-7-SN 训练算子 |
-| `generalized_delta_rule_sn_inference` / `rwkv7_op_sn_inference` | RWKV-7-SN 推理算子（T 不必被 16 整除） |
-| `rnn_generalized_delta_rule_sn` / `rwkv7_op_sn_rnn` | RWKV-7-SN 单步算子 |
+| `generalized_delta_rule_sane` / `rwkv7_op_sane` | RWKV-7-SANE 训练算子 |
+| `generalized_delta_rule_sane_inference` / `rwkv7_op_sane_inference` | RWKV-7-SANE 推理算子（T 不必被 16 整除） |
+| `rnn_generalized_delta_rule_sane` / `rwkv7_op_sane_rnn` | RWKV-7-SANE 单步算子 |
 | `rwkv6_op` / `RWKV6_OP` | RWKV-6 函数式算子（`RWKV6_OP` 为兼容别名） |
 | `mhc_pre_op` / `mhc_post_op` | mHC 预处理/后处理算子 |
 | `get_generalized_delta_rule` 等 6 个工厂函数 | 按 head_size / KERNEL_TYPE 获取算子 |
@@ -72,8 +72,8 @@ MANIFEST.in                  # 源码分发清单
 `KERNEL_TYPE` 决定具体实现：
 
 - `native`：可移植实现，"装好库即可用"。具体实现按后端与平台分发：
-  - **jax + GPU/TPU** = Pallas kernel（rwkv7/rwkv7_sn；pallas 随 jax 自带）。
-  - **torch + 非 CPU（CUDA/ROCm/XPU）** = Triton kernel（rwkv7/rwkv7_sn/mhc；
+  - **jax + GPU/TPU** = Pallas kernel（rwkv7/rwkv7_sane；pallas 随 jax 自带）。
+  - **torch + 非 CPU（CUDA/ROCm/XPU）** = Triton kernel（rwkv7/rwkv7_sane/mhc；
     pip 版 torch 自带 triton；XPU/ROCm 未实测，按"非 CPU 且 triton 可导入"开放）。
   - 其余（CPU、tensorflow、numpy、openvino、mhc 的 jax 侧）= 纯 Keras ops
     （ground truth）。mhc 的 jax triton 桥接依赖额外的 jax-triton 包，
@@ -81,7 +81,7 @@ MANIFEST.in                  # 源码分发清单
   - 设 `RWKV_OPS_KERAS_NATIVE=1` 可强制 jax/torch 的 native 都用纯 keras ops
     （无 kernel 的调试/数值对照）。
 - `cuda`：手写 CUDA kernel（Torch C++ 扩展 / JAX FFI）。
-- `triton`：Triton 实现（rwkv7 / rwkv7_sn / mhc）。
+- `triton`：Triton 实现（rwkv7 / rwkv7_sane / mhc）。
 
 **缺硬件静默回退**：各工厂在硬件/库不可用时不报错，直接回退 native
 （例如 torch 无 CUDA、jax 不在 GPU/TPU 上时回到纯 keras ops）。
@@ -98,7 +98,7 @@ MANIFEST.in                  # 源码分发清单
 | NumPy     | ❌   | ❌     | ✅     |
 | OpenVINO  | ❌   | ❌     | ✅     |
 
-#### RWKV-7-SN `generalized_delta_rule_sn`
+#### RWKV-7-SANE `generalized_delta_rule_sane`
 
 同 rwkv7op（PyTorch/JAX 全后端 ✅，其余仅 native）。
 
@@ -106,7 +106,7 @@ MANIFEST.in                  # 源码分发清单
 > Torch 后端的 `native` 在非 CPU 平台为 Triton 实现，其余为纯 Keras ops；
 > 单步 RNN 无 pallas 版本。
 
-#### RWKV-7 `rwkv7_op_rnn` / SN `rwkv7_op_sn_rnn` (T=1)
+#### RWKV-7 `rwkv7_op_rnn` / SANE `rwkv7_op_sane_rnn` (T=1)
 
 | Framework | cuda | triton | native |
 |-----------|------|--------|--------|
@@ -151,16 +151,16 @@ jax 侧所有加速算子都用 `custom_partitioning` + einsum 风格 `sharding_
 | 算子（jax） | DP (batch) | TP (head) |
 |---|---|---|
 | rwkv7 cuda / triton / pallas | ✅ | ✅ |
-| rwkv7_sn cuda / triton / pallas | ✅ | ✅（含 1-device TP 结构测试） |
-| rwkv7 / rwkv7_sn 单步 cuda | ✅ | ✅ |
+| rwkv7_sane cuda / triton / pallas | ✅ | ✅（含 1-device TP 结构测试） |
+| rwkv7 / rwkv7_sane 单步 cuda | ✅ | ✅ |
 | rwkv6 cuda | ✅ | ❌（channel 融合为 `c`，head 维未暴露） |
 
 - 规则字母：`b`=batch、`n`/`h`=head、`t`=time、`k`/`m`/`n`=head_size、
   `c`=chunk（rwkv6 的 `c` 是融合 channel）。
 - **只允许切 batch 或 head 维**；切 time 或 head_size 维会静默算错
   （扫描需要完整 T，state 需要完整 head_size）。
-- SN 的 `tau`/`mask` 已按规则覆盖：tau 带 head 维（TP 可切）、mask 无 head 维
-  （TP 下自动 replicate）；单步的 `do_sn` 仅 batch 维。
+- SANE 的 `tau`/`mask` 已按规则覆盖：tau 带 head 维（TP 可切）、mask 无 head 维
+  （TP 下自动 replicate）；单步的 `do_sane` 仅 batch 维。
 - `infer_sharding_from_operands` 按输出实际维度重建 `NamedSharding`
   （state checkpoint / final_state / dtau 等不是输入同形张量）。
 - 单卡可用 1-device mesh 做结构验证（编译通过 + 输出 spec 正确传播 +
@@ -174,7 +174,7 @@ jax 侧所有加速算子都用 `custom_partitioning` + einsum 风格 `sharding_
 
 ### 3.1 每个算子家族的目录结构模式
 
-以 `rwkv7_kernel` 为例（`rwkv7_sn_kernel` 完全平行）：
+以 `rwkv7_kernel` 为例（`rwkv7_sane_kernel` 完全平行）：
 
 ```text
 rwkv7_kernel/
@@ -236,36 +236,36 @@ y_t = state_t @ r_t
 - `triton` 后端固定支持 `HEAD_SIZE == 64`；其他 head_size 用 `cuda`
   （`head_size` 经 `-D_C_` 编译进内核，按 head_size 懒编译）。
 - 单步 `get_rnn_generalized_delta_rule` 只支持 cuda，其余 KERNEL_TYPE 回退 native。
-- 单步 cuda 桥接（rwkv7/sn）带 `custom_partitioning` 分片规则，支持 DP（batch）
-  与 TP（head）：`b h k ... b h k m -> b h k, b h k m`；SN 单步的 tau 为
-  `[B, H]`（per-head）、`do_sn` 为 `[B]`（per-sample），规则同样覆盖。
+- 单步 cuda 桥接（rwkv7/sane）带 `custom_partitioning` 分片规则，支持 DP（batch）
+  与 TP（head）：`b h k ... b h k m -> b h k, b h k m`；SANE 单步的 tau 为
+  `[B, H]`（per-head）、`do_sane` 为 `[B]`（per-sample），规则同样覆盖。
 
-### 4.2 RWKV-7 State Neutralization（`rwkv7_sn_kernel`）
+### 4.2 RWKV-7 State Anomaly Neutralization（`rwkv7_sane_kernel`）
 
-在 RWKV-7 递推之上，于 chunk 边界（每 16 tokens）做 State Neutralization：
+在 RWKV-7 递推之上，于 chunk 边界（每 16 tokens）做 State Anomaly Neutralization：
 
 ```text
-sn_state = tau * tanh(state / tau)      # 软裁剪到 [-tau, tau]
+sane_state = tau * tanh(state / tau)      # 软裁剪到 [-tau, tau]
 ```
 
 - **tau 语义**：只接收预处理后的 `tau = softplus(param) + 1.0`，严格 > 1，
   形状 `[B, T//16, H]`（per-head per-chunk）。
 - **mask 语义**：`[B, T//16]` per-chunk，所有 head 共享。mask=1 在 chunk 边界
-  执行 SN；mask=0 保留原 state。不再用 `tau=0.0` 兼任 mask；全 padding chunk
-  的 mask 须置 0。kernel 用 `mask * sn_state + (1 - mask) * state` 的 blend 形式，
+  执行 SANE；mask=0 保留原 state。不再用 `tau=0.0` 兼任 mask；全 padding chunk
+  的 mask 须置 0。kernel 用 `mask * sane_state + (1 - mask) * state` 的 blend 形式，
   避免 warp 分支。
 - **padding 处理**：padding 位仍需保证 `k=0, a=0, w=-inf`，且对应 chunk mask=0。
-- **输出与 State 的关系**：输出始终基于 SN **之前**的 State；SN 只修改传递给
-  下一步/下一 chunk 的 State。训练 kernel 的 checkpoint 保存 **SN 之前** 的
+- **输出与 State 的关系**：输出始终基于 SANE **之前**的 State；SANE 只修改传递给
+  下一步/下一 chunk 的 State。训练 kernel 的 checkpoint 保存 **SANE 之前** 的
   State 供反向使用；反向先算 `dtau`，再把 `dstate`/`dstateT` 乘 `sech2`。
 - **无 mask 算子**：`output_final_state=False` 或 `mask=None` 时调用独立
-  no-mask kernel（chunk 边界无条件 SN，不读 mask、不算 blend）。
+  no-mask kernel（chunk 边界无条件 SANE，不读 mask、不算 blend）。
   `mask=None` 且 `output_final_state=True` 时 Python 入口发双语 UserWarning
   并把 `final_state` 置为 `None`（避免误用被 padding 污染的 state）。
-- **推理 kernel**：`generalized_delta_rule_sn_inference` 只输出 y 与最终 state，
+- **推理 kernel**：`generalized_delta_rule_sane_inference` 只输出 y 与最终 state，
   显存显著低于训练版；按 chunk 读 tau，**T 不要求被 16 整除**。任意长度
-  prefill 也可用单步 `generalized_delta_rule_sn_single_step`（每步算 SN，
-  按 per-sample `do_sn` 选择）。
+  prefill 也可用单步 `generalized_delta_rule_sane_single_step`（每步算 SANE，
+  按 per-sample `do_sane` 选择）。
 - **分片**：JAX `custom_partitioning` 的 sharding rule 支持 head 轴 TP；
   `infer_sharding_from_operands` 按输出实际维度重建 `NamedSharding`；
   mask 无 head 维，自动 replicate；Torch 侧按 head 独立 launch 即可 TP。
@@ -407,7 +407,7 @@ pytest tests/jax -v -m "not slow"
 - `rng` 固定种子 42；`rwkv7_shape = (5, 128, 6, 64)`（B, T, H, K）。
 - `rwkv7_inputs`：`r/k/v ~ N(0,1)`；`a`、`b` 为同一 z 的 ±单位向量（b = -a）；
   `w = -softplus(w_raw) - 0.5`；`h0 ~ N(0,1)`。
-- `rwkv7_sn_inputs`：加 `tau`，`x ~ N(7.0, 0.5)`、`tau = softplus(x) + 1.0`
+- `rwkv7_sane_inputs`：加 `tau`，`x ~ N(7.0, 0.5)`、`tau = softplus(x) + 1.0`
   （tau ≈ 1000，近似恒等映射），形状 `[B, T//16, H]`。
 - **递推数值对拍必须用这些 fixture 的稳定分布**；随手造的随机数据会让
   delta-rule 递推指数发散，f32 参考自身误差都能到 1e5，无法用于判定。
@@ -419,12 +419,12 @@ pytest tests/jax -v -m "not slow"
 - 新增/修改加速内核必须覆盖：前向输出与 final_state vs native；反向梯度
   vs native 自动微分；mask 全 1 / 全 0 / 随机 mask 等价性；
   `head_first=True/False` 两种 layout。
-- SN 类算子额外镜像覆盖：带/不带 mask 的前向+反向（含 tau 梯度）、无 mask
+- SANE 类算子额外镜像覆盖：带/不带 mask 的前向+反向（含 tau 梯度）、无 mask
   警告 + None state、任意长度推理（T=34）、不规则 padding、head 轴 TP（jax）。
 - 统一模式：同一组 numpy 输入分别喂 native 与加速算子，输入 cast bf16
   （state/tau/mask 保持 f32），loss 用 `mean(y²) + mean(state²)`。
 - 容差惯例：
-  - RWKV-7 前向 y atol=1e-5 / rtol=1e-2（SN 的 y 放宽到 atol=1e-4）；
+  - RWKV-7 前向 y atol=1e-5 / rtol=1e-2（SANE 的 y 放宽到 atol=1e-4）；
     final_state atol=1e-5 / rtol=1e-3；反向 grad atol=7e-3 / rtol=1e-3
     （grad_b 放宽到 1e-2）。
   - RWKV-6 / mHC：一律 1e-2 / 1e-2。
@@ -479,18 +479,18 @@ pytest tests/jax -v -m "not slow"
 **函数 docstring 示例**
 
 ```python
-def generalized_delta_rule_sn(r, w, k, v, a, b, tau, mask=None,
+def generalized_delta_rule_sane(r, w, k, v, a, b, tau, mask=None,
                               initial_state=None, output_final_state=True,
                               head_first=False):
-    """带 State Neutralization 的 RWKV-7 广义 delta 规则（chunkwise 训练版）。
+    """带 State Anomaly Neutralization 的 RWKV-7 广义 delta 规则（chunkwise 训练版）。
 
     在 chunk 边界（每 16 个 token）按 mask 对 state 执行
-    `state = tau * tanh(state / tau)`；输出始终基于 SN 之前的 state。
+    `state = tau * tanh(state / tau)`；输出始终基于 SANE 之前的 state。
 
     Args:
         r, w, k, v, a, b: [B, T, H, K], bfloat16。T 必须被 16 整除。
         tau: [B, T//16, H], float32。阈值，必须严格 > 1。
-        mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SN；
+        mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SANE；
             仅当 output_final_state=True 时生效。
         initial_state: [B, H, K, K] 或 [1, H, K, K], float32, 可选。
         output_final_state: bool, 是否返回最终 state。
@@ -505,7 +505,7 @@ def generalized_delta_rule_sn(r, w, k, v, a, b, tau, mask=None,
         ValueError: T 不被 16 整除，或 tau/mask 形状不匹配。
 
     Examples:
-        >>> y, state = generalized_delta_rule_sn(
+        >>> y, state = generalized_delta_rule_sane(
         ...     r, w, k, v, a, b, tau, mask, initial_state=h0)
     """
 ```
@@ -521,7 +521,7 @@ def generalized_delta_rule_sn(r, w, k, v, a, b, tau, mask=None,
 - **禁止**任何迭代痕迹注释：`【修改】`、`【修复】`、`【新增】`、
   `【稳定性修复 x/y】`、"暂时"、"之前是……" 等。历史由 git 管理。
 - 允许并鼓励写**设计约束/不变量**：如 "MINI_BSZ=1：限制单 block 寄存器
-  占用，规避 ROCm 编译器溢出问题"、"checkpoint 保存 SN 之前的 state 供反向
+  占用，规避 ROCm 编译器溢出问题"、"checkpoint 保存 SANE 之前的 state 供反向
   使用"。
 - Section banner 统一为单行 `# ===== 标题 =====`，不带版本备注。
 
@@ -543,7 +543,7 @@ Keras 3 只规定 Python docstring；CUDA/C++ 按同等精神执行，同为强�
   - 编译期宏表（如 `_C_`=head_size、`_T_`=max_sequence_length、
     `CHUNK_LEN`=16），宏的取值约束写在内联注释里。
 - **inline comment 与 Python 同规**：只写"为什么"（如"用 64 位整数做指针
-  算术防止大 tensor 溢出"、"checkpoint 保存 SN 之前的 state 供反向使用"、
+  算术防止大 tensor 溢出"、"checkpoint 保存 SANE 之前的 state 供反向使用"、
   "blend 形式避免 warp 分支"），禁止 `【修复】`/`【修改】`/"暂时"类
   迭代痕迹。
 - 数值相关的等价变换（如手写 tanh 的稳定形式）必须注明"为何不用朴素
@@ -557,14 +557,14 @@ Keras 3 只规定 Python docstring；CUDA/C++ 按同等精神执行，同为强�
 // RWKV-7 wkv 前向 CUDA kernel。
 //
 // 每个 block 处理一个 (batch, head)，顺序扫描 T 步，在每个 chunk 末尾
-// 写出 SN 之前的 state checkpoint。
+// 写出 SANE 之前的 state checkpoint。
 //
 // Args:
 //   r, w, k, v, a, b: [B, H, T, K], bfloat16, row-major。
 //   h0:  [B, H, K, K], float32, row-major。初始 state。
 //   out: [B, H, T, K], bfloat16, row-major。输出 y。
 //   sa:  [B, H, T, K], float32, row-major。反向所需中间量。
-//   s_:  [B, H, T//16, K, K], float32, row-major。SN 之前的 state checkpoint。
+//   s_:  [B, H, T//16, K, K], float32, row-major。SANE 之前的 state checkpoint。
 //
 // 编译期宏:
 //   _C_: head_size，必须被 4 整除。
@@ -651,7 +651,7 @@ __global__ void wkv7_forward(...)
 | `rwkv_ops/rwkv7_kernel/native_keras_op.py` | RWKV-7 原生参考实现 |
 | `rwkv_ops/rwkv7_kernel/triton_kernel.py` | RWKV-7 共享 Triton 内核 |
 | `rwkv_ops/rwkv7_kernel/jax_pallas_kernel.py` | RWKV-7 Pallas 内核 |
-| `rwkv_ops/rwkv7_sn_kernel/` | SN 版，结构与 rwkv7_kernel 完全平行 |
+| `rwkv_ops/rwkv7_sane_kernel/` | SANE 版，结构与 rwkv7_kernel 完全平行 |
 | `rwkv_ops/rwkv6_kernel/ops_rwkv_kernel.py` | RWKV-6 数值 ground truth |
 | `rwkv_ops/rwkv6_kernel/native_keras_op.py` | RWKV-6 函数式原生封装 |
 | `rwkv_ops/mhc_kernel/native_op.py` | mHC 原生参考实现 |

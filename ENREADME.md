@@ -32,10 +32,10 @@
   - [Background](#background)
   - [Usage](#usage)
   - [Implementation Status of `rwkv7_op_rnn`](#implementation-status-of-rwkv7_op_rnn)
-- [Usage of `rwkv7op_sn`](#usage-of-rwkv7op_sn)
-  - [rwkv7op_sn implementation status](#rwkv7op_sn-implementation-status)
-- [Usage of `rwkv7_op_sn_rnn`](#usage-of-rwkv7_op_sn_rnn)
-  - [Implementation Status of `rwkv7_op_sn_rnn`](#implementation-status-of-rwkv7_op_sn_rnn)
+- [Usage of `rwkv7op_sane`](#usage-of-rwkv7op_sane)
+  - [rwkv7op_sane implementation status](#rwkv7op_sane-implementation-status)
+- [Usage of `rwkv7_op_sane_rnn`](#usage-of-rwkv7_op_sane_rnn)
+  - [Implementation Status of `rwkv7_op_sane_rnn`](#implementation-status-of-rwkv7_op_sane_rnn)
 - [Usage of `rwkv6op`](#usage-of-rwkv6op)
 - [Distributed Parallelism (JAX)](#distributed-parallelism)
   - [PyTorch Usage Notes](#pytorch-usage-notes)
@@ -68,7 +68,7 @@ pip install rwkv_ops
 | `RWKV_OPS_PALLAS_AUTOTUNE` | Pallas autotune switch | `1` / `0` | `1` | — |
 | `RWKV_OPS_KERAS_NATIVE` | Force native to pure keras ops | `1` / `0` | `0` | — |
 
-> With `KERNEL_TYPE=native`, the implementation is dispatched per backend and platform: jax + GPU/TPU uses the Pallas kernel (rwkv7/rwkv7_sn); torch + non-CPU uses the Triton kernel (rwkv7/rwkv7_sn/mhc, since pip torch bundles triton); everything else (CPU, mhc on jax, etc.) uses pure Keras ops. Set `RWKV_OPS_KERAS_NATIVE=1` to force pure Keras ops everywhere (for debugging).
+> With `KERNEL_TYPE=native`, the implementation is dispatched per backend and platform: jax + GPU/TPU uses the Pallas kernel (rwkv7/rwkv7_sane); torch + non-CPU uses the Triton kernel (rwkv7/rwkv7_sane/mhc, since pip torch bundles triton); everything else (CPU, mhc on jax, etc.) uses pure Keras ops. Set `RWKV_OPS_KERAS_NATIVE=1` to force pure Keras ops everywhere (for debugging).
 
 > If `KERNEL_BACKEND` is set, it is used directly; if not, `KERAS_BACKEND` is used. If both are unset, `torch` is the default.
 
@@ -313,13 +313,13 @@ def rwkv7_op_rnn(
 
 ---
 
-<a id="usage-of-rwkv7op_sn"></a>
-## Usage of `rwkv7op_sn`
+<a id="usage-of-rwkv7op_sane"></a>
+## Usage of `rwkv7op_sane`
 
 ```python
-from rwkv_ops import generalized_delta_rule_sn, generalized_delta_rule_sn_inference
+from rwkv_ops import generalized_delta_rule_sane, generalized_delta_rule_sane_inference
 
-def generalized_delta_rule_sn(
+def generalized_delta_rule_sane(
     r,
     w,
     k,
@@ -327,17 +327,17 @@ def generalized_delta_rule_sn(
     a,
     b,
     tau,                  # [B, T//16, H], float32, already softplus(param)+1, must be > 0
-    mask=None,            # [B, T//16], float32, 1 -> apply SN, 0 -> skip; shared across heads
+    mask=None,            # [B, T//16], float32, 1 -> apply SANE, 0 -> skip; shared across heads
     initial_state=None,
     output_final_state: bool = True,
     head_first: bool = False,
 ):
     """
-    RWKV-7 generalized delta rule with State Neutralization (training / prefill).
+    RWKV-7 generalized delta rule with State Anomaly Neutralization (training / prefill).
 
     Dispatch rules:
     - When ``output_final_state=False``, the internal no-mask operator is used,
-      applying State Neutralization unconditionally at every chunk boundary to save the
+      applying State Anomaly Neutralization unconditionally at every chunk boundary to save the
       mask read/branch overhead.
     - When ``mask=None`` and ``output_final_state=True``, the no-mask operator is
       also used, but a warning is raised and the returned ``final_state`` is set
@@ -349,7 +349,7 @@ def generalized_delta_rule_sn(
     Args:
         r, w, k, v, a, b: [B, T, H, K] or [B, H, T, K], T must be divisible by 16.
         tau: [B, T//16, H], float32, must be > 0.
-        mask: [B, T//16], float32, 0/1 per-chunk flag for State Neutralization;
+        mask: [B, T//16], float32, 0/1 per-chunk flag for State Anomaly Neutralization;
               only effective when output_final_state=True and mask is explicitly
               provided. Set padded chunks to 0 and keep k=0, a=0, w=-inf.
         initial_state: [B, H, K, K] or [1, H, K, K].
@@ -362,11 +362,11 @@ def generalized_delta_rule_sn(
     """
 ```
 
-`generalized_delta_rule_sn_inference` has the same interface but **does not compute gradients**, saving memory.
+`generalized_delta_rule_sane_inference` has the same interface but **does not compute gradients**, saving memory.
 Note: the inference kernel reads `tau` per chunk, so `tau` only needs to have length `T // 16`; **T is no longer required to be divisible by 16**. For arbitrary-length prefill, you can also use the single-step RNN interface below.
 
-<a id="rwkv7op_sn-implementation-status"></a>
-### rwkv7op_sn implementation status
+<a id="rwkv7op_sane-implementation-status"></a>
+### rwkv7op_sane implementation status
 
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
@@ -378,13 +378,13 @@ Note: the inference kernel reads `tau` per chunk, so `tau` only needs to have le
 
 ---
 
-<a id="usage-of-rwkv7_op_sn_rnn"></a>
-## Usage of `rwkv7_op_sn_rnn`
+<a id="usage-of-rwkv7_op_sane_rnn"></a>
+## Usage of `rwkv7_op_sane_rnn`
 
 ```python
-from rwkv_ops import rwkv7_op_sn_rnn
+from rwkv_ops import rwkv7_op_sane_rnn
 
-def rwkv7_op_sn_rnn(
+def rwkv7_op_sane_rnn(
     r,                    # [B, 1, H, K] or [B, H, 1, K]
     w,
     k,
@@ -392,30 +392,30 @@ def rwkv7_op_sn_rnn(
     a,
     b,
     tau,                  # [B, H], float32
-    do_sn,                # bool or [B] bool, True -> apply State Neutralization after this step
+    do_sane,                # bool or [B] bool, True -> apply State Anomaly Neutralization after this step
     initial_state=None,
     output_final_state: bool = True,
     head_first: bool = False,
 ):
     """
-    RWKV-7 single-step inference with State Neutralization (RNN mode).
-    Output is computed from the pre-SN state; state_out has SN applied when do_sn is True.
+    RWKV-7 single-step inference with State Anomaly Neutralization (RNN mode).
+    Output is computed from the pre-SANE state; state_out has SANE applied when do_sane is True.
     """
 ```
 
-Example (trigger SN every 16 steps):
+Example (trigger SANE every 16 steps):
 
 ```python
 for step in range(seq_len):
-    do_sn = (step % 16 == 15)
-    out, state = rwkv7_op_sn_rnn(
+    do_sane = (step % 16 == 15)
+    out, state = rwkv7_op_sane_rnn(
         r[step], w[step], k[step], v[step], a[step], b[step],
-        tau=tau, do_sn=do_sn, initial_state=state
+        tau=tau, do_sane=do_sane, initial_state=state
     )
 ```
 
-<a id="implementation-status-of-rwkv7_op_sn_rnn"></a>
-### Implementation Status of `rwkv7_op_sn_rnn`
+<a id="implementation-status-of-rwkv7_op_sane_rnn"></a>
+### Implementation Status of `rwkv7_op_sane_rnn`
 
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
@@ -441,17 +441,17 @@ over batch)** and **TP (tensor parallel over heads)**:
 | Operator (jax) | DP (batch) | TP (head) |
 |---|---|---|
 | rwkv7 cuda / triton / pallas | ✅ | ✅ |
-| rwkv7_sn cuda / triton / pallas | ✅ | ✅ |
-| rwkv7 / rwkv7_sn single-step cuda | ✅ | ✅ |
+| rwkv7_sane cuda / triton / pallas | ✅ | ✅ |
+| rwkv7 / rwkv7_sane single-step cuda | ✅ | ✅ |
 | rwkv6 cuda | ✅ | ❌ |
 
 > rwkv6 fuses the channel dim (C = H × N) into a single rule dimension, so the
 > head axis is not exposed to the partitioner; only batch parallelism is
-> supported. Use rwkv7 / rwkv7_sn if you need TP.
+> supported. Use rwkv7 / rwkv7_sane if you need TP.
 
 **Only shard the batch or head dims**; sharding time or head_size dims yields
 wrong results (the scan needs the full T, and each state needs the full
-head_size). SN's `tau` carries a head dim (TP-shardable), while `mask` has no
+head_size). SANE's `tau` carries a head dim (TP-shardable), while `mask` has no
 head dim (replicated automatically under TP).
 
 Example (TP over heads):

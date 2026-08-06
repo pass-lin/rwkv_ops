@@ -1,4 +1,4 @@
-"""JAX 版 RWKV7-SN 单步 wkv kernel（仅前向）。"""
+"""JAX 版 RWKV7-SANE 单步 wkv kernel（仅前向）。"""
 
 from __future__ import annotations
 import pathlib
@@ -17,7 +17,7 @@ _NVCC_WRAPPER = _CURRENT_DIR.parents[1] / "cuda_tools" / "nvcc_wrap"
 
 #  SPMD 切分规则（Einsum 风格）
 # b=Batch, h=Head, k/m=HeadDim。支持 DP（batch 维）与 TP（head 维）。
-# tau 为 [B, H]（per-head），do_sn 为 [B]（per-sample）。
+# tau 为 [B, H]（per-head），do_sane 为 [B]（per-sample）。
 FWD_RULE = "b h k, b h k, b h k, b h k, b h k, b h k, b h, b, b h k m -> b h k, b h k m"
 
 
@@ -61,8 +61,8 @@ def _create_partition(impl_fn):
     return partition
 
 
-def get_jax_generalized_delta_rule_sn_single_step(HEAD_SIZE=64):
-    """返回 RWKV-7-SN 单步（T=1）JAX-CUDA FFI 算子。
+def get_jax_generalized_delta_rule_sane_single_step(HEAD_SIZE=64):
+    """返回 RWKV-7-SANE 单步（T=1）JAX-CUDA FFI 算子。
 
     Args:
         HEAD_SIZE: int，head 维度大小，必须为 4 的倍数。
@@ -71,13 +71,13 @@ def get_jax_generalized_delta_rule_sn_single_step(HEAD_SIZE=64):
         single_step_op：函数，输入 T=1，输出 (y, final_state)。
     """
     _BUILD_DIR = _CURRENT_DIR / f"build_single_step_{HEAD_SIZE}"
-    _SO_PATH = _BUILD_DIR / "wkv7_sn_single_step.so"
+    _SO_PATH = _BUILD_DIR / "wkv7_sane_single_step.so"
 
     def _ensure_compiled() -> pathlib.Path:
         if _SO_PATH.exists():
             return _SO_PATH
 
-        print("[rwkv7_sn_single_step_jax] First use – compiling CUDA kernel…")
+        print("[rwkv7_sane_single_step_jax] First use – compiling CUDA kernel…")
         src_dir = _CURRENT_DIR
         build_dir = _BUILD_DIR
         build_dir.mkdir(exist_ok=True)
@@ -115,15 +115,17 @@ def get_jax_generalized_delta_rule_sn_single_step(HEAD_SIZE=64):
         subprocess.check_call(["cmake", "--install", str(build_dir)])
 
         if not _SO_PATH.exists():
-            raise RuntimeError("Compilation failed – wkv7_sn_single_step.so not found.")
+            raise RuntimeError(
+                "Compilation failed – wkv7_sane_single_step.so not found."
+            )
 
-        print("[rwkv7_sn_single_step_jax] Compilation finished – output at", _SO_PATH)
+        print("[rwkv7_sane_single_step_jax] Compilation finished – output at", _SO_PATH)
         return _SO_PATH
 
     _lib = ctypes.CDLL(_ensure_compiled())
     jax.ffi.register_ffi_target(
-        "wkv7_sn_single_step_fwd",
-        jax.ffi.pycapsule(_lib.Wkv7SnSingleStepFwd),
+        "wkv7_sane_single_step_fwd",
+        jax.ffi.pycapsule(_lib.Wkv7SaneSingleStepFwd),
         platform="CUDA",
     )
 
@@ -133,30 +135,30 @@ def get_jax_generalized_delta_rule_sn_single_step(HEAD_SIZE=64):
         x = jnp.asarray(x, dtype=jnp.bfloat16)
         return x
 
-    def _wkv7_sn_single_step_impl(w, q, k, v, a, b, tau, do_sn, h0):
+    def _wkv7_sane_single_step_impl(w, q, k, v, a, b, tau, do_sane, h0):
         B, H, K = q.shape
         dtype = q.dtype
         out_type = jax.ShapeDtypeStruct((B, H, K), dtype)
         s_type = jax.ShapeDtypeStruct((B, H, K, K), jnp.float32)
 
         y, s = jax.ffi.ffi_call(
-            "wkv7_sn_single_step_fwd",
+            "wkv7_sane_single_step_fwd",
             (out_type, s_type),
             vmap_method="broadcast_all",
-        )(w, q, k, v, a, b, tau, do_sn, h0)
+        )(w, q, k, v, a, b, tau, do_sane, h0)
         return y, s
 
     @custom_partitioning
-    def _wkv7_sn_single_step_spmd(w, q, k, v, a, b, tau, do_sn, h0):
-        return _wkv7_sn_single_step_impl(w, q, k, v, a, b, tau, do_sn, h0)
+    def _wkv7_sane_single_step_spmd(w, q, k, v, a, b, tau, do_sane, h0):
+        return _wkv7_sane_single_step_impl(w, q, k, v, a, b, tau, do_sane, h0)
 
-    _wkv7_sn_single_step_spmd.def_partition(
+    _wkv7_sane_single_step_spmd.def_partition(
         infer_sharding_from_operands=_fwd_infer_sharding,
         sharding_rule=FWD_RULE,
-        partition=_create_partition(_wkv7_sn_single_step_impl),
+        partition=_create_partition(_wkv7_sane_single_step_impl),
     )
 
-    def generalized_delta_rule_sn_single_step(
+    def generalized_delta_rule_sane_single_step(
         r: jnp.ndarray,
         w: jnp.ndarray,
         k: jnp.ndarray,
@@ -164,17 +166,17 @@ def get_jax_generalized_delta_rule_sn_single_step(HEAD_SIZE=64):
         a: jnp.ndarray,
         b: jnp.ndarray,
         tau: jnp.ndarray,
-        do_sn,
+        do_sane,
         initial_state: Optional[jnp.ndarray] = None,
         output_final_state: bool = True,
         head_first: bool = False,
     ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
-        """RWKV-7-SN 单步推理（JAX-CUDA FFI 入口）。
+        """RWKV-7-SANE 单步推理（JAX-CUDA FFI 入口）。
 
         Args:
             r, w, k, v, a, b: [B, 1, H, K]（head_first=False）或 [B, H, 1, K]（head_first=True）。
             tau: [B, H]，float32，必须 > 0。
-            do_sn: [B]，bool 或 int32。非 0 表示对该 sample 执行 SN。
+            do_sane: [B]，bool 或 int32。非 0 表示对该 sample 执行 SANE。
             initial_state: [B, H, K, K] 或 [1, H, K, K]，float32，可选。
             output_final_state: bool，是否返回最终 state。
             head_first: bool，输入输出是否 head 维优先。
@@ -211,12 +213,14 @@ def get_jax_generalized_delta_rule_sn_single_step(HEAD_SIZE=64):
         b = b[:, 0, :, :]
 
         # JAX 默认关闭 x64，CUDA 侧也使用 int32（仅 0/1）。
-        if isinstance(do_sn, bool):
-            do_sn = jnp.full((B,), int(do_sn), dtype=jnp.int32)
+        if isinstance(do_sane, bool):
+            do_sane = jnp.full((B,), int(do_sane), dtype=jnp.int32)
         else:
-            do_sn = jnp.asarray(do_sn, dtype=jnp.int32)
+            do_sane = jnp.asarray(do_sane, dtype=jnp.int32)
 
-        out, last_state = _wkv7_sn_single_step_spmd(w, r, k, v, a, b, tau, do_sn, h0)
+        out, last_state = _wkv7_sane_single_step_spmd(
+            w, r, k, v, a, b, tau, do_sane, h0
+        )
         out = jnp.expand_dims(out, axis=1)
         out = jnp.asarray(out, r.dtype)
 
@@ -224,4 +228,4 @@ def get_jax_generalized_delta_rule_sn_single_step(HEAD_SIZE=64):
             return out, last_state
         return out
 
-    return generalized_delta_rule_sn_single_step
+    return generalized_delta_rule_sane_single_step

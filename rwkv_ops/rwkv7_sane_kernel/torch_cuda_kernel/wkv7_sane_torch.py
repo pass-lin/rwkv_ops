@@ -1,4 +1,4 @@
-"""PyTorch 版 RWKV-7 State Neutralization CUDA kernel 封装。"""
+"""PyTorch 版 RWKV-7 State Anomaly Neutralization CUDA kernel 封装。"""
 
 import os
 import warnings
@@ -14,7 +14,7 @@ def transpose_head(x, head_first):
     return x
 
 
-def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
+def get_torch_generalized_delta_rule_sane(HEAD_SIZE=64):
     CHUNK_LEN = 16
     flags = [
         "-res-usage",
@@ -28,17 +28,17 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
 
     current_dir = os.path.dirname(os.path.abspath(__file__))
     load(
-        name="wind_backstepping_sn",
+        name="wind_backstepping_sane",
         sources=[
-            os.path.join(current_dir, "wkv7_sn_cuda.cu"),
-            os.path.join(current_dir, "wkv7_sn_op.cpp"),
+            os.path.join(current_dir, "wkv7_sane_cuda.cu"),
+            os.path.join(current_dir, "wkv7_sane_op.cpp"),
         ],
         is_python_module=False,
         verbose=True,
         extra_cuda_cflags=flags,
     )
 
-    class WindBacksteppingSN(torch.autograd.Function):
+    class WindBacksteppingSANE(torch.autograd.Function):
         @staticmethod
         def forward(ctx, w, q, k, v, a, b, tau, mask, h0):
             B, T, H, N = w.shape
@@ -51,7 +51,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
 
             if T % CHUNK_LEN != 0:
                 raise ValueError(
-                    "RWKV-SN inputs sequence length must be divisible by 16"
+                    "RWKV-SANE inputs sequence length must be divisible by 16"
                 )
 
             y = torch.empty_like(v)
@@ -60,7 +60,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
             )
             sa = torch.empty(B, T, H, N, dtype=torch.float32, device=w.device)
 
-            torch.ops.wind_backstepping_sn.forward_sn(
+            torch.ops.wind_backstepping_sane.forward_sane(
                 w, q, k, v, a, b, tau, mask, y, s, sa, h0
             )
 
@@ -69,12 +69,12 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
             last_state = torch.empty_like(h0)
             last_state.copy_(transpose(s[:, :, -1], [0, 1, 3, 2]))
 
-            # s[:, :, -1] 是 SN 之前的 checkpoint，需要再应用一次 SN 得到 final_state
+            # s[:, :, -1] 是 SANE 之前的 checkpoint，需要再应用一次 SANE 得到 final_state
             last_tau = tau[:, -1].view(B, H, 1, 1)
             last_mask = mask[:, -1].view(B, 1, 1, 1)
             tau_safe = torch.clamp(last_tau, min=1e-6)
-            sn_state = last_tau * torch.tanh(last_state / tau_safe)
-            last_state = torch.where(last_mask > 0, sn_state, last_state)
+            sane_state = last_tau * torch.tanh(last_state / tau_safe)
+            last_state = torch.where(last_mask > 0, sane_state, last_state)
 
             return cast(y, DTYPE), last_state
 
@@ -89,7 +89,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
             dtau = torch.empty(tau.shape, dtype=tau.dtype, device=tau.device)
             dw, dq, dk, dv, da, db = [torch.empty_like(x) for x in [w, q, k, v, a, b]]
 
-            torch.ops.wind_backstepping_sn.backward_sn(
+            torch.ops.wind_backstepping_sane.backward_sane(
                 w,
                 q,
                 k,
@@ -123,7 +123,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
                 dh0,
             )
 
-    class WindBacksteppingSNNoMask(torch.autograd.Function):
+    class WindBacksteppingSANENoMask(torch.autograd.Function):
         @staticmethod
         def forward(ctx, w, q, k, v, a, b, tau, h0):
             B, T, H, N = w.shape
@@ -135,7 +135,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
 
             if T % CHUNK_LEN != 0:
                 raise ValueError(
-                    "RWKV-SN inputs sequence length must be divisible by 16"
+                    "RWKV-SANE inputs sequence length must be divisible by 16"
                 )
 
             y = torch.empty_like(v)
@@ -144,7 +144,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
             )
             sa = torch.empty(B, T, H, N, dtype=torch.float32, device=w.device)
 
-            torch.ops.wind_backstepping_sn.forward_sn_no_mask(
+            torch.ops.wind_backstepping_sane.forward_sane_no_mask(
                 w, q, k, v, a, b, tau, y, s, sa, h0
             )
 
@@ -153,7 +153,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
             last_state = torch.empty_like(h0)
             last_state.copy_(transpose(s[:, :, -1], [0, 1, 3, 2]))
 
-            # 无条件 SN：直接应用
+            # 无条件 SANE：直接应用
             last_tau = tau[:, -1].view(B, H, 1, 1)
             tau_safe = torch.clamp(last_tau, min=1e-6)
             last_state = last_tau * torch.tanh(last_state / tau_safe)
@@ -171,7 +171,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
             dtau = torch.empty(tau.shape, dtype=tau.dtype, device=tau.device)
             dw, dq, dk, dv, da, db = [torch.empty_like(x) for x in [w, q, k, v, a, b]]
 
-            torch.ops.wind_backstepping_sn.backward_sn_no_mask(
+            torch.ops.wind_backstepping_sane.backward_sane_no_mask(
                 w,
                 q,
                 k,
@@ -205,7 +205,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
 
     # 纯推理 / prefill：不保存反向 checkpoint，只输出 y 与最终 state。
     # 因 tau/mask 按 chunk 读取，T 仍需被 16 整除；任意长度请用单步 RNN 接口。
-    class Wkv7SnInference(torch.autograd.Function):
+    class Wkv7SaneInference(torch.autograd.Function):
         @staticmethod
         def forward(ctx, w, q, k, v, a, b, tau, mask, h0):
             B, T, H, N = w.shape
@@ -218,7 +218,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
 
             y = torch.empty_like(v)
             s = torch.empty(B, H, N, N, dtype=torch.float32, device=w.device)
-            torch.ops.wind_backstepping_sn.forward_inference_sn(
+            torch.ops.wind_backstepping_sane.forward_inference_sane(
                 w, q, k, v, a, b, tau, mask, y, s, h0
             )
             return cast(y, DTYPE), s
@@ -227,7 +227,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
         def backward(ctx, *args):
             raise NotImplementedError("inference kernel does not support backward")
 
-    class Wkv7SnInferenceNoMask(torch.autograd.Function):
+    class Wkv7SaneInferenceNoMask(torch.autograd.Function):
         @staticmethod
         def forward(ctx, w, q, k, v, a, b, tau, h0):
             B, T, H, N = w.shape
@@ -239,7 +239,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
 
             y = torch.empty_like(v)
             s = torch.empty(B, H, N, N, dtype=torch.float32, device=w.device)
-            torch.ops.wind_backstepping_sn.forward_inference_sn_no_mask(
+            torch.ops.wind_backstepping_sane.forward_inference_sane_no_mask(
                 w, q, k, v, a, b, tau, y, s, h0
             )
             return cast(y, DTYPE), s
@@ -248,7 +248,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
         def backward(ctx, *args):
             raise NotImplementedError("inference kernel does not support backward")
 
-    def generalized_delta_rule_sn(
+    def generalized_delta_rule_sane(
         r,
         w,
         k,
@@ -261,7 +261,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
         output_final_state=True,
         head_first=False,
     ):
-        """带 State Neutralization 的 RWKV-7 广义 delta 规则（训练版）。
+        """带 State Anomaly Neutralization 的 RWKV-7 广义 delta 规则（训练版）。
 
         非 CUDA 设备自动回退到 native 实现。
         当 mask=None 且 output_final_state=True 时，会发出 UserWarning 并将
@@ -270,7 +270,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
         Args:
             r, w, k, v, a, b: [B, T, H, K], bfloat16。T 必须被 16 整除。
             tau: [B, T//16, H], float32。阈值，必须严格 > 1。
-            mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SN。
+            mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SANE。
             initial_state: [B, H, K, K], float32, 可选。
             output_final_state: bool, 是否返回最终 state。
             head_first: bool, 输入是否 head 维优先 ([B, H, T, K])。
@@ -284,9 +284,9 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
             ValueError: T 不被 16 整除，或 tau/mask 形状不匹配。
         """
         if w.device.type != "cuda":
-            from ..native_keras_op import generalized_delta_rule_sn
+            from ..native_keras_op import generalized_delta_rule_sane
 
-            return generalized_delta_rule_sn(
+            return generalized_delta_rule_sane(
                 r=r,
                 w=w,
                 k=k,
@@ -310,7 +310,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
         B, T, H, N = w.shape
         if T % CHUNK_LEN != 0:
             raise ValueError(
-                f"RWKV-SN training/prefill requires T divisible by {CHUNK_LEN}, "
+                f"RWKV-SANE training/prefill requires T divisible by {CHUNK_LEN}, "
                 f"but got T={T}."
             )
 
@@ -337,12 +337,12 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
                 raise ValueError(
                     f"mask shape {tuple(mask.shape)} must match (B, T//16) = ({B}, {T // CHUNK_LEN})"
                 )
-            out, state = WindBacksteppingSN.apply(
+            out, state = WindBacksteppingSANE.apply(
                 w, r, k, v, a, b, tau, mask, initial_state
             )
             return (out, state) if output_final_state else out
 
-        out, state = WindBacksteppingSNNoMask.apply(
+        out, state = WindBacksteppingSANENoMask.apply(
             w, r, k, v, a, b, tau, initial_state
         )
         if not output_final_state:
@@ -350,10 +350,10 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
 
         # mask is None 且 output_final_state=True：警告并返回 None state。
         warnings.warn(
-            "[rwkv7_sn] mask is None: 使用无条件 State Neutralization 算子。"
+            "[rwkv7_sane] mask is None: 使用无条件 State Anomaly Neutralization 算子。"
             "由于未提供 padding mask，返回的 final_state 可能被污染，"
             "因此已将其设为 None。如需 final_state 请提供显式 mask。\n"
-            "[rwkv7_sn] mask is None: using unconditional State Neutralization. "
+            "[rwkv7_sane] mask is None: using unconditional State Anomaly Neutralization. "
             "The returned final_state is set to None because padding chunks "
             "may contaminate the state. Provide an explicit mask to obtain final_state.",
             UserWarning,
@@ -361,7 +361,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
         )
         return out, None
 
-    def generalized_delta_rule_sn_inference(
+    def generalized_delta_rule_sane_inference(
         r,
         w,
         k,
@@ -374,7 +374,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
         output_final_state=True,
         head_first=False,
     ):
-        """带 State Neutralization 的 RWKV-7 推理入口（无梯度）。
+        """带 State Anomaly Neutralization 的 RWKV-7 推理入口（无梯度）。
 
         仅支持 CUDA；不保存反向 checkpoint，显存占用低于训练版。
         tau/mask 按 chunk 读取，T 不必被 16 整除。
@@ -382,7 +382,7 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
         Args:
             r, w, k, v, a, b: [B, T, H, K], bfloat16。
             tau: [B, T//16, H], float32。
-            mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SN。
+            mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SANE。
             initial_state: [B, H, K, K], float32, 可选。
             output_final_state: bool, 是否返回最终 state。
             head_first: bool, 输入是否 head 维优先 ([B, H, T, K])。
@@ -430,20 +430,20 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
                 raise ValueError(
                     f"mask shape {tuple(mask.shape)} must match (B, T//16) = ({B}, {T // CHUNK_LEN})"
                 )
-            out, state = Wkv7SnInference.apply(
+            out, state = Wkv7SaneInference.apply(
                 w, r, k, v, a, b, tau, mask, initial_state
             )
             return (out, state) if output_final_state else out
 
-        out, state = Wkv7SnInferenceNoMask.apply(w, r, k, v, a, b, tau, initial_state)
+        out, state = Wkv7SaneInferenceNoMask.apply(w, r, k, v, a, b, tau, initial_state)
         if not output_final_state:
             return out
 
         warnings.warn(
-            "[rwkv7_sn] mask is None: 使用无条件 State Neutralization 算子。"
+            "[rwkv7_sane] mask is None: 使用无条件 State Anomaly Neutralization 算子。"
             "由于未提供 padding mask，返回的 final_state 可能被污染，"
             "因此已将其设为 None。如需 final_state 请提供显式 mask。\n"
-            "[rwkv7_sn] mask is None: using unconditional State Neutralization. "
+            "[rwkv7_sane] mask is None: using unconditional State Anomaly Neutralization. "
             "The returned final_state is set to None because padding chunks "
             "may contaminate the state. Provide an explicit mask to obtain final_state.",
             UserWarning,
@@ -451,4 +451,4 @@ def get_torch_generalized_delta_rule_sn(HEAD_SIZE=64):
         )
         return out, None
 
-    return [generalized_delta_rule_sn, generalized_delta_rule_sn_inference]
+    return [generalized_delta_rule_sane, generalized_delta_rule_sane_inference]
