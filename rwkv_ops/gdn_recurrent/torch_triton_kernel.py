@@ -56,6 +56,86 @@ class GatedDeltaNetRecurrentTritonFunction(torch.autograd.Function):
         B, H, T, K = q.shape
         V = v.shape[-1]
         scale = K**-0.5
+        CHUNK_LEN = 16
+
+        o = torch.empty_like(v)
+        final_state = torch.empty(B, H, K, V, dtype=torch.float32, device=q.device)
+        kv_mem_out = torch.empty(B, H, T, V, dtype=torch.float32, device=q.device)
+        num_chunks = T // CHUNK_LEN
+        state_chkp = torch.empty(
+            B, H, num_chunks, K, V, dtype=torch.float32, device=q.device
+        )
+        h0 = _prepare_initial_state(initial_state, B, H, K, V, q.device)
+
+        BK = triton.next_power_of_2(K)
+        BV = min(8, triton.next_power_of_2(V))
+        grid = _make_recurrent_grid(B, H, V, BV)
+
+        gated_delta_net_recurrent_fwd_kernel[grid](
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            o=o,
+            kv_mem_out=kv_mem_out,
+            state_chkp=state_chkp,
+            h0=h0,
+            ht=final_state,
+            scale=scale,
+            B=B,
+            H=H,
+            T=T,
+            K=K,
+            V=V,
+            BK=BK,
+            BV=BV,
+            CHUNK_LEN=CHUNK_LEN,
+            USE_INITIAL_STATE=True,
+            STORE_FINAL_STATE=True,
+            num_warps=1,
+            num_stages=1,
+        )
+
+        ctx.save_for_backward(q, k, v, g, beta, h0, kv_mem_out, state_chkp)
+        ctx.head_first = head_first
+        ctx.output_final_state = output_final_state
+        ctx.CHUNK_LEN = CHUNK_LEN
+
+        if not head_first:
+            o = o.transpose(1, 2)
+
+        if output_final_state:
+            return o, final_state
+        return o, None
+
+    @staticmethod
+    def backward(ctx, do, dht):
+        raise NotImplementedError(
+            "Gated DeltaNet recurrent Triton backward is not implemented yet."
+        )
+
+
+class GatedDeltaNetRecurrentInferenceTritonFunction(torch.autograd.Function):
+    """Gated DeltaNet recurrent 推理前向 Triton 封装（无反向）。"""
+
+    @staticmethod
+    def forward(
+        ctx,
+        q,
+        k,
+        v,
+        g,
+        beta,
+        initial_state,
+        output_final_state,
+        head_first,
+    ):
+        q, k, v, g, beta = _normalize_inputs(q, k, v, g, beta, head_first)
+
+        B, H, T, K = q.shape
+        V = v.shape[-1]
+        scale = K**-0.5
 
         o = torch.empty_like(v)
         final_state = torch.empty(B, H, K, V, dtype=torch.float32, device=q.device)
@@ -65,7 +145,7 @@ class GatedDeltaNetRecurrentTritonFunction(torch.autograd.Function):
         BV = min(8, triton.next_power_of_2(V))
         grid = _make_recurrent_grid(B, H, V, BV)
 
-        gated_delta_net_recurrent_fwd_kernel[grid](
+        gated_delta_net_recurrent_inference_fwd_kernel[grid](
             q=q,
             k=k,
             v=v,
@@ -88,10 +168,6 @@ class GatedDeltaNetRecurrentTritonFunction(torch.autograd.Function):
             num_stages=1,
         )
 
-        ctx.save_for_backward(q, k, v, g, beta, h0)
-        ctx.head_first = head_first
-        ctx.output_final_state = output_final_state
-
         if not head_first:
             o = o.transpose(1, 2)
 
@@ -102,7 +178,74 @@ class GatedDeltaNetRecurrentTritonFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, do, dht):
         raise NotImplementedError(
-            "Gated DeltaNet recurrent Triton backward is not implemented yet."
+            "Gated DeltaNet recurrent inference does not support backward."
+        )
+
+
+class GatedDeltaNetRecurrentSingleStepTritonFunction(torch.autograd.Function):
+    """Gated DeltaNet recurrent 单步 RNN 前向 Triton 封装（无反向）。"""
+
+    @staticmethod
+    def forward(
+        ctx,
+        q,
+        k,
+        v,
+        g,
+        beta,
+        initial_state,
+        output_final_state,
+        head_first,
+    ):
+        if not head_first:
+            raise NotImplementedError(
+                "gated_delta_net_recurrent_single_step currently only supports head_first=True."
+            )
+
+        q, k, v, g, beta = [x.contiguous() for x in [q, k, v, g, beta]]
+
+        B, H, K = q.shape
+        V = v.shape[-1]
+        scale = K**-0.5
+
+        o = torch.empty_like(v)
+        next_state = torch.empty(B, H, K, V, dtype=torch.float32, device=q.device)
+        h0 = _prepare_initial_state(initial_state, B, H, K, V, q.device)
+
+        BK = triton.next_power_of_2(K)
+        BV = min(8, triton.next_power_of_2(V))
+        grid = (triton.cdiv(V, BV) * B * H,)
+
+        gated_delta_net_recurrent_single_step_fwd_kernel[grid](
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            o=o,
+            h0=h0,
+            ht=next_state,
+            scale=scale,
+            B=B,
+            H=H,
+            K=K,
+            V=V,
+            BK=BK,
+            BV=BV,
+            USE_INITIAL_STATE=True,
+            STORE_FINAL_STATE=True,
+            num_warps=1,
+            num_stages=1,
+        )
+
+        if output_final_state:
+            return o, next_state
+        return o, None
+
+    @staticmethod
+    def backward(ctx, do, dht):
+        raise NotImplementedError(
+            "Gated DeltaNet recurrent single step does not support backward."
         )
 
 
@@ -180,49 +323,16 @@ def gated_delta_net_recurrent_inference(
     if q.device.type != "cuda":
         raise RuntimeError("Gated DeltaNet Triton kernel only supports CUDA devices.")
 
-    q, k, v, g, beta = _normalize_inputs(q, k, v, g, beta, head_first)
-
-    B, H, T, K = q.shape
-    V = v.shape[-1]
-    scale = K**-0.5
-
-    o = torch.empty_like(v)
-    final_state = torch.empty(B, H, K, V, dtype=torch.float32, device=q.device)
-    h0 = _prepare_initial_state(initial_state, B, H, K, V, q.device)
-
-    BK = triton.next_power_of_2(K)
-    BV = min(8, triton.next_power_of_2(V))
-    grid = _make_recurrent_grid(B, H, V, BV)
-
-    gated_delta_net_recurrent_inference_fwd_kernel[grid](
-        q=q,
-        k=k,
-        v=v,
-        g=g,
-        beta=beta,
-        o=o,
-        h0=h0,
-        ht=final_state,
-        scale=scale,
-        B=B,
-        H=H,
-        T=T,
-        K=K,
-        V=V,
-        BK=BK,
-        BV=BV,
-        USE_INITIAL_STATE=True,
-        STORE_FINAL_STATE=True,
-        num_warps=1,
-        num_stages=1,
+    return GatedDeltaNetRecurrentInferenceTritonFunction.apply(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        initial_state,
+        output_final_state,
+        head_first,
     )
-
-    if not head_first:
-        o = o.transpose(1, 2)
-
-    if output_final_state:
-        return o, final_state
-    return o, None
 
 
 def gated_delta_net_recurrent_single_step(
@@ -256,47 +366,14 @@ def gated_delta_net_recurrent_single_step(
     """
     if q.device.type != "cuda":
         raise RuntimeError("Gated DeltaNet Triton kernel only supports CUDA devices.")
-    if not head_first:
-        raise NotImplementedError(
-            "gated_delta_net_recurrent_single_step currently only supports head_first=True."
-        )
 
-    q, k, v, g, beta = [x.contiguous() for x in [q, k, v, g, beta]]
-
-    B, H, K = q.shape
-    V = v.shape[-1]
-    scale = K**-0.5
-
-    o = torch.empty_like(v)
-    next_state = torch.empty(B, H, K, V, dtype=torch.float32, device=q.device)
-    h0 = _prepare_initial_state(initial_state, B, H, K, V, q.device)
-
-    BK = triton.next_power_of_2(K)
-    BV = min(8, triton.next_power_of_2(V))
-    grid = (triton.cdiv(V, BV) * B * H,)
-
-    gated_delta_net_recurrent_single_step_fwd_kernel[grid](
-        q=q,
-        k=k,
-        v=v,
-        g=g,
-        beta=beta,
-        o=o,
-        h0=h0,
-        ht=next_state,
-        scale=scale,
-        B=B,
-        H=H,
-        K=K,
-        V=V,
-        BK=BK,
-        BV=BV,
-        USE_INITIAL_STATE=True,
-        STORE_FINAL_STATE=True,
-        num_warps=1,
-        num_stages=1,
+    return GatedDeltaNetRecurrentSingleStepTritonFunction.apply(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        initial_state,
+        output_final_state,
+        head_first,
     )
-
-    if output_final_state:
-        return o, next_state
-    return o, None
