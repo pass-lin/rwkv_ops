@@ -31,10 +31,13 @@ from .rwkv7_sane_kernel import (  # noqa: E402
 
 from .rwkv6_kernel import get_rwkv6_kernel  # noqa: E402
 from .mhc_kernel import get_mhc_kernel  # noqa: E402
+from .gdn_recurrent import get_gated_delta_net_recurrent  # noqa: E402
 
 generalized_delta_rule, generalized_delta_rule_inference = get_generalized_delta_rule(
     KERNEL_TYPE=KERNEL_TYPE
 )
+
+gated_delta_net_recurrent = get_gated_delta_net_recurrent(KERNEL_TYPE=KERNEL_TYPE)
 rwkv7_op = generalized_delta_rule
 rwkv7_op_inference = generalized_delta_rule_inference
 

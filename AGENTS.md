@@ -13,6 +13,8 @@ rwkv_ops/
 ├── __init__.py              # 包入口：读取环境变量、实例化全部算子、暴露公共 API
 ├── pallas_utils.py          # Pallas 后端公共机制（候选配置 / autotune / SPMD 辅助）
 ├── cuda_tools/              # nvcc_wrap + 绕过 CUDA/glibc 冲突的头文件
+├── gdn_chunk/               # Gated DeltaNet chunkwise 算子
+├── gdn_recurrent/           # Gated DeltaNet recurrent / reference 算子
 ├── mhc_kernel/              # mHC (Multi-Head Control) 算子
 ├── rwkv6_kernel/            # RWKV-6 算子
 ├── rwkv7_kernel/            # RWKV-7 广义 delta rule 算子
@@ -30,7 +32,7 @@ pyproject.toml               # hatchling 构建配置
 MANIFEST.in                  # 源码分发清单
 ```
 
-四个算子家族相互独立，但共享同一套**后端选择机制**和**原生 Keras 参考实现**。
+五个算子家族相互独立，但共享同一套**后端选择机制**和**原生 Keras 参考实现**。
 
 ### 1.1 暴露的公共 API
 
@@ -143,6 +145,30 @@ MANIFEST.in                  # 源码分发清单
 > ² Torch 后端的 `native` 在非 CPU 平台默认为 Triton 实现；jax 侧 `native`
 > 保持纯 Keras ops（jax triton 桥接依赖额外的 jax-triton 包）。
 
+#### Gated DeltaNet chunkwise `gated_delta_net_chunk`
+
+| Framework | cuda | triton | native |
+|-----------|------|--------|--------|
+| PyTorch   | ❌   | ❌     | ✅     |
+| JAX       | ❌   | ❌     | ✅     |
+| TensorFlow| ❌   | ❌     | ✅     |
+| NumPy     | ❌   | ❌     | ✅     |
+| OpenVINO  | ❌   | ❌     | ✅     |
+
+#### Gated DeltaNet recurrent `gated_delta_net_recurrent` / `gated_delta_net_recurrent_inference` / `gated_delta_net_recurrent_single_step`
+
+| Framework | cuda | triton | native |
+|-----------|------|--------|--------|
+| PyTorch   | ❌   | ✅     | ✅     |
+| JAX       | ❌   | ❌     | ✅     |
+| TensorFlow| ❌   | ❌     | ✅     |
+| NumPy     | ❌   | ❌     | ✅     |
+| OpenVINO  | ❌   | ❌     | ✅     |
+
+> PyTorch 侧 `gdn_recurrent` 已提供 Triton 前向 kernel（训练/推理/单步 RNN 三个入口）；
+> `gdn_chunk` 仍只有纯 Keras native，后续 cuda / triton / pallas 加速内核会接入
+> `gdn_chunk/` 目录。
+
 ### 2.3 分布式分片（jax）
 
 jax 侧所有加速算子都用 `custom_partitioning` + einsum 风格 `sharding_rule`
@@ -189,6 +215,11 @@ rwkv7_kernel/
 ├── torch_cuda_kernel/             # PyTorch C++/CUDA 扩展
 └── torch_cuda_kernel_single/      # PyTorch C++/CUDA 单步
 ```
+
+`gdn_chunk/` 与 `gdn_recurrent/` 采用同样的目录约定，但拆成两个家族：
+chunkwise 版本专门放分块并行实现（训练 / 推理），recurrent 版本放逐步
+参考实现与单步 decode 实现。Phase 1 两者都只有 `native_keras_op.py`，后续
+加速内核按 `KERNEL_TYPE` 在 `gdn_chunk/` 下扩展。
 
 ### 3.2 原生实现的地位
 
@@ -303,6 +334,40 @@ sane_state = tau * tanh(state / tau)      # 软裁剪到 [-tau, tau]
 - triton 只替换 `mhc_pre_op_fused` 与 `mhc_post_op` 两个底层符号，高层封装
   始终共用 native 的 `linear_and_reshape`。
 
+### 4.6 Gated DeltaNet（GDN）
+
+GDN 基于带门控的 delta rule，与 RWKV-7 类似但输入侧使用独立的 `g`（decay
+gate）和 `beta`（write gate），且对 `q`、`k` 做 L2 norm。
+
+核心递推（见 `gdn_recurrent/native_keras_op.py`）：
+
+```text
+state_t = state_{t-1} * exp(g_t) + delta_t ⊗ k_t
+kv_mem_t = sum_K(state_{t-1} * k_t)
+delta_t = (v_t - kv_mem_t) * beta_t
+y_t = sum_K(state_t * q_t)
+```
+
+- 状态 `state` 形状：`(B, H, K, V)`。`K` 为 key head size，`V` 为 value head size。
+- 输入默认 layout：
+  - `q, k`: `[B, T, H, K]`；`v`: `[B, T, H, V]`；
+  - `g, beta`: `[B, T, H]`；
+  - `initial_state`: `[B, H, K, V]` 或 `[1, H, K, V]`，float32。
+- `q`、`k` 在算子内部做 L2 norm，并在最后按 `1/sqrt(K)` 缩放。
+- `beta` **必须已在外部过 sigmoid**，算子内部不再重复做，以保证接口与训练框架
+  的 gate 输出一致。
+- `g` 是 log-space decay gate，越负遗忘越快。
+- `gated_delta_net_chunk` 要求 `T % chunk_size == 0`，会在内部 pad 到 chunk_size
+  整数倍；`gated_delta_net_recurrent` 与 `gated_delta_net_reference` 支持任意长度。
+- chunkwise 实现先把 g 做 cumsum 得到 chunk 内 decay 矩阵，再用 Neumann 级数
+  求 `(I - lower_triangular(k_beta k^T * decay))^{-1}`，最后按 recurrent 方式
+  跨 chunk 传递 state。数值上必须与 `gated_delta_net_reference` 逐位一致。
+- 当前 Phase 1 `gdn_chunk/` 仅提供纯 Keras native 实现；`gdn_recurrent/`
+  在 PyTorch CUDA 后端已提供 Triton 前向 kernel，包含训练、推理、单步 RNN
+  三个入口（`gated_delta_net_recurrent` / `..._inference` / `..._single_step`），
+  其余后端/框架仍回退 native。后续 cuda / triton / pallas 加速内核会按同样
+  的目录约定扩展。
+
 ### 4.5 Pallas 后端（`jax_pallas_kernel.py` + `pallas_utils.py`）
 
 - **只用公开稳定 Pallas API**：`pl.pallas_call` / `pl.BlockSpec` /
@@ -409,6 +474,10 @@ pytest tests/jax -v -m "not slow"
   `w = -softplus(w_raw) - 0.5`；`h0 ~ N(0,1)`。
 - `rwkv7_sane_inputs`：加 `tau`，`x ~ N(7.0, 0.5)`、`tau = softplus(x) + 1.0`
   （tau ≈ 1000，近似恒等映射），形状 `[B, T//16, H]`。
+- `gdn_shape = (2, 128, 4, 64, 128)`（B, T, H, K, V）。
+- `gdn_inputs`：`q/k/v ~ N(0,1)`；`g = -softplus(g_raw) - 0.5` 保证稳定衰减；
+  `beta` 先过 sigmoid 使其落在 (0,1)；`h0 ~ N(0,1) * 0.1`。`q/k` 不做 L2 norm，
+  由算子内部处理。
 - **递推数值对拍必须用这些 fixture 的稳定分布**；随手造的随机数据会让
   delta-rule 递推指数发散，f32 参考自身误差都能到 1e5，无法用于判定。
 - 断言工具 `assert_allclose_with_stats`：打印 exact/close/max/mean diff，
@@ -427,6 +496,8 @@ pytest tests/jax -v -m "not slow"
   - RWKV-7 前向 y atol=1e-5 / rtol=1e-2（SANE 的 y 放宽到 atol=1e-4）；
     final_state atol=1e-5 / rtol=1e-3；反向 grad atol=7e-3 / rtol=1e-3
     （grad_b 放宽到 1e-2）。
+  - GDN native：recurrent / chunkwise / reference 互相对齐，atol=1e-5 / rtol=1e-3；
+    Triton 前向与 native 对齐，atol=1e-4 / rtol=1e-3；bf16 放宽到 1e-2 / 1e-2。
   - RWKV-6 / mHC：一律 1e-2 / 1e-2。
 - mHC 测试同时包含速度和显存基准。
 
@@ -652,6 +723,10 @@ __global__ void wkv7_forward(...)
 | `rwkv_ops/rwkv7_kernel/triton_kernel.py` | RWKV-7 共享 Triton 内核 |
 | `rwkv_ops/rwkv7_kernel/jax_pallas_kernel.py` | RWKV-7 Pallas 内核 |
 | `rwkv_ops/rwkv7_sane_kernel/` | SANE 版，结构与 rwkv7_kernel 完全平行 |
+| `rwkv_ops/gdn_chunk/native_keras_op.py` | GDN chunkwise 原生参考实现 |
+| `rwkv_ops/gdn_recurrent/native_keras_op.py` | GDN recurrent 原生参考实现 |
+| `rwkv_ops/gdn_recurrent/triton_kernel.py` | GDN recurrent 共享 Triton 内核 |
+| `rwkv_ops/gdn_recurrent/torch_triton_kernel.py` | GDN recurrent PyTorch Triton 桥接 |
 | `rwkv_ops/rwkv6_kernel/ops_rwkv_kernel.py` | RWKV-6 数值 ground truth |
 | `rwkv_ops/rwkv6_kernel/native_keras_op.py` | RWKV-6 函数式原生封装 |
 | `rwkv_ops/mhc_kernel/native_op.py` | mHC 原生参考实现 |

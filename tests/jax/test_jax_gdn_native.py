@@ -26,7 +26,9 @@ def _load_native_module(name, relpath):
     return mod
 
 
-_gdn_chunk_mod = _load_native_module("gdn_chunk_native", "rwkv_ops/gdn_chunk/native_keras_op.py")
+_gdn_chunk_mod = _load_native_module(
+    "gdn_chunk_native", "rwkv_ops/gdn_chunk/native_keras_op.py"
+)
 _gdn_recurrent_mod = _load_native_module(
     "gdn_recurrent_native", "rwkv_ops/gdn_recurrent/native_keras_op.py"
 )
@@ -49,8 +51,12 @@ def test_gdn_chunk_matches_reference(gdn_inputs):
         q, k, v, g, beta, initial_state=h0, output_final_state=True
     )
 
-    assert_allclose_with_stats(out_ref, out_chunk, "chunk vs reference output", atol=2e-4, rtol=1e-3)
-    assert_allclose_with_stats(state_ref, state_chunk, "chunk vs reference state", atol=2e-4, rtol=1e-3)
+    assert_allclose_with_stats(
+        out_ref, out_chunk, "chunk vs reference output", atol=2e-4, rtol=1e-3
+    )
+    assert_allclose_with_stats(
+        state_ref, state_chunk, "chunk vs reference state", atol=2e-4, rtol=1e-3
+    )
 
 
 @pytest.mark.jax
@@ -66,8 +72,12 @@ def test_gdn_recurrent_matches_reference(gdn_inputs):
         q, k, v, g, beta, initial_state=h0, output_final_state=True
     )
 
-    assert_allclose_with_stats(out_ref, out_rec, "recurrent vs reference output", atol=1e-5, rtol=1e-3)
-    assert_allclose_with_stats(state_ref, state_rec, "recurrent vs reference state", atol=1e-5, rtol=1e-3)
+    assert_allclose_with_stats(
+        out_ref, out_rec, "recurrent vs reference output", atol=1e-5, rtol=1e-3
+    )
+    assert_allclose_with_stats(
+        state_ref, state_rec, "recurrent vs reference state", atol=1e-5, rtol=1e-3
+    )
 
 
 @pytest.mark.jax
@@ -83,8 +93,12 @@ def test_gdn_chunk_matches_recurrent(gdn_inputs):
         q, k, v, g, beta, initial_state=h0, output_final_state=True
     )
 
-    assert_allclose_with_stats(out_rec, out_chunk, "chunk vs recurrent output", atol=2e-4, rtol=1e-3)
-    assert_allclose_with_stats(state_rec, state_chunk, "chunk vs recurrent state", atol=2e-4, rtol=1e-3)
+    assert_allclose_with_stats(
+        out_rec, out_chunk, "chunk vs recurrent output", atol=2e-4, rtol=1e-3
+    )
+    assert_allclose_with_stats(
+        state_rec, state_chunk, "chunk vs recurrent state", atol=2e-4, rtol=1e-3
+    )
 
 
 @pytest.mark.jax
@@ -102,7 +116,9 @@ def test_gdn_no_final_state(gdn_inputs):
 
     assert state_chunk is None
     assert state_rec is None
-    assert_allclose_with_stats(out_rec, out_chunk, "no-state chunk vs recurrent output", atol=2e-4, rtol=1e-3)
+    assert_allclose_with_stats(
+        out_rec, out_chunk, "no-state chunk vs recurrent output", atol=2e-4, rtol=1e-3
+    )
 
 
 @pytest.mark.jax
@@ -119,8 +135,12 @@ def test_gdn_different_chunk_size(gdn_inputs):
         q, k, v, g, beta, initial_state=h0, output_final_state=True, chunk_size=32
     )
 
-    assert_allclose_with_stats(out_c64, out_c32, "chunk_size=64 vs 32 output", atol=2e-4, rtol=1e-3)
-    assert_allclose_with_stats(state_c64, state_c32, "chunk_size=64 vs 32 state", atol=2e-4, rtol=1e-3)
+    assert_allclose_with_stats(
+        out_c64, out_c32, "chunk_size=64 vs 32 output", atol=2e-4, rtol=1e-3
+    )
+    assert_allclose_with_stats(
+        state_c64, state_c32, "chunk_size=64 vs 32 state", atol=2e-4, rtol=1e-3
+    )
 
 
 @pytest.mark.jax
@@ -139,5 +159,9 @@ def test_gdn_arbitrary_length(gdn_inputs):
         q, k, v, g, beta, initial_state=h0, output_final_state=True
     )
 
-    assert_allclose_with_stats(out_ref, out_rec, "arbitrary length output", atol=1e-5, rtol=1e-3)
-    assert_allclose_with_stats(state_ref, state_rec, "arbitrary length state", atol=1e-5, rtol=1e-3)
+    assert_allclose_with_stats(
+        out_ref, out_rec, "arbitrary length output", atol=1e-5, rtol=1e-3
+    )
+    assert_allclose_with_stats(
+        state_ref, state_rec, "arbitrary length state", atol=1e-5, rtol=1e-3
+    )

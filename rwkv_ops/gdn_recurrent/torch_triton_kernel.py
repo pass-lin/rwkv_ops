@@ -1,0 +1,302 @@
+"""PyTorch 版 Gated DeltaNet recurrent Triton kernel 封装。"""
+
+import torch
+import triton
+
+from .triton_kernel import (
+    gated_delta_net_recurrent_fwd_kernel,
+    gated_delta_net_recurrent_inference_fwd_kernel,
+    gated_delta_net_recurrent_single_step_fwd_kernel,
+)
+
+
+def _normalize_inputs(q, k, v, g, beta, head_first):
+    """把输入统一转成 [B, H, T, *] 并保证连续。"""
+    if not head_first:
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+        g = g.transpose(1, 2)
+        beta = beta.transpose(1, 2)
+    return [x.contiguous() for x in [q, k, v, g, beta]]
+
+
+def _prepare_initial_state(initial_state, B, H, K, V, device):
+    """准备 float32 连续初始 state，支持 [1, H, K, V] 广播。"""
+    if initial_state is None:
+        return torch.zeros(B, H, K, V, dtype=torch.float32, device=device)
+    h0 = initial_state.to(torch.float32).contiguous()
+    if h0.shape[0] == 1 and B > 1:
+        h0 = h0.expand(B, *h0.shape[1:]).contiguous()
+    return h0
+
+
+def _make_recurrent_grid(B, H, V, BV):
+    """recurrent kernel 的启动 grid。"""
+    return (triton.cdiv(V, BV) * B * H,)
+
+
+class GatedDeltaNetRecurrentTritonFunction(torch.autograd.Function):
+    """Gated DeltaNet recurrent 训练前向 Triton 封装。"""
+
+    @staticmethod
+    def forward(
+        ctx,
+        q,
+        k,
+        v,
+        g,
+        beta,
+        initial_state,
+        output_final_state,
+        head_first,
+    ):
+        q, k, v, g, beta = _normalize_inputs(q, k, v, g, beta, head_first)
+
+        B, H, T, K = q.shape
+        V = v.shape[-1]
+        scale = K**-0.5
+
+        o = torch.empty_like(v)
+        final_state = torch.empty(B, H, K, V, dtype=torch.float32, device=q.device)
+        h0 = _prepare_initial_state(initial_state, B, H, K, V, q.device)
+
+        BK = triton.next_power_of_2(K)
+        BV = min(8, triton.next_power_of_2(V))
+        grid = _make_recurrent_grid(B, H, V, BV)
+
+        gated_delta_net_recurrent_fwd_kernel[grid](
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            o=o,
+            h0=h0,
+            ht=final_state,
+            scale=scale,
+            B=B,
+            H=H,
+            T=T,
+            K=K,
+            V=V,
+            BK=BK,
+            BV=BV,
+            USE_INITIAL_STATE=True,
+            STORE_FINAL_STATE=True,
+            num_warps=1,
+            num_stages=1,
+        )
+
+        ctx.save_for_backward(q, k, v, g, beta, h0)
+        ctx.head_first = head_first
+        ctx.output_final_state = output_final_state
+
+        if not head_first:
+            o = o.transpose(1, 2)
+
+        if output_final_state:
+            return o, final_state
+        return o, None
+
+    @staticmethod
+    def backward(ctx, do, dht):
+        raise NotImplementedError(
+            "Gated DeltaNet recurrent Triton backward is not implemented yet."
+        )
+
+
+def gated_delta_net_recurrent(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    initial_state=None,
+    output_final_state=False,
+    head_first=False,
+):
+    """Gated DeltaNet recurrent 训练算子（PyTorch Triton 实现）。
+
+    Args:
+        q, k: [B, T, H, K]，查询与键。
+        v: [B, T, H, V]，值。
+        g: [B, T, H]，log-space decay。
+        beta: [B, T, H]，写入强度，必须已在外部过 sigmoid 并落在 (0,1)。
+        initial_state: [B, H, K, V] 或 [1, H, K, V]，float32，可选。
+        output_final_state: bool，是否返回最终 state。
+        head_first: bool，输入输出是否 head 维优先（[B, H, T, *]）。
+
+    Returns:
+        out: [B, T, H, V]，与 v 同 dtype。
+        final_state: [B, H, K, V]，float32；仅当 output_final_state=True 时返回。
+
+    Raises:
+        RuntimeError: 输入不在 CUDA 设备上。
+    """
+    if q.device.type != "cuda":
+        raise RuntimeError("Gated DeltaNet Triton kernel only supports CUDA devices.")
+
+    return GatedDeltaNetRecurrentTritonFunction.apply(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        initial_state,
+        output_final_state,
+        head_first,
+    )
+
+
+def gated_delta_net_recurrent_inference(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    initial_state=None,
+    output_final_state=True,
+    head_first=False,
+):
+    """Gated DeltaNet recurrent 推理算子（PyTorch Triton 实现，无梯度）。
+
+    Args:
+        q, k: [B, T, H, K]，查询与键。
+        v: [B, T, H, V]，值。
+        g: [B, T, H]，log-space decay。
+        beta: [B, T, H]，写入强度，必须已在外部过 sigmoid 并落在 (0,1)。
+        initial_state: [B, H, K, V] 或 [1, H, K, V]，float32，可选。
+        output_final_state: bool，是否返回最终 state。
+        head_first: bool，输入输出是否 head 维优先（[B, H, T, *]）。
+
+    Returns:
+        out: [B, T, H, V]，与 v 同 dtype。
+        final_state: [B, H, K, V]，float32；仅当 output_final_state=True 时返回。
+
+    Raises:
+        RuntimeError: 输入不在 CUDA 设备上。
+    """
+    if q.device.type != "cuda":
+        raise RuntimeError("Gated DeltaNet Triton kernel only supports CUDA devices.")
+
+    q, k, v, g, beta = _normalize_inputs(q, k, v, g, beta, head_first)
+
+    B, H, T, K = q.shape
+    V = v.shape[-1]
+    scale = K**-0.5
+
+    o = torch.empty_like(v)
+    final_state = torch.empty(B, H, K, V, dtype=torch.float32, device=q.device)
+    h0 = _prepare_initial_state(initial_state, B, H, K, V, q.device)
+
+    BK = triton.next_power_of_2(K)
+    BV = min(8, triton.next_power_of_2(V))
+    grid = _make_recurrent_grid(B, H, V, BV)
+
+    gated_delta_net_recurrent_inference_fwd_kernel[grid](
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        o=o,
+        h0=h0,
+        ht=final_state,
+        scale=scale,
+        B=B,
+        H=H,
+        T=T,
+        K=K,
+        V=V,
+        BK=BK,
+        BV=BV,
+        USE_INITIAL_STATE=True,
+        STORE_FINAL_STATE=True,
+        num_warps=1,
+        num_stages=1,
+    )
+
+    if not head_first:
+        o = o.transpose(1, 2)
+
+    if output_final_state:
+        return o, final_state
+    return o, None
+
+
+def gated_delta_net_recurrent_single_step(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    initial_state=None,
+    output_final_state=True,
+    head_first=True,
+):
+    """Gated DeltaNet recurrent 单步 RNN 算子（PyTorch Triton 实现）。
+
+    Args:
+        q, k: [B, H, K]，查询与键。
+        v: [B, H, V]，值。
+        g: [B, H]，log-space decay。
+        beta: [B, H]，写入强度，必须已在外部过 sigmoid 并落在 (0,1)。
+        initial_state: [B, H, K, V] 或 [1, H, K, V]，float32，可选。
+        output_final_state: bool，是否返回下一步 state。
+        head_first: bool，输入输出是否 head 维优先。单步默认 True（[B, H, *]）。
+
+    Returns:
+        out: [B, H, V]，与 v 同 dtype。
+        next_state: [B, H, K, V]，float32；仅当 output_final_state=True 时返回。
+
+    Raises:
+        RuntimeError: 输入不在 CUDA 设备上。
+        NotImplementedError: head_first=False 尚未支持。
+    """
+    if q.device.type != "cuda":
+        raise RuntimeError("Gated DeltaNet Triton kernel only supports CUDA devices.")
+    if not head_first:
+        raise NotImplementedError(
+            "gated_delta_net_recurrent_single_step currently only supports head_first=True."
+        )
+
+    q, k, v, g, beta = [x.contiguous() for x in [q, k, v, g, beta]]
+
+    B, H, K = q.shape
+    V = v.shape[-1]
+    scale = K**-0.5
+
+    o = torch.empty_like(v)
+    next_state = torch.empty(B, H, K, V, dtype=torch.float32, device=q.device)
+    h0 = _prepare_initial_state(initial_state, B, H, K, V, q.device)
+
+    BK = triton.next_power_of_2(K)
+    BV = min(8, triton.next_power_of_2(V))
+    grid = (triton.cdiv(V, BV) * B * H,)
+
+    gated_delta_net_recurrent_single_step_fwd_kernel[grid](
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        o=o,
+        h0=h0,
+        ht=next_state,
+        scale=scale,
+        B=B,
+        H=H,
+        K=K,
+        V=V,
+        BK=BK,
+        BV=BV,
+        USE_INITIAL_STATE=True,
+        STORE_FINAL_STATE=True,
+        num_warps=1,
+        num_stages=1,
+    )
+
+    if output_final_state:
+        return o, next_state
+    return o, None

@@ -60,9 +60,7 @@ def _gdn_recurrent_step(t, inputs, q, k, v, g, beta, scale, B, H, V, DTYPE):
     if backend == "tensorflow":
         out = out.write(t, ops.cast(out_t, DTYPE))
     elif backend == "torch":
-        out[:, t : t + 1] = ops.reshape(
-            ops.cast(out_t, DTYPE), (B, 1, H, V)
-        )
+        out[:, t : t + 1] = ops.reshape(ops.cast(out_t, DTYPE), (B, 1, H, V))
     else:
         out = ops.slice_update(
             out, [0, t, 0, 0], ops.reshape(ops.cast(out_t, DTYPE), (B, 1, H, V))
@@ -220,6 +218,71 @@ def gated_delta_net_reference(
     out = ops.transpose(out, (0, 2, 1, 3))
     out = ops.cast(out, DTYPE)
 
+    if output_final_state:
+        return out, state
+    return out, None
+
+
+def gated_delta_net_recurrent_inference(
+    q, k, v, g, beta, initial_state=None, output_final_state=True
+):
+    """Gated DeltaNet recurrent 推理原生封装（无梯度）。
+
+    当前阶段与 `gated_delta_net_recurrent` 数学等价，仅用于保持 API 一致性。
+
+    Args:
+        q: [B, T, H, K]，查询。
+        k: [B, T, H, K]，键。
+        v: [B, T, H, V]，值。
+        g: [B, T, H]，decay gate（对数空间）。
+        beta: [B, T, H]，写入强度门控，需已落在 (0,1) 内。
+        initial_state: [B, H, K, V] 或 [1, H, K, V]，float32，可选。
+        output_final_state: bool，是否返回最终状态。
+
+    Returns:
+        out: [B, T, H, V]，与 v 同 dtype。
+        final_state: [B, H, K, V]，float32；仅当 output_final_state=True 时返回。
+    """
+    return gated_delta_net_recurrent(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+    )
+
+
+def gated_delta_net_recurrent_single_step(
+    q, k, v, g, beta, initial_state=None, output_final_state=True
+):
+    """Gated DeltaNet recurrent 单步 RNN 原生实现。
+
+    Args:
+        q: [B, H, K]，查询。
+        k: [B, H, K]，键。
+        v: [B, H, V]，值。
+        g: [B, H]，decay gate（对数空间）。
+        beta: [B, H]，写入强度门控，需已落在 (0,1) 内。
+        initial_state: [B, H, K, V] 或 [1, H, K, V]，float32，可选。
+        output_final_state: bool，是否返回 next state。
+
+    Returns:
+        out: [B, H, V]，与 v 同 dtype。
+        next_state: [B, H, K, V]，float32；仅当 output_final_state=True 时返回。
+    """
+    q = ops.expand_dims(q, axis=1)
+    k = ops.expand_dims(k, axis=1)
+    v = ops.expand_dims(v, axis=1)
+    g = ops.expand_dims(g, axis=1)
+    beta = ops.expand_dims(beta, axis=1)
+
+    out, state = gated_delta_net_recurrent(
+        q, k, v, g, beta, initial_state=initial_state, output_final_state=True
+    )
+
+    out = ops.squeeze(out, axis=1)
     if output_final_state:
         return out, state
     return out, None

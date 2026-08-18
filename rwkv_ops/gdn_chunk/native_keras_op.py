@@ -146,7 +146,9 @@ def gated_delta_net_chunk(
     else:
         last_state = ops.cast(initial_state, "float32")
         if ops.shape(last_state)[0] == 1:
-            last_state = ops.broadcast_to(last_state, (batch_size, num_heads, k_head_dim, v_head_dim))
+            last_state = ops.broadcast_to(
+                last_state, (batch_size, num_heads, k_head_dim, v_head_dim)
+            )
 
     triu1_mask = ops.triu(ops.ones((chunk_size, chunk_size)), k=1)
     triu1_bool = ops.cast(triu1_mask, "bool")
