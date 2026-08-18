@@ -143,6 +143,57 @@ def rwkv7_sane_inputs(rng, rwkv7_inputs):
 
 
 @pytest.fixture(scope="session")
+def gdn_shape():
+    """GDN 测试默认形状。
+
+    Returns:
+        tuple: (B, T, H, K, V) = (2, 128, 4, 64, 128)。
+    """
+    return 2, 128, 4, 64, 128
+
+
+@pytest.fixture(scope="session")
+def gdn_inputs(rng, gdn_shape):
+    """GDN 测试输入张量。
+
+    q/k 不做 L2 norm，由算子内部处理。g 取负 softplus 保证稳定衰减；
+    beta 取 sigmoid，使其落在 (0,1)。
+
+    Args:
+        rng: np.random.Generator，随机数生成器。
+        gdn_shape: tuple, (B, T, H, K, V)。
+
+    Returns:
+        dict: 包含 q/k/v/g/beta/h0，均为 float32 numpy 数组。
+            q/k: [B, T, H, K]。
+            v: [B, T, H, V]。
+            g/beta: [B, T, H]。
+            h0: [B, H, K, V]。
+    """
+    B, T, H, K, V = gdn_shape
+    q = rng.standard_normal((B, T, H, K), dtype=np.float32)
+    k = rng.standard_normal((B, T, H, K), dtype=np.float32)
+    v = rng.standard_normal((B, T, H, V), dtype=np.float32)
+
+    g_raw = rng.standard_normal((B, T, H), dtype=np.float32)
+    g = -np.log1p(np.exp(g_raw)) - 0.5
+    g = g.astype(np.float32)
+
+    beta_raw = rng.standard_normal((B, T, H), dtype=np.float32)
+    beta = (1.0 / (1.0 + np.exp(-beta_raw))).astype(np.float32)
+
+    h0 = rng.standard_normal((B, H, K, V), dtype=np.float32) * 0.1
+    return {
+        "q": q,
+        "k": k,
+        "v": v,
+        "g": g,
+        "beta": beta,
+        "h0": h0,
+    }
+
+
+@pytest.fixture(scope="session")
 def mhc_shape():
     """mHC 测试默认形状。
 
