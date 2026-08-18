@@ -712,7 +712,597 @@ __global__ void wkv7_forward(...)
 
 ---
 
-## 10. 相关文件速查
+## 10. JAX-Triton 桥接教程
+
+> 目标：用 JAX 调用已有的 Triton kernel，并保证与 PyTorch / native 输出一致。
+> 项目内参考实现：`rwkv_ops/rwkv7_kernel/jax_triton_kernel.py`、
+> `rwkv_ops/rwkv7_sane_kernel/jax_triton_kernel.py`、
+> `rwkv_ops/mhc_kernel/jax_triton_op/`。
+> 依赖 `jax-triton>=0.3.1`，通过 `pip install -e ".[test]"` 安装。
+
+### 10.1 前置说明
+
+- 本文档**不教如何写 Triton kernel**，只教如何在 JAX 中做**桥接封装**。
+- 核心难点：JAX 侧需要显式声明输出形状、常量参数、grid，并处理 PyTorch 侧隐式完成的事情（如 `None` 输入、内存初始化、SPMD 分片等）。
+- 所有桥接文件共享同一个 `triton_kernel.py`，因此修改 kernel 数学时必须同步检查 JAX 与 PyTorch 两侧桥接。
+
+### 10.2 基础调用范式
+
+Triton kernel 的签名通常可分为三类参数：
+
+- 输入张量：按顺序传入 `jt.triton_call` 的 `*args`。
+- 输出张量：在 `out_shape` 中声明，顺序与 kernel 的输出指针对应。
+- `tl.constexpr` 编译期常量：以 `**kwargs` 形式传入。
+
+以 `rwkv7_sane_kernel/jax_triton_kernel.py` 的前向调用为例：
+
+```python
+import jax
+import jax.numpy as jnp
+import jax_triton as jt
+
+from .triton_kernel import rwkv7_sane_fwd_kernel
+
+CHUNK_LEN = 16
+
+def _wkv7_sane_fwd_triton_call(r, w, k, v, a, b, tau, h0):
+    B, N, T, H = r.shape
+    dtype = r.dtype
+    chunk_num = T // CHUNK_LEN
+
+    # out_shape 列表顺序与 kernel 的输出指针 OUT / SA_OUT / STATE_CHKP 一一对应
+    out_shapes = [
+        jax.ShapeDtypeStruct((B, N, T, H), dtype),
+        jax.ShapeDtypeStruct((B, N, T, H), jnp.float32),
+        jax.ShapeDtypeStruct((B, N, chunk_num, H, H), jnp.float32),
+    ]
+
+    # grid 与 Torch 侧保持一致
+    def grid(meta):
+        return ((B + meta["MINI_BSZ"] - 1) // meta["MINI_BSZ"], N)
+
+    out, sa_out, state_chkp = jt.triton_call(
+        r, w, k, v, a, b, tau, h0,  # 输入张量，顺序严格对齐 kernel 签名
+        B, N, T,                     # 标量（kernel 里按指针/值读取均可）
+        kernel=rwkv7_sane_fwd_kernel,
+        out_shape=out_shapes,
+        grid=grid,
+        H_SIZE=H,                    # tl.constexpr
+        CHUNK_LEN=CHUNK_LEN,         # tl.constexpr
+    )
+    return out, sa_out, state_chkp
+```
+
+要点：
+
+- `*args` 顺序必须严格对齐 kernel 的输入指针签名。
+- `out_shape` 是 `jax.ShapeDtypeStruct(shape, dtype)` 的列表，长度与输出指针数量一致。
+- `grid` 与 Torch 侧完全一致；如果 kernel 使用 `@triton.autotune`，`meta` 会包含 `MINI_BSZ` 等自动调参产生的值。
+- 所有 `tl.constexpr` 通过 `**kwargs` 传入，不要在 `*args` 中传。
+
+### 10.3 装饰器处理
+
+如果 kernel 同时被 `@triton.heuristics` 和 `@triton.autotune` 包装，直接传 `kernel=xxx` 可能报错：
+
+```text
+'kernel' must be a Triton `JITFunction`, `Heuristics` or `Autotuner`.
+```
+
+原因：`jax-triton` 的校验无法识别被多层装饰器包裹后的对象。解决方法是取最底层 `JITFunction`：
+
+```python
+kernel=some_kernel.fn   # 跳过 heuristics，指向 autotune 或底层函数
+```
+
+同时需要手动补齐 heuristics 产生的参数：
+
+```python
+jt.triton_call(
+    ...,
+    kernel=some_kernel.fn,
+    USE_FINAL_STATE_GRADIENT=True,
+    USE_INITIAL_STATE=False,
+)
+```
+
+> 项目当前 RWKV-7 / RWKV-7-SANE / mHC 的共享 kernel 只使用了 `@triton.autotune`，因此可以直接传 `kernel=rwkv7_fwd_kernel` 等，无需 `.fn`。
+
+### 10.4 可选输入与可选输出
+
+`jax-triton` 的 `*args` 和 `out_shape` 都不能出现 `None`。对于 PyTorch 侧可为 `None` 的参数（如 `initial_state`、`dht`），JAX 侧需显式构造零张量。
+
+参考 `rwkv7_kernel/jax_triton_kernel.py` 的反向封装：
+
+```python
+def _bwd(res, grads):
+    r, w, k, v, a, b, sa_out, state_chkp = res
+    dy, dht = grads
+    dy = jnp.asarray(dy, jnp.bfloat16)
+    if dht is None:
+        B, N, T, H = r.shape
+        dht = jnp.zeros((B, N, H, H), dtype=jnp.float32)
+    else:
+        dht = jnp.asarray(dht, jnp.float32)
+
+    dr, dw, dk, dv, da, db, dh0 = _wkv7_bwd_spmd(
+        r, w, k, v, a, b, dy, sa_out, state_chkp, dht
+    )
+    return dr, dw, dk, dv, da, db, dh0
+```
+
+`out_shape` 中也不能放 `None`。即使某个输出在特定分支不需要，也要给它一个合法的 `ShapeDtypeStruct`；通常通过常量参数控制 kernel 内部是否真正写入。
+
+### 10.5 原子操作与内存初始化
+
+当 kernel 内部使用 `tl.atomic_add` 等原子操作时，输出内存必须预先初始化为 0，否则可能复用 XLA 分配的脏内存导致结果错误。`jax-triton` 提供 `zeroed_outputs` 参数指定哪些输出需要清零：
+
+```python
+jt.triton_call(
+    ...,
+    out_shape=[jax.ShapeDtypeStruct(shape, dtype)],
+    zeroed_outputs=(0,),   # 第 0 个输出在 kernel 执行前清零
+)
+```
+
+> 项目当前通过设计避免原子操作：例如 mHC 反向 kernel 把 grid 固定为 `(total_bt, 1)`，让不同 program 写不同输出位置，从而不需要原子加；RWKV-7 系列 kernel 的输出由每个 block 独占写回，也不依赖 `zeroed_outputs`。新增使用原子操作的 kernel 时才需要显式传入该参数。
+
+### 10.6 custom_vjp 与 custom_partitioning
+
+JAX 桥接需要同时支持自动微分和 SPMD 分片，因此通常把 `jt.triton_call` 包在三层结构里：
+
+- 最内层：`jt.triton_call(...)` 的 launcher。
+- 中间层：`@custom_partitioning` + `def_partition(...)`，声明 sharding 规则。
+- 最外层：`@jax.custom_vjp` + `defvjp(...)`，声明反向传播。
+
+参考 `rwkv7_sane_kernel/jax_triton_kernel.py`：
+
+```python
+from jax.experimental.custom_partitioning import custom_partitioning
+from jax.sharding import NamedSharding, PartitionSpec
+
+# Einsum 风格的 sharding rule：同一字母表示同一轴，支持 head 维 TP
+FWD_RULE = (
+    "b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n c, b n h h -> "
+    "b n t h, b n t h, b n c h h"
+)
+
+def _fwd_infer_sharding(arg_shapes, arg_shardings):
+    qs = arg_shardings[0]
+    return (
+        _sharding_like_q(qs),
+        _sharding_like_q(qs),
+        _sharding_for_state(qs),
+    )
+
+def _create_partition(impl_fn):
+    def partition(mesh, arg_shapes, result_shape):
+        def lower_fn(*args):
+            return impl_fn(*args)
+        result_shardings = jtu.tree_map(lambda x: x.sharding, result_shape)
+        arg_shardings = jtu.tree_map(lambda x: x.sharding, arg_shapes)
+        return mesh, lower_fn, result_shardings, arg_shardings
+    return partition
+
+# 1. launcher
+def _wkv7_sane_fwd_triton_call(r, w, k, v, a, b, tau, h0):
+    ...
+    return jt.triton_call(...)
+
+# 2. custom_partitioning
+@custom_partitioning
+def _wkv7_sane_fwd_spmd(r, w, k, v, a, b, tau, h0):
+    return _wkv7_sane_fwd_triton_call(r, w, k, v, a, b, tau, h0)
+
+_wkv7_sane_fwd_spmd.def_partition(
+    infer_sharding_from_operands=_fwd_infer_sharding,
+    sharding_rule=FWD_RULE,
+    partition=_create_partition(_wkv7_sane_fwd_triton_call),
+)
+
+# 3. custom_vjp
+@jax.custom_vjp
+def rwkv7_sane_kernel_triton(r, w, k, v, a, b, tau, h0):
+    out, sa_out, state_chkp = _wkv7_sane_fwd_spmd(...)
+    return out, final_state
+
+rwkv7_sane_kernel_triton.defvjp(_fwd, _bwd)
+```
+
+注意 `custom_partitioning` 定义时需要 `static_argnums` 来处理非张量参数。参考 `mhc_kernel/jax_triton_op/mhc_pre_op.py`：
+
+```python
+mhc_pre_op_fwd_spmd = custom_partitioning(
+    _mhc_pre_op_fwd_spmd_impl, static_argnums=(3, 4)
+)
+```
+
+`num_iters` 和 `eps` 作为静态参数，不会进入分片规则的追踪。
+
+### 10.7 布局、步幅与数值一致性
+
+- **连续布局**：`jax-triton` 默认按连续内存做指针偏移。传入 strided 张量可能得到错误结果。RWKV-7 系列在转置到 head-first 后必须保证 contiguous；Torch 侧会用 `.contiguous()` 处理，JAX 侧通常在 `_transpose_head` 后已通过 `jnp.transpose` 得到连续布局，但仍需注意不要传非连续视图。
+- **步幅参数**：mHC kernel 需要显式传入各张量的 stride，例如 `stride_x_bt`、`stride_x_n`、`stride_x_c` 等。JAX 侧用 `jt.strides_from_shape(shape)` 计算后传入，保证与 kernel 内部的指针算术一致。
+- **dtype 对齐**：Triton kernel 通常 `bfloat16` I/O、`float32` 内部累加。JAX 侧进 kernel 前需要把 state / tau / mask 等 cast 到 `jnp.float32`，输出后再 cast 回原始 dtype。
+- **数值对拍**：新增 kernel 后，先用 `native_keras_op.py` 的输出作为 ground truth，对同一组 numpy 输入分别跑 native 与 triton 版本，比较前向输出、final_state 与反向梯度。
+
+### 10.8 通用调用模板
+
+```python
+import jax
+import jax_triton as jt
+
+def call_triton_kernel(kernel, inputs, out_shapes, constants, grid, zeroed=None):
+    """通用 JAX-Triton 调用模板。
+
+    Args:
+        kernel: Triton JITFunction（如有多层装饰器请传 .fn）。
+        inputs: list[JaxArray]，对应 kernel 的输入指针。
+        out_shapes: list[ShapeDtypeStruct]，顺序对应 kernel 的输出指针。
+        constants: dict，对应 kernel 的 tl.constexpr 参数。
+        grid: tuple 或 callable，launch grid。
+        zeroed: tuple[int]，需要在 kernel 执行前清零的输出索引。
+
+    Returns:
+        单个 jax.Array 或 tuple，与 out_shapes 一一对应。
+    """
+    return jt.triton_call(
+        *inputs,
+        kernel=kernel,
+        out_shape=out_shapes,
+        grid=grid,
+        zeroed_outputs=zeroed or (),
+        **constants,
+    )
+```
+
+核心记住三点：**输入顺序严格对齐**、**输出形状显式声明**、**特殊参数（None / 装饰器 / 原子操作 / 静态参数）显式处理**。
+
+---
+
+## 11. JAX 自定义算子分片教程
+
+> 目标：让 Triton / Pallas / CUDA-FFI 自定义算子在 JAX SPMD 训练下正确传播分片，
+> 支持 DP（batch 维并行）与 TP（head 维并行）。
+> 参考：[JAX FFI 外部函数接口与分片](https://jax.net.cn/en/latest/ffi.html)、
+> `rwkv_ops/rwkv7_kernel/jax_pallas_kernel.py`、
+> `rwkv_ops/rwkv7_kernel/jax_cuda_kernel/wkv7_jax.py`、
+> `rwkv_ops/rwkv7_sane_kernel/jax_pallas_kernel.py`、
+> `rwkv_ops/rwkv7_sane_kernel/jax_cuda_kernel/wkv7_sane_jax.py`。
+
+### 11.1 为什么自定义算子需要显式分片
+
+普通 JAX 算子（`jnp.matmul`、`jax.lax.scan` 等）在 `jit(..., in_shardings=..., out_shardings=...)` 下会自动被 XLA 重新分区（reshard / all-gather / all-reduce）。但自定义算子对 XLA 是黑盒：
+
+- 不做声明的 FFI 调用会把分片输入 `all-gather` 成全量，在每个设备上跑完整 kernel，再切片回分片输出，通信开销巨大。
+- `shard_map` 可以把手动分区边界内的 FFI 调用限制在本地 shard 上执行，无需通信。
+- `custom_partitioning` 可以把分区逻辑注册到 XLA 编译器，让 `jit` 在自动并行化时直接生成分区后的自定义调用。
+
+本项目所有 JAX 加速算子（Pallas / Triton / CUDA FFI）统一使用 `custom_partitioning` 方案，
+使其在常规 `jax.jit(..., in_shardings=..., out_shardings=...)` 流程中自动支持 DP/TP。
+
+### 11.2 基础概念速览
+
+```python
+import jax
+from jax.sharding import NamedSharding, PartitionSpec, Mesh
+
+# 构造一个 4 卡 mesh，轴名为 "data"。
+mesh = jax.make_mesh((4,), ("data",))
+
+# 对 4 维张量 [B, T, H, K] 在 batch 维切分。
+sharding = NamedSharding(mesh, PartitionSpec("data", None, None, None))
+
+x = jax.device_put(x, sharding)
+```
+
+- `PartitionSpec` 中的 `None` 表示该维度在所有设备上 replicate。
+- 同一 mesh 轴名出现在多个张量的不同维度上时，XLA 会在必要时做 all-gather / all-reduce。
+- 自定义算子需要告诉 XLA "这个张量的 batch 维可以切、time 维不能切、state 维需要 replicate"。
+
+### 11.3 核心方案：custom_partitioning + Einsum sharding_rule
+
+项目内所有 JAX 自定义算子采用同一套样板：
+
+```python
+from jax.experimental.custom_partitioning import custom_partitioning
+from jax.sharding import NamedSharding, PartitionSpec
+import jax.tree_util as jtu
+
+# Einsum 风格规则：同一字母的维度必须同形且可一起切分。
+FWD_RULE = (
+    "b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n h h -> "
+    "b n t h, b n t h, b n c h h"
+)
+
+def _fwd_infer_sharding(arg_shapes, arg_shardings):
+    qs = arg_shardings[0]
+    return (
+        _sharding_like_q(qs),       # 输出 y 与输入 q 同形
+        _sharding_like_q(qs),       # 输出 sa 与输入 q 同形
+        _sharding_for_state(qs),    # 输出 state checkpoint 形状不同，需要重建
+    )
+
+@custom_partitioning
+def _wkv7_fwd_spmd(r, w, k, v, a, b, h0):
+    return _wkv7_fwd_pallas_call(r, w, k, v, a, b, h0)
+
+_wkv7_fwd_spmd.def_partition(
+    infer_sharding_from_operands=_fwd_infer_sharding,
+    sharding_rule=FWD_RULE,
+    partition=create_partition(_wkv7_fwd_pallas_call),
+)
+```
+
+`create_partition` 来自 `rwkv_ops/pallas_utils.py`，作用是在分区后的本地 mesh 上直接执行 `impl_fn`，
+并把输入/输出的 `NamedSharding` 透传给 XLA：
+
+```python
+def create_partition(impl_fn):
+    def partition(mesh, arg_shapes, result_shape):
+        def lower_fn(*args):
+            return impl_fn(*args)
+        result_shardings = jtu.tree_map(lambda x: x.sharding, result_shape)
+        arg_shardings = jtu.tree_map(lambda x: x.sharding, arg_shapes)
+        return mesh, lower_fn, result_shardings, arg_shardings
+    return partition
+```
+
+### 11.4 维度字母约定与可切分维度
+
+本项目规则统一使用以下字母：
+
+| 字母 | 含义 | 是否可切 |
+|---|---|---|
+| `b` | batch | ✅ 可 DP |
+| `n` / `h` | head | ✅ 可 TP |
+| `t` | time | ❌ 不能切（扫描需要完整 T） |
+| `k` / `m` | head_size | ❌ 不能切（state 需要完整 head_size） |
+| `c` | chunk | ❌ 不能切（chunk 是扫描的聚合单位） |
+
+> 只允许切 batch 或 head 维；切 time 或 head_size 维会静默算错。
+
+以 `rwkv7_kernel/jax_pallas_kernel.py` 为例：
+
+```python
+FWD_RULE = "b n t h, ..., b n h m -> b n t h, b n t h, b n c h m"
+```
+
+- 所有输入的 `b` 与 `n` 用同一字母，表示 batch 维与 head 维会随输入一起切分。
+- `t`、`h`（time 与 head_size）用独立字母且不与输出混用，表示 replicate。
+- state checkpoint `(B, N, C, H, H)` 的 sharding 用 `(spec[0], spec[1], None, spec[3], spec[3])`，
+  即 batch/head 可切，chunk 与两个 head_size 维 replicate。
+
+### 11.5 输出 sharding 不是输入同形时如何重建
+
+`state`、`final_state`、`dtau` 等输出的形状与输入不同，不能简单继承输入 sharding。
+项目内使用从输入 `q` 的 `NamedSharding.spec` 重建的方法：
+
+```python
+def _q_spec(qs):
+    spec = getattr(qs, "spec", None)
+    if spec is None or len(spec) != 4:
+        return None
+    return spec
+
+def _sharding_for_state(qs):
+    spec = _q_spec(qs)
+    if spec is None:
+        return qs
+    return NamedSharding(
+        qs.mesh,
+        PartitionSpec(spec[0], spec[1], None, spec[3], spec[3])
+    )
+
+def _sharding_for_final_state(qs):
+    spec = _q_spec(qs)
+    if spec is None:
+        return qs
+    return NamedSharding(
+        qs.mesh,
+        PartitionSpec(spec[0], spec[1], spec[3], spec[3])
+    )
+```
+
+在 CUDA FFI 版（`wkv7_jax.py`）中，输入 layout 是 `[B, T, H, K]`，
+因此 `spec` 的下标映射与 Pallas 版略有不同：
+
+```python
+def _sharding_for_state(qs):
+    spec = _q_spec(qs)  # [B, T, H, K]
+    return NamedSharding(
+        qs.mesh,
+        PartitionSpec(spec[0], spec[2], None, spec[3], spec[3])
+    )
+```
+
+> 关键原则：拿到输入 `NamedSharding` 后，按输出维度顺序从 `spec` 中取出对应轴名，
+> 无对应维度或不能切的维度置 `None`。
+
+### 11.6 Pallas 与分片的关系
+
+Pallas kernel 的 `grid=(B, N)` 天然对应 "每个 program 处理一个 (batch, head)"：
+
+```python
+def _rwkv7_fwd_kernel(r_ref, w_ref, ..., h0_ref, o_ref, sa_ref, chkp_ref):
+    b = pl.program_id(0)
+    h = pl.program_id(1)
+    state = h0_ref[b, h].astype(jnp.float32)
+    ...
+```
+
+- 当 batch 或 head 被切分时，每个设备只会拿到本地 `(B_local, N_local)` 子集，
+  grid 自动缩小，无需在 kernel 内写额外逻辑。
+- `pallas_call` 的输入/输出 `BlockSpec` 在 `pallas_utils.whole_specs` 中统一构造，
+  使用 `pl.BlockSpec(memory_space=pl.ANY)`（Triton/TPU）或 `plgpu.MemorySpace.GMEM`（MGPU）。
+- `custom_partitioning` 包裹后，XLA 会在 mesh 上为每个设备 launch 对应子 grid。
+
+Pallas 版需要注意 warmup：
+
+```python
+def _wkv7_fwd_warmup(r, w, k, v, a, b, h0):
+    B, N, T, H = r.shape
+    ensure_config(
+        "wkv7_fwd", _rwkv7_fwd_kernel,
+        _fwd_out_shape(r), (B, N),
+        (r, w, k, v, a, b, h0),
+    )
+```
+
+`custom_partitioning` 在 eager 下也会 trace 内层函数，因此必须先用真实数组调用 `ensure_config`
+解析后端配置；被 trace 时只查缓存，否则会用首个候选导致探测失败。
+
+### 11.7 CUDA FFI 版的分片封装
+
+CUDA FFI 通过 `jax.ffi.ffi_call` 调用外部 `.so`。分片封装方式与 Pallas/Triton 完全一致：
+
+```python
+def _wkv7_kernel_impl(w, q, k, v, a, b, h0):
+    B, T, H, K = q.shape
+    dtype = q.dtype
+    chunk_num = int(T // CHUNK_LEN)
+    out_type = jax.ShapeDtypeStruct((B, T, H, K), dtype)
+    s_type = jax.ShapeDtypeStruct((B, H, chunk_num, K, K), jnp.float32)
+    sa_type = jax.ShapeDtypeStruct((B, T, H, K), jnp.float32)
+
+    return jax.ffi.ffi_call(
+        "wkv7_fwd", (out_type, s_type, sa_type),
+        vmap_method="broadcast_all",
+    )(w, q, k, v, a, b, h0)
+
+@custom_partitioning
+def _wkv7_kernel(w, q, k, v, a, b, h0):
+    return _wkv7_kernel_impl(w, q, k, v, a, b, h0)
+
+_wkv7_kernel.def_partition(
+    infer_sharding_from_operands=_fwd_infer_sharding,
+    sharding_rule=FWD_RULE,
+    partition=_create_partition(_wkv7_kernel_impl),
+)
+```
+
+注意：
+
+- `vmap_method="broadcast_all"` 让 FFI 调用在 batch 维被 `vmap` 时直接广播处理，
+  与 `custom_partitioning` 的 batch 切分语义一致。
+- 后端 C++ kernel 必须能处理任意 `(B_local, H_local)` 子集；
+  本项目 CUDA kernel 的 grid 也是 `(batch_blocks, head_blocks)`，与 Pallas 相同。
+- `jax.ffi.register_ffi_target(..., platform="CUDA")` 注册的符号名
+  必须与 `ffi_call("symbol_name", ...)` 完全一致。
+
+### 11.8 Triton 版的分片封装
+
+Triton 版（`rwkv7_kernel/jax_triton_kernel.py`）同样用 `custom_partitioning`，
+只是底层调用 `jax_triton.triton_call` 而不是 `pl.pallas_call` / `ffi_call`：
+
+```python
+@custom_partitioning
+def _wkv7_fwd_spmd(r, w, k, v, a, b, h0):
+    return _wkv7_fwd_triton_call(r, w, k, v, a, b, h0)
+
+_wkv7_fwd_spmd.def_partition(
+    infer_sharding_from_operands=_fwd_infer_sharding,
+    sharding_rule=FWD_RULE,
+    partition=_create_partition(_wkv7_fwd_triton_call),
+)
+```
+
+Triton kernel 的 grid 为 `((B + MINI_BSZ - 1) // MINI_BSZ, N)`，
+即第一个维度按 batch block 切分，第二个维度按 head 切分；
+`custom_partitioning` 会保证每个设备只拿到它负责的那部分 grid。
+
+### 11.9 mask / tau 等特殊张量的分片
+
+在 RWKV-7-SANE 中：
+
+- `tau` 形状 `[B, T//16, H]`，带 head 维，可随 head 轴 TP 切分。
+- `mask` 形状 `[B, T//16]`，所有 head 共享，无 head 维；规则中用 `b c`，
+  因此 head 轴 TP 时会自动 replicate。
+
+以 SANE Pallas 规则为例：
+
+```python
+FWD_MASK_RULE = (
+    "b n t h, b n t h, ..., b n c, b c, b n h h -> b n t h, b n t h, b n c h h"
+)
+```
+
+`b n c` 的 `tau` 与 `b c` 的 `mask` 区别就在于 head 维：
+
+```python
+def _sharding_for_tau(qs):
+    spec = _q_spec(qs)
+    return NamedSharding(
+        qs.mesh,
+        PartitionSpec(spec[0], spec[1], None)  # [B, N, C]
+    )
+```
+
+### 11.10 单步算子（T=1）的分片
+
+单步 RWKV-7 / RWKV-7-SANE CUDA kernel（用于 decode）同样支持 DP 与 TP：
+
+```python
+FWD_RULE = "b h k v, b h k, b h k, b h k, b h k, b h k, b h k v -> b h k v, b h k v"
+```
+
+- 输入输出都是 `(B, H, K, V)` 级别的 state，没有 time 维。
+- batch 与 head 可切，head_size 与 value_size 必须 replicate。
+- SANE 单步的 `tau` 为 `[B, H]`、`do_sane` 为 `[B]`，规则同样覆盖。
+
+### 11.11 结构验证：单卡 1-device mesh
+
+多卡环境不是人人都有，但单卡可以用 1-device mesh 做结构验证：
+
+```python
+import jax
+from jax.sharding import Mesh, PartitionSpec as P, NamedSharding
+
+mesh = jax.make_mesh((1,), ("data",))
+sharding = NamedSharding(mesh, P("data", None, None, None))
+
+x = jax.device_put(x, sharding)
+y, state = jax.jit(op, out_shardings=(sharding, None))(x)
+```
+
+验证点：
+
+- `jit` 编译通过，不报错。
+- 输入/输出的 `sharding.spec` 符合预期。
+- 数值与不分片版本完全一致。
+
+真正的 all-gather / all-reduce 行为需要在多卡环境复核，但结构验证可以提前发现规则拼写、
+输出维度映射、mask 缺失等大部分问题。
+
+### 11.12 常见陷阱
+
+- **时间维被切**：规则中若把 `t` 写成可切字母，编译不报错但结果错误，因为 scan 需要完整 T。
+- **state 维映射错**：`final_state [B, H, K, K]` 的 PartitionSpec 写成 `(spec[0], spec[1], spec[2], spec[2])`
+  而 `spec[2]` 是 time 维时，会把 time 轴错误地当作 head_size 轴切分。
+- **CUDA 与 Pallas 的 spec 下标不同**：CUDA FFI 输入是 `[B, T, H, K]`，Pallas/Triton 内部转成 `[B, N, T, H]`，
+  `_sharding_for_state` 的下标必须分别对应。
+- **忘记 warmup**：Pallas 版在 `custom_vjp` 的 primal/fwd/bwd 三个入口都要先调用对应 `ensure_config`，
+  否则 trace 路径会拿到错误的后端配置。
+- **规则字母重复导致报错**：Einsum 规则中同一字母不能出现在输出中多次，除非对应维度确实同形；
+  必要时用 `m` / `k` 等额外字母区分两个 head_size 维。
+- **FFI 未设置 `vmap_method`**：默认行为可能在 batch 切分下回退为 `scan`，性能或正确性受影响。
+
+### 11.13 快速检查清单
+
+新增 JAX 自定义算子时，按以下清单检查分片：
+
+- [ ] 确定可切维度（通常只有 batch/head）。
+- [ ] 为前向/反向/推理分别写出 Einsum sharding_rule。
+- [ ] 实现 `infer_sharding_from_operands`，对输出形状不同的张量重建 NamedSharding。
+- [ ] 用 `create_partition`（或等价的 `_create_partition`）包装 impl_fn。
+- [ ] 在 `custom_partitioning` 上调用 `def_partition` 注册三者。
+- [ ] Pallas 版补充 `ensure_config` / `launch` 调用，保证 eager 与 traced 路径配置一致。
+- [ ] FFI 版设置 `vmap_method="broadcast_all"`。
+- [ ] 单卡 1-device mesh 结构验证通过。
+- [ ] 多卡环境下对比 native 数值一致。
+
+---
+
+## 12. 相关文件速查
 
 | 文件 | 作用 |
 |---|---|
@@ -721,8 +1311,10 @@ __global__ void wkv7_forward(...)
 | `rwkv_ops/rwkv7_kernel/__init__.py` | RWKV-7 后端分发器 |
 | `rwkv_ops/rwkv7_kernel/native_keras_op.py` | RWKV-7 原生参考实现 |
 | `rwkv_ops/rwkv7_kernel/triton_kernel.py` | RWKV-7 共享 Triton 内核 |
+| `rwkv_ops/rwkv7_kernel/jax_triton_kernel.py` | RWKV-7 JAX-Triton 桥接 |
 | `rwkv_ops/rwkv7_kernel/jax_pallas_kernel.py` | RWKV-7 Pallas 内核 |
 | `rwkv_ops/rwkv7_sane_kernel/` | SANE 版，结构与 rwkv7_kernel 完全平行 |
+| `rwkv_ops/mhc_kernel/jax_triton_op/` | mHC JAX-Triton 桥接 |
 | `rwkv_ops/gdn_chunk/native_keras_op.py` | GDN chunkwise 原生参考实现 |
 | `rwkv_ops/gdn_recurrent/native_keras_op.py` | GDN recurrent 原生参考实现 |
 | `rwkv_ops/gdn_recurrent/triton_kernel.py` | GDN recurrent 共享 Triton 内核 |
