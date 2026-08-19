@@ -334,7 +334,129 @@ sane_state = tau * tanh(state / tau)      # 软裁剪到 [-tau, tau]
 - triton 只替换 `mhc_pre_op_fused` 与 `mhc_post_op` 两个底层符号，高层封装
   始终共用 native 的 `linear_and_reshape`。
 
-### 4.6 Gated DeltaNet（GDN）
+### 4.5 Pallas 后端（`jax_pallas_kernel.py` + `pallas_utils.py`）
+
+- **只用公开稳定 Pallas API**：`pl.pallas_call` / `pl.BlockSpec` /
+  `pl.program_id` / ref 索引 / `lax.fori_loop` / `jnp`。**禁止 import
+  plgpu/pltriton 私有 API**，以兼容老版 jax（Triton lowering）、未来版本
+  （Mosaic GPU lowering）与 TPU。
+- kernel 结构：grid=(B, N)，每个 program 处理一个 (batch, head)；外层
+  `fori_loop` 遍历 chunk、内层静态展开 16 步；数学与 `triton_kernel.py`
+  逐行对应（MINI_BSZ=1 的角色由 grid 取代，kernel 内无需 batch mask 与
+  64 位指针运算）。
+- **后端选择是确定性能力探测，不做计时择优**：按偏好顺序（默认后端 →
+  triton 后端）逐个编译探测，第一个能 lowering 的即为本机后端。jax < 0.9
+  的 GPU pallas 只有 triton lowering，探测自然落到 triton；未来 triton 后端
+  被移除后自然落到默认后端。可用 `RWKV_OPS_PALLAS_BACKEND=default|mgpu|triton`
+  强制覆盖（调试用）。
+- **autotune 只调已选定后端的性能参数**（按 shape key 缓存最优）：triton
+  后端调 `num_warps × num_stages`；MGPU 调 `lowering_semantics` /
+  `reduction_scratch_bytes`。`RWKV_OPS_PALLAS_AUTOTUNE=0` 关闭后用默认参数。
+  （jax 0.10.x 的 MGPU lowering 对逐行动态索引有 128 元素向量约束，探测会
+  失败并落回 triton lowering。）
+- **warmup 约定（重要）**：`custom_partitioning` 即使在 eager 调用下也会 trace
+  内层函数，因此每个 custom_vjp 入口（primal / `_fwd` / `_bwd`）必须先用真实
+  数组调用对应 warmup（`ensure_config`）解析配置；被 trace 的路径只查缓存，
+  取不到则用首个候选。**warmup 与 launcher 的参数顺序必须一致**（曾因
+  `dy/sa/state_chkp` 顺序错位导致所有候选探测失败的隐蔽 bug）。
+- SPMD 分片规则与对应 triton 封装完全一致（同一套 sharding rule 字符串与
+  infer_sharding 辅助函数）。
+
+---
+
+### 4.6 Pallas 编写经验（从 Triton 翻译）
+
+本节记录如何把已有的 Triton kernel 翻译成只使用公开 Pallas API 的 JAX kernel。
+项目内参考文件：`rwkv_ops/rwkv7_kernel/jax_pallas_kernel.py`、
+`rwkv_ops/rwkv7_sane_kernel/jax_pallas_kernel.py`、对应 `triton_kernel.py`、
+`rwkv_ops/pallas_utils.py`。
+
+#### 4.6.1 为什么要翻译而不是直接用 jax-triton
+
+`jax-triton` 依赖额外的 `jax-triton` 包，且 Pallas Triton backend 在 JAX 0.11.0
+已标记 deprecated（未来会移除）。Pallas 提供前端一致的 API，同一份 kernel 代码可由
+JAX 自动 lowering 到 Triton（旧版）或 Mosaic GPU（新版），未来也更容易迁移到 TPU。
+我们的原则是：**用 Pallas 公开 API 写 kernel，后端选择交给 `pallas_utils` 的能力探测**。
+
+#### 4.6.2 核心语义对照表
+
+| Triton | Pallas | 说明 |
+|---|---|---|
+| `@triton.jit` | 普通 Python 函数 + `pl.pallas_call` | kernel 函数接收 `Ref` 参数 |
+| `tl.program_id(0)` | `pl.program_id(0)` | 网格索引 |
+| `tl.arange(0, H)` | 不需要显式构造 | 通过 `ref[b, h, t, :]` 隐式得到 |
+| `tl.load(ptr, mask=..., other=...)` | `ref[...]` 或 `pl.load` | 用 `Ref` 索引代替指针算术 |
+| `tl.store(ptr, val, mask=...)` | `ref[...] = val` | 直接写入 |
+| `for t in range(T)` | `jax.lax.fori_loop(0, T, body, init)` | 动态循环（状态显式传递） |
+| `for j in range(CHUNK_LEN)` | 原生 `for j in range(CHUNK_LEN)` | chunk 内静态展开 |
+| `tl.sum(x, axis=2)` | `jnp.sum(x, axis=1)` | 注意维度对应关系 |
+| `tl.where(c, a, b)` | `jnp.where(c, a, b)` | 元素选择 |
+| `tl.exp` / `tl.log` / ... | `jnp.exp` / `jnp.log` / ... | JAX 标准一元函数 |
+| `tl.constexpr` | 闭包 / Python 常量 / 全局常量 | 通过闭包捕获或全局传入 |
+
+#### 4.6.3 从 Triton 到 Pallas 的翻译步骤
+
+1. **去掉指针和 batch mask**：把 `tl.load` / `tl.store` 换成 `Ref` 索引。如果 Triton 里用
+   `b_range = pid_b * MINI_BSZ + tl.arange(0, MINI_BSZ)` 和
+   `b_mask = b_range < B_BATCH` 处理多个 batch，在 Pallas 里把 batch 维放到 grid 中，
+   每个 program 只处理一个 `(b, h)`。这样就不需要 64 位指针运算和 mask。
+2. **调整维度**：Triton 中为了保持 warp 效率，state 通常是 `[MINI_BSZ, H, H]`；Pallas 中
+   每个 program 只处理一个 sample/head，state 退化为 `[H, H]`。因此 Triton 里
+   `axis=2` 的 reduce 在 Pallas 中变成 `axis=1`。
+3. **循环结构**：外层 chunk 循环用 `jax.lax.fori_loop`（需要把 state 作为 carry 传递），
+   内层 16 步用原生 `for` 静态展开。
+4. **数值稳定**：Triton 里常用手写 `tanh` 的 exp 稳定形式；Pallas 直接用 `jnp.tanh` 即可，
+   JAX 编译器会生成稳定实现。
+5. **输出声明**：在 Pallas 中，所有输出通过 `pl.pallas_call` 的 `out_shape` 声明，
+   kernel 函数接收对应 `Ref` 并写入。
+
+#### 4.6.4 内存空间与 BlockSpec
+
+Pallas 的 `BlockSpec` 替换了 Triton 的手动指针切片。本项目中所有输入/输出都是完整张量的
+"整数组"视图，因此 `pallas_utils.whole_specs` 统一构造 `BlockSpec`：
+
+- Triton backend / TPU：`memory_space=pl.ANY`
+- Mosaic GPU backend：`memory_space=plgpu.MemorySpace.GMEM`
+
+不要在内核里 import `plgpu`，所有后端相关逻辑集中在 `pallas_utils`。
+
+#### 4.6.5 后端选择与 autotune
+
+不要把 autotune 理解为"在 Triton 和 Mosaic GPU 之间选最快的"。后端由能力探测确定
+（default → triton → mgpu），autotune 只调**已选定后端**的性能参数：
+
+- Triton backend：`num_warps`、`num_stages`
+- Mosaic GPU backend：`lowering_semantics`、`reduction_scratch_bytes`
+
+#### 4.6.6 常见陷阱
+
+- **axis 对应**：Triton `axis=2` → Pallas `axis=1`（因为少了 `MINI_BSZ` 维）。
+- **mask 维度**：Triton 里 mask 常广播成 3D `[B, 1, 1]`；Pallas 里每个 program 只处理
+  一个 `(b, h)`，mask 退化为标量或一维。
+- **参数顺序**：warmup 的 `ensure_config` 与 launch 的输入参数顺序必须完全一致，
+  否则 trace 路径会拿到错误配置（曾因此导致所有候选探测失败）。
+- **不要在 traced 路径探测后端**：所有后端探测在 warmup 阶段完成并缓存，
+  `launch` 在 trace 路径只查缓存。
+- **Triton 手写 tanh**：直接替换为 `jnp.tanh`，不需要保留分段 exp 形式。
+- **状态循环**：Pallas 的 `fori_loop` 必须有显式返回值，state 作为循环 carry。
+
+#### 4.6.7 最小翻译 checklist
+
+- [ ] 把 `tl.program_id` 换成 `pl.program_id`
+- [ ] 去掉 `tl.arange` 和指针运算，改用 `Ref` 索引
+- [ ] 把 `tl.load` / `tl.store` 换成 `ref[...]` 读写
+- [ ] 把动态循环换成 `jax.lax.fori_loop`
+- [ ] 把 chunk 内静态循环保留为原生 `for`
+- [ ] 检查 reduction axis：Triton `axis=2` → Pallas `axis=1`
+- [ ] 用 `jnp.tanh` 替换手写 tanh 稳定形式
+- [ ] 用 `jnp.where` 替换 `tl.where`
+- [ ] 声明所有输出 `out_shape`
+- [ ] 在 `custom_vjp` 的 primal / `_fwd` / `_bwd` 中分别调用 warmup
+- [ ] 确认 warmup 与 launch 的参数顺序一致
+
+---
+
+### 4.7 Gated DeltaNet（GDN）
 
 GDN 基于带门控的 delta rule，与 RWKV-7 类似但输入侧使用独立的 `g`（decay
 gate）和 `beta`（write gate），且对 `q`、`k` 做 L2 norm。
@@ -368,39 +490,11 @@ y_t = sum_K(state_t * q_t)
   其余后端/框架仍回退 native。后续 cuda / triton / pallas 加速内核会按同样
   的目录约定扩展。
 
-### 4.5 Pallas 后端（`jax_pallas_kernel.py` + `pallas_utils.py`）
-
-- **只用公开稳定 Pallas API**：`pl.pallas_call` / `pl.BlockSpec` /
-  `pl.program_id` / ref 索引 / `lax.fori_loop` / `jnp`。**禁止 import
-  plgpu/pltriton 私有 API**，以兼容老版 jax（Triton lowering）、未来版本
-  （Mosaic GPU lowering）与 TPU。
-- kernel 结构：grid=(B, N)，每个 program 处理一个 (batch, head)；外层
-  `fori_loop` 遍历 chunk、内层静态展开 16 步；数学与 `triton_kernel.py`
-  逐行对应（MINI_BSZ=1 的角色由 grid 取代，kernel 内无需 batch mask 与
-  64 位指针运算）。
-- **后端选择是确定性能力探测，不做计时择优**：按偏好顺序（默认后端 →
-  triton 后端）逐个编译探测，第一个能 lowering 的即为本机后端。jax < 0.9
-  的 GPU pallas 只有 triton lowering，探测自然落到 triton；未来 triton 后端
-  被移除后自然落到默认后端。可用 `RWKV_OPS_PALLAS_BACKEND=default|mgpu|triton`
-  强制覆盖（调试用）。
-- **autotune 只调已选定后端的性能参数**（按 shape key 缓存最优）：triton
-  后端调 `num_warps × num_stages`；MGPU 调 `lowering_semantics` /
-  `reduction_scratch_bytes`。`RWKV_OPS_PALLAS_AUTOTUNE=0` 关闭后用默认参数。
-  （jax 0.10.x 的 MGPU lowering 对逐行动态索引有 128 元素向量约束，探测会
-  失败并落回 triton lowering。）
-- **warmup 约定（重要）**：`custom_partitioning` 即使在 eager 调用下也会 trace
-  内层函数，因此每个 custom_vjp 入口（primal / `_fwd` / `_bwd`）必须先用真实
-  数组调用对应 warmup（`ensure_config`）解析配置；被 trace 的路径只查缓存，
-  取不到则用首个候选。**warmup 与 launcher 的参数顺序必须一致**（曾因
-  `dy/sa/state_chkp` 顺序错位导致所有候选探测失败的隐蔽 bug）。
-- SPMD 分片规则与对应 triton 封装完全一致（同一套 sharding rule 字符串与
-  infer_sharding 辅助函数）。
-
 ---
 
-## 5. 构建与编译
+## 6. 构建与编译
 
-### 5.1 包构建
+### 6.1 包构建
 
 - 构建后端 **hatchling**；运行时唯一依赖 `keras>=3.0`；测试可选依赖
   `pip install -e ".[test]"`（`pytest>=8.0`、`jax-triton>=0.3.1`）。
@@ -410,7 +504,7 @@ y_t = sum_K(state_t * q_t)
 - `MANIFEST.in` 包含所有 `.py`、CUDA/HIP/C++ 源、CMake 文件；排除 `build*/`、
   `dist/`、`.so` 等。新增编译产物类型要同步加排除规则；**不要手改 `dist/`**。
 
-### 5.2 CUDA 扩展的懒编译
+### 6.2 CUDA 扩展的懒编译
 
 - CUDA 实现不在 whl 中预编译，**首次使用时编译**：
   - JAX：`cmake`（`jax_cuda_kernel*/CMakeLists.txt`）→ `build_<...>/wkv*.so`，
@@ -423,14 +517,14 @@ y_t = sum_K(state_t * q_t)
   CUDA 13.1 与 glibc 2.41+ 的 `rsqrt/rsqrtf` 冲突。**不要修改系统 CUDA 头文件**；
   `nvcc_wrap` 需保持可执行权限且随包分发。
 
-### 5.3 运行环境要求
+### 6.3 运行环境要求
 
 - CMake 的 host C++ 编译器须与 CUDA 兼容；GCC 过新（如 GCC 15 + CUDA 13.1）时
   指定 `CC`/`CXX`/`CUDAHOSTCXX` 到 gcc-13 等（`tests/jax/conftest.py` 会自动探测）。
 - ROCm：仅 RWKV-6 Torch 路径，`RWKV_USE_ROCM=1`。
 - PyTorch CUDA 扩展依赖 `ninja`。
 
-### 5.4 构建产物清理
+### 6.4 构建产物清理
 
 - `clean_build_artifacts.clean_all()` 删除各 `jax_cuda_kernel*/build_*` 与
   `*.so`、ninja 日志、全部 `__pycache__`。
@@ -440,9 +534,9 @@ y_t = sum_K(state_t * q_t)
 
 ---
 
-## 6. 测试规范
+## 7. 测试规范
 
-### 6.1 测试入口
+### 7.1 测试入口
 
 ```bash
 pip install -e ".[test]"
@@ -466,7 +560,7 @@ pytest tests/jax -v -m "not slow"
 - **文件名唯一性**：`tests/` 各子目录无 `__init__.py`，跨目录同名文件会
   `import file mismatch`；统一带后端前缀（`test_jax_*` / `test_torch_*` 等）。
 
-### 6.2 共享 fixtures 与输入分布（`tests/conftest.py`）
+### 7.2 共享 fixtures 与输入分布（`tests/conftest.py`）
 
 - 根 conftest **刻意不 import torch/jax/keras/rwkv_ops**，避免收集阶段锁定后端。
 - `rng` 固定种子 42；`rwkv7_shape = (5, 128, 6, 64)`（B, T, H, K）。
@@ -483,7 +577,7 @@ pytest tests/jax -v -m "not slow"
 - 断言工具 `assert_allclose_with_stats`：打印 exact/close/max/mean diff，
   判定只看 atol/rtol。
 
-### 6.3 测试覆盖要求与容差惯例
+### 7.3 测试覆盖要求与容差惯例
 
 - 新增/修改加速内核必须覆盖：前向输出与 final_state vs native；反向梯度
   vs native 自动微分；mask 全 1 / 全 0 / 随机 mask 等价性；
@@ -503,9 +597,9 @@ pytest tests/jax -v -m "not slow"
 
 ---
 
-## 7. 代码风格与协作规范
+## 8. 代码风格与协作规范
 
-### 7.1 Python 代码
+### 8.1 Python 代码
 
 - `ruff check .` 与 `ruff format --check .` 必须全绿（ruff 无规则定制，
   下列约定靠 AGENTS.md 约束）。
@@ -514,7 +608,7 @@ pytest tests/jax -v -m "not slow"
 - 使用 `keras.ops` 编写后端无关逻辑；`torch.*` / `jax.*` / `tf.*` 只允许出现在
   对应后端绑定文件中。
 
-### 7.2 注释与文档风格（**强制性约束**）
+### 8.2 注释与文档风格（**强制性约束**）
 
 本节为**强制规范**，新增/修改代码必须遵守；评审时应以本节为准驳回不合规
 注释。整体结构参照 Keras 3 的 docstring 风格，正文语言沿用项目现有的中文
@@ -645,7 +739,7 @@ Keras 3 只规定 Python docstring；CUDA/C++ 按同等精神执行，同为强�
 __global__ void wkv7_forward(...)
 ```
 
-### 7.3 CUDA/Triton/Pallas 代码
+### 8.3 CUDA/Triton/Pallas 代码
 
 - 编译期常量通过宏传入：`-D_N_=64 -D_T_=4096`。
 - CUDA 指针算术使用 64 位整数；Triton 内核使用 `tl.int64`。
@@ -653,14 +747,14 @@ __global__ void wkv7_forward(...)
   `triton_kernel.py`。
 - Pallas 内核只用公开 API（见 §4.5）。
 
-### 7.4 C/C++ 代码格式化
+### 8.4 C/C++ 代码格式化
 
 - C/CUDA 源文件（`.cu`、`.cuh`、`.cpp`、`.h`）使用 **clang-format** 以 LLVM style 格式化。
 - 统一入口：`scripts/format_cpp.sh`（依赖 `clang-format`，可 `pip install clang-format`）。
 - 提交/修改这些文件前，运行 `./scripts/format_cpp.sh`；IDE 可通过仓库根目录的 `.clang-format` 自动采用 LLVM style。
-- 注意：`clang-format` 只控制排版，不改变注释内容与命名规范；注释仍须遵守 §7.2 的约束。
+- 注意：`clang-format` 只控制排版，不改变注释内容与命名规范；注释仍须遵守 §8.2 的约束。
 
-### 7.5 提交前检查清单
+### 8.5 提交前检查清单
 
 - [ ] `ruff check .` 与 `ruff format --check .` 全绿。
 - [ ] `.cu/.cuh/.cpp/.h` 文件已运行 `./scripts/format_cpp.sh`（LLVM style）。
@@ -674,7 +768,7 @@ __global__ void wkv7_forward(...)
 
 ---
 
-## 8. 常见陷阱
+## 9. 常见陷阱
 
 1. **JAX RWKV6 `cuda` 后端用 `jax.ffi`**，需要 JAX >= 0.4.31；旧版 XLA
    custom-call 代码已移除。
@@ -689,12 +783,12 @@ __global__ void wkv7_forward(...)
    （如 pallas autotune）必须在 trace 之外完成（见 §4.5 warmup 约定）。
 8. **JAX CUDA 测试每次会话后 `.so` 被自动清理**，下次重编译是预期行为。
 9. **rwkv6 的 `KERNEL_TYPE="triton"` 静默回退 native**，不报错。
-10. **递推对拍必须用 fixture 的稳定输入分布**（见 §6.2），随手造的随机数据
+10. **递推对拍必须用 fixture 的稳定输入分布**（见 §7.2），随手造的随机数据
     会让递推指数发散，得出"实现错了"的假结论。
 
 ---
 
-## 9. 扩展指南
+## 10. 扩展指南
 
 若新增一种算子：
 
@@ -712,7 +806,7 @@ __global__ void wkv7_forward(...)
 
 ---
 
-## 10. JAX-Triton 桥接教程
+## 11. JAX-Triton 桥接教程
 
 > 目标：用 JAX 调用已有的 Triton kernel，并保证与 PyTorch / native 输出一致。
 > 项目内参考实现：`rwkv_ops/rwkv7_kernel/jax_triton_kernel.py`、
@@ -720,13 +814,13 @@ __global__ void wkv7_forward(...)
 > `rwkv_ops/mhc_kernel/jax_triton_op/`。
 > 依赖 `jax-triton>=0.3.1`，通过 `pip install -e ".[test]"` 安装。
 
-### 10.1 前置说明
+### 11.1 前置说明
 
 - 本文档**不教如何写 Triton kernel**，只教如何在 JAX 中做**桥接封装**。
 - 核心难点：JAX 侧需要显式声明输出形状、常量参数、grid，并处理 PyTorch 侧隐式完成的事情（如 `None` 输入、内存初始化、SPMD 分片等）。
 - 所有桥接文件共享同一个 `triton_kernel.py`，因此修改 kernel 数学时必须同步检查 JAX 与 PyTorch 两侧桥接。
 
-### 10.2 基础调用范式
+### 11.2 基础调用范式
 
 Triton kernel 的签名通常可分为三类参数：
 
@@ -780,7 +874,7 @@ def _wkv7_sane_fwd_triton_call(r, w, k, v, a, b, tau, h0):
 - `grid` 与 Torch 侧完全一致；如果 kernel 使用 `@triton.autotune`，`meta` 会包含 `MINI_BSZ` 等自动调参产生的值。
 - 所有 `tl.constexpr` 通过 `**kwargs` 传入，不要在 `*args` 中传。
 
-### 10.3 装饰器处理
+### 11.3 装饰器处理
 
 如果 kernel 同时被 `@triton.heuristics` 和 `@triton.autotune` 包装，直接传 `kernel=xxx` 可能报错：
 
@@ -807,7 +901,7 @@ jt.triton_call(
 
 > 项目当前 RWKV-7 / RWKV-7-SANE / mHC 的共享 kernel 只使用了 `@triton.autotune`，因此可以直接传 `kernel=rwkv7_fwd_kernel` 等，无需 `.fn`。
 
-### 10.4 可选输入与可选输出
+### 11.4 可选输入与可选输出
 
 `jax-triton` 的 `*args` 和 `out_shape` 都不能出现 `None`。对于 PyTorch 侧可为 `None` 的参数（如 `initial_state`、`dht`），JAX 侧需显式构造零张量。
 
@@ -832,7 +926,7 @@ def _bwd(res, grads):
 
 `out_shape` 中也不能放 `None`。即使某个输出在特定分支不需要，也要给它一个合法的 `ShapeDtypeStruct`；通常通过常量参数控制 kernel 内部是否真正写入。
 
-### 10.5 原子操作与内存初始化
+### 11.5 原子操作与内存初始化
 
 当 kernel 内部使用 `tl.atomic_add` 等原子操作时，输出内存必须预先初始化为 0，否则可能复用 XLA 分配的脏内存导致结果错误。`jax-triton` 提供 `zeroed_outputs` 参数指定哪些输出需要清零：
 
@@ -846,7 +940,7 @@ jt.triton_call(
 
 > 项目当前通过设计避免原子操作：例如 mHC 反向 kernel 把 grid 固定为 `(total_bt, 1)`，让不同 program 写不同输出位置，从而不需要原子加；RWKV-7 系列 kernel 的输出由每个 block 独占写回，也不依赖 `zeroed_outputs`。新增使用原子操作的 kernel 时才需要显式传入该参数。
 
-### 10.6 custom_vjp 与 custom_partitioning
+### 11.6 custom_vjp 与 custom_partitioning
 
 JAX 桥接需要同时支持自动微分和 SPMD 分片，因此通常把 `jt.triton_call` 包在三层结构里：
 
@@ -918,14 +1012,14 @@ mhc_pre_op_fwd_spmd = custom_partitioning(
 
 `num_iters` 和 `eps` 作为静态参数，不会进入分片规则的追踪。
 
-### 10.7 布局、步幅与数值一致性
+### 11.7 布局、步幅与数值一致性
 
 - **连续布局**：`jax-triton` 默认按连续内存做指针偏移。传入 strided 张量可能得到错误结果。RWKV-7 系列在转置到 head-first 后必须保证 contiguous；Torch 侧会用 `.contiguous()` 处理，JAX 侧通常在 `_transpose_head` 后已通过 `jnp.transpose` 得到连续布局，但仍需注意不要传非连续视图。
 - **步幅参数**：mHC kernel 需要显式传入各张量的 stride，例如 `stride_x_bt`、`stride_x_n`、`stride_x_c` 等。JAX 侧用 `jt.strides_from_shape(shape)` 计算后传入，保证与 kernel 内部的指针算术一致。
 - **dtype 对齐**：Triton kernel 通常 `bfloat16` I/O、`float32` 内部累加。JAX 侧进 kernel 前需要把 state / tau / mask 等 cast 到 `jnp.float32`，输出后再 cast 回原始 dtype。
 - **数值对拍**：新增 kernel 后，先用 `native_keras_op.py` 的输出作为 ground truth，对同一组 numpy 输入分别跑 native 与 triton 版本，比较前向输出、final_state 与反向梯度。
 
-### 10.8 通用调用模板
+### 11.8 通用调用模板
 
 ```python
 import jax
@@ -959,7 +1053,7 @@ def call_triton_kernel(kernel, inputs, out_shapes, constants, grid, zeroed=None)
 
 ---
 
-## 11. JAX 自定义算子分片教程
+## 12. JAX 自定义算子分片教程
 
 > 目标：让 Triton / Pallas / CUDA-FFI 自定义算子在 JAX SPMD 训练下正确传播分片，
 > 支持 DP（batch 维并行）与 TP（head 维并行）。
@@ -969,7 +1063,7 @@ def call_triton_kernel(kernel, inputs, out_shapes, constants, grid, zeroed=None)
 > `rwkv_ops/rwkv7_sane_kernel/jax_pallas_kernel.py`、
 > `rwkv_ops/rwkv7_sane_kernel/jax_cuda_kernel/wkv7_sane_jax.py`。
 
-### 11.1 为什么自定义算子需要显式分片
+### 12.1 为什么自定义算子需要显式分片
 
 普通 JAX 算子（`jnp.matmul`、`jax.lax.scan` 等）在 `jit(..., in_shardings=..., out_shardings=...)` 下会自动被 XLA 重新分区（reshard / all-gather / all-reduce）。但自定义算子对 XLA 是黑盒：
 
@@ -980,7 +1074,7 @@ def call_triton_kernel(kernel, inputs, out_shapes, constants, grid, zeroed=None)
 本项目所有 JAX 加速算子（Pallas / Triton / CUDA FFI）统一使用 `custom_partitioning` 方案，
 使其在常规 `jax.jit(..., in_shardings=..., out_shardings=...)` 流程中自动支持 DP/TP。
 
-### 11.2 基础概念速览
+### 12.2 基础概念速览
 
 ```python
 import jax
@@ -999,7 +1093,7 @@ x = jax.device_put(x, sharding)
 - 同一 mesh 轴名出现在多个张量的不同维度上时，XLA 会在必要时做 all-gather / all-reduce。
 - 自定义算子需要告诉 XLA "这个张量的 batch 维可以切、time 维不能切、state 维需要 replicate"。
 
-### 11.3 核心方案：custom_partitioning + Einsum sharding_rule
+### 12.3 核心方案：custom_partitioning + Einsum sharding_rule
 
 项目内所有 JAX 自定义算子采用同一套样板：
 
@@ -1047,7 +1141,7 @@ def create_partition(impl_fn):
     return partition
 ```
 
-### 11.4 维度字母约定与可切分维度
+### 12.4 维度字母约定与可切分维度
 
 本项目规则统一使用以下字母：
 
@@ -1072,7 +1166,7 @@ FWD_RULE = "b n t h, ..., b n h m -> b n t h, b n t h, b n c h m"
 - state checkpoint `(B, N, C, H, H)` 的 sharding 用 `(spec[0], spec[1], None, spec[3], spec[3])`，
   即 batch/head 可切，chunk 与两个 head_size 维 replicate。
 
-### 11.5 输出 sharding 不是输入同形时如何重建
+### 12.5 输出 sharding 不是输入同形时如何重建
 
 `state`、`final_state`、`dtau` 等输出的形状与输入不同，不能简单继承输入 sharding。
 项目内使用从输入 `q` 的 `NamedSharding.spec` 重建的方法：
@@ -1118,7 +1212,7 @@ def _sharding_for_state(qs):
 > 关键原则：拿到输入 `NamedSharding` 后，按输出维度顺序从 `spec` 中取出对应轴名，
 > 无对应维度或不能切的维度置 `None`。
 
-### 11.6 Pallas 与分片的关系
+### 12.6 Pallas 与分片的关系
 
 Pallas kernel 的 `grid=(B, N)` 天然对应 "每个 program 处理一个 (batch, head)"：
 
@@ -1151,7 +1245,7 @@ def _wkv7_fwd_warmup(r, w, k, v, a, b, h0):
 `custom_partitioning` 在 eager 下也会 trace 内层函数，因此必须先用真实数组调用 `ensure_config`
 解析后端配置；被 trace 时只查缓存，否则会用首个候选导致探测失败。
 
-### 11.7 CUDA FFI 版的分片封装
+### 12.7 CUDA FFI 版的分片封装
 
 CUDA FFI 通过 `jax.ffi.ffi_call` 调用外部 `.so`。分片封装方式与 Pallas/Triton 完全一致：
 
@@ -1189,7 +1283,7 @@ _wkv7_kernel.def_partition(
 - `jax.ffi.register_ffi_target(..., platform="CUDA")` 注册的符号名
   必须与 `ffi_call("symbol_name", ...)` 完全一致。
 
-### 11.8 Triton 版的分片封装
+### 12.8 Triton 版的分片封装
 
 Triton 版（`rwkv7_kernel/jax_triton_kernel.py`）同样用 `custom_partitioning`，
 只是底层调用 `jax_triton.triton_call` 而不是 `pl.pallas_call` / `ffi_call`：
@@ -1210,7 +1304,7 @@ Triton kernel 的 grid 为 `((B + MINI_BSZ - 1) // MINI_BSZ, N)`，
 即第一个维度按 batch block 切分，第二个维度按 head 切分；
 `custom_partitioning` 会保证每个设备只拿到它负责的那部分 grid。
 
-### 11.9 mask / tau 等特殊张量的分片
+### 12.9 mask / tau 等特殊张量的分片
 
 在 RWKV-7-SANE 中：
 
@@ -1237,7 +1331,7 @@ def _sharding_for_tau(qs):
     )
 ```
 
-### 11.10 单步算子（T=1）的分片
+### 12.10 单步算子（T=1）的分片
 
 单步 RWKV-7 / RWKV-7-SANE CUDA kernel（用于 decode）同样支持 DP 与 TP：
 
@@ -1249,7 +1343,7 @@ FWD_RULE = "b h k v, b h k, b h k, b h k, b h k, b h k, b h k v -> b h k v, b h 
 - batch 与 head 可切，head_size 与 value_size 必须 replicate。
 - SANE 单步的 `tau` 为 `[B, H]`、`do_sane` 为 `[B]`，规则同样覆盖。
 
-### 11.11 结构验证：单卡 1-device mesh
+### 12.11 结构验证：单卡 1-device mesh
 
 多卡环境不是人人都有，但单卡可以用 1-device mesh 做结构验证：
 
@@ -1273,7 +1367,7 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
 真正的 all-gather / all-reduce 行为需要在多卡环境复核，但结构验证可以提前发现规则拼写、
 输出维度映射、mask 缺失等大部分问题。
 
-### 11.12 常见陷阱
+### 12.12 常见陷阱
 
 - **时间维被切**：规则中若把 `t` 写成可切字母，编译不报错但结果错误，因为 scan 需要完整 T。
 - **state 维映射错**：`final_state [B, H, K, K]` 的 PartitionSpec 写成 `(spec[0], spec[1], spec[2], spec[2])`
@@ -1286,7 +1380,7 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
   必要时用 `m` / `k` 等额外字母区分两个 head_size 维。
 - **FFI 未设置 `vmap_method`**：默认行为可能在 batch 切分下回退为 `scan`，性能或正确性受影响。
 
-### 11.13 快速检查清单
+### 12.13 快速检查清单
 
 新增 JAX 自定义算子时，按以下清单检查分片：
 
@@ -1302,7 +1396,7 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
 
 ---
 
-## 12. 相关文件速查
+## 13. 相关文件速查
 
 | 文件 | 作用 |
 |---|---|
