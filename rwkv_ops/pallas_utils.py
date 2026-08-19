@@ -9,6 +9,7 @@ from typing import NamedTuple
 import jax
 import jax.tree_util as jtu
 from jax.experimental import pallas as pl
+from .utils import _force_keras_native
 
 PALLAS_AUTOTUNE = os.environ.get("RWKV_OPS_PALLAS_AUTOTUNE", "1") == "1"
 _PALLAS_BACKEND_ENV = os.environ.get("RWKV_OPS_PALLAS_BACKEND", "").lower()
@@ -230,6 +231,17 @@ def launch(name, kernel, out_shape, grid, args):
     config = _config_cache[key]
     call = make_pallas_call(kernel, len(args), out_shape, config, grid)
     return call(*args)
+
+
+def _use_jax_pallas(KERNEL_TYPE):
+    """jax + GPU/TPU 且 KERNEL_TYPE=native 时启用 Pallas kernel。"""
+    if KERNEL_TYPE != "native" or _force_keras_native():
+        return False
+    try:
+        import jax
+    except Exception:
+        return False
+    return jax.devices()[0].platform in ("gpu", "tpu")
 
 
 def create_partition(impl_fn):

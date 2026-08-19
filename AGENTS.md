@@ -160,14 +160,20 @@ MANIFEST.in                  # 源码分发清单
 | Framework | cuda | triton | native |
 |-----------|------|--------|--------|
 | PyTorch   | ❌   | ✅     | ✅     |
-| JAX       | ❌   | ❌     | ✅     |
+| JAX       | ❌   | ✅     | ✅³    |
 | TensorFlow| ❌   | ❌     | ✅     |
 | NumPy     | ❌   | ❌     | ✅     |
 | OpenVINO  | ❌   | ❌     | ✅     |
 
 > PyTorch 侧 `gdn_recurrent` 已提供 Triton 前向 kernel（训练/推理/单步 RNN 三个入口）；
+> JAX 侧 `triton` 显式 `KERNEL_TYPE="triton"` 时启用 JAX-Triton 前向 kernel，
+> `native` 在 GPU/TPU 上为 Pallas 实现（`jax_pallas_kernel.py`），并覆盖训练/推理/单步
+> RNN 三个入口。
 > `gdn_chunk` 仍只有纯 Keras native，后续 cuda / triton / pallas 加速内核会接入
 > `gdn_chunk/` 目录。
+
+> ³ JAX 后端的 `native` 在 GPU/TPU 上为 Pallas 实现，其余为纯 Keras ops；
+> `triton` 需要显式 `KERNEL_TYPE="triton"` 且安装 `jax-triton`。
 
 ### 2.3 分布式分片（jax）
 

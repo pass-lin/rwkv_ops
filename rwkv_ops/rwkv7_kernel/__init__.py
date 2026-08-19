@@ -4,6 +4,7 @@ import os
 
 import keras
 from keras import ops
+from ..utils import _use_triton
 
 
 def transpose_head(x, head_first):
@@ -28,35 +29,6 @@ def _force_keras_native():
     return v not in ("", "0", "false")
 
 
-def _use_pallas(KERNEL_TYPE):
-    """jax + GPU/TPU 且 KERNEL_TYPE=native 时启用 Pallas kernel。"""
-    if KERNEL_TYPE != "native" or _force_keras_native():
-        return False
-    import jax
-
-    return jax.devices()[0].platform in ("gpu", "tpu")
-
-
-def _use_triton(KERNEL_TYPE):
-    """torch + 非 CPU 平台且 KERNEL_TYPE=native 时启用 Triton kernel。"""
-    if KERNEL_TYPE != "native" or _force_keras_native():
-        return False
-    try:
-        import torch
-        import triton  # noqa: F401
-    except Exception:
-        return False
-    if torch.cuda.is_available():
-        return True
-    xpu = getattr(torch, "xpu", None)
-    if xpu is not None:
-        try:
-            return bool(xpu.is_available())
-        except Exception:
-            return False
-    return False
-
-
 def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
     """按后端与 KERNEL_TYPE 返回 RWKV-7 chunkwise 训练算子对。
 
@@ -73,6 +45,7 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
 
     if keras.config.backend() == "jax":
         import jax
+        from ..pallas_utils import _use_jax_pallas
 
         platform = jax.devices()[0].platform
         if platform == "gpu":
@@ -84,7 +57,8 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                 from .jax_triton_kernel import generalized_delta_rule as jax_kernel
 
                 return jax_kernel, generalized_delta_rule
-        if _use_pallas(KERNEL_TYPE):
+
+        if _use_jax_pallas(KERNEL_TYPE):
             from .jax_pallas_kernel import get_jax_generalized_delta_rule
 
             return get_jax_generalized_delta_rule(HEAD_SIZE)

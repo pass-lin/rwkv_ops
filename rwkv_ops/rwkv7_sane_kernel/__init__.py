@@ -3,7 +3,7 @@
 import keras
 from keras import ops
 
-from ..rwkv7_kernel import _use_pallas, _use_triton
+from ..utils import _use_triton
 
 
 def transpose_head(x, head_first):
@@ -41,7 +41,9 @@ def get_generalized_delta_rule_sane(HEAD_SIZE=64, KERNEL_TYPE="cuda"):
                 from .jax_triton_kernel import get_jax_generalized_delta_rule_sane
 
                 return get_jax_generalized_delta_rule_sane(HEAD_SIZE)
-        if _use_pallas(KERNEL_TYPE):
+        from ..pallas_utils import _use_jax_pallas
+
+        if _use_jax_pallas(KERNEL_TYPE):
             from .jax_pallas_kernel import get_jax_generalized_delta_rule_sane
 
             return get_jax_generalized_delta_rule_sane(HEAD_SIZE)
