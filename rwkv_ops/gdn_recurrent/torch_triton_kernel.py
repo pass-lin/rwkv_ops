@@ -5,6 +5,7 @@ import triton
 
 from .triton_kernel import (
     gated_delta_net_recurrent_fwd_kernel,
+    gated_delta_net_recurrent_bwd_kernel,
     gated_delta_net_recurrent_inference_fwd_kernel,
     gated_delta_net_recurrent_single_step_fwd_kernel,
 )
@@ -61,6 +62,8 @@ class GatedDeltaNetRecurrentTritonFunction(torch.autograd.Function):
         o = torch.empty_like(v)
         final_state = torch.empty(B, H, K, V, dtype=torch.float32, device=q.device)
         kv_mem_out = torch.empty(B, H, T, V, dtype=torch.float32, device=q.device)
+        inv_norm_q = torch.empty(B, H, T, dtype=torch.float32, device=q.device)
+        inv_norm_k = torch.empty(B, H, T, dtype=torch.float32, device=q.device)
         num_chunks = T // CHUNK_LEN
         state_chkp = torch.empty(
             B, H, num_chunks, K, V, dtype=torch.float32, device=q.device
@@ -68,7 +71,7 @@ class GatedDeltaNetRecurrentTritonFunction(torch.autograd.Function):
         h0 = _prepare_initial_state(initial_state, B, H, K, V, q.device)
 
         BK = triton.next_power_of_2(K)
-        BV = min(8, triton.next_power_of_2(V))
+        BV = min(128, triton.next_power_of_2(V))
         grid = _make_recurrent_grid(B, H, V, BV)
 
         gated_delta_net_recurrent_fwd_kernel[grid](
@@ -80,6 +83,8 @@ class GatedDeltaNetRecurrentTritonFunction(torch.autograd.Function):
             o=o,
             kv_mem_out=kv_mem_out,
             state_chkp=state_chkp,
+            inv_norm_q=inv_norm_q,
+            inv_norm_k=inv_norm_k,
             h0=h0,
             ht=final_state,
             scale=scale,
@@ -93,11 +98,11 @@ class GatedDeltaNetRecurrentTritonFunction(torch.autograd.Function):
             CHUNK_LEN=CHUNK_LEN,
             USE_INITIAL_STATE=True,
             STORE_FINAL_STATE=True,
-            num_warps=1,
-            num_stages=1,
         )
 
-        ctx.save_for_backward(q, k, v, g, beta, h0, kv_mem_out, state_chkp)
+        ctx.save_for_backward(
+            q, k, v, g, beta, h0, kv_mem_out, state_chkp, inv_norm_q, inv_norm_k
+        )
         ctx.head_first = head_first
         ctx.output_final_state = output_final_state
         ctx.CHUNK_LEN = CHUNK_LEN
@@ -111,9 +116,86 @@ class GatedDeltaNetRecurrentTritonFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, do, dht):
-        raise NotImplementedError(
-            "Gated DeltaNet recurrent Triton backward is not implemented yet."
+        q, k, v, g, beta, h0, kv_mem_out, state_chkp, inv_norm_q, inv_norm_k = (
+            ctx.saved_tensors
         )
+
+        if not ctx.head_first:
+            do = do.transpose(1, 2)
+        do = do.contiguous()
+
+        B, H, T, K = q.shape
+        V = v.shape[-1]
+        scale = K**-0.5
+        CHUNK_LEN = ctx.CHUNK_LEN
+
+        # 梯度缓冲区用 float32 累加，避免 atomic_add 与低精度问题。
+        dq = torch.zeros(B, H, T, K, dtype=torch.float32, device=q.device)
+        dk = torch.zeros(B, H, T, K, dtype=torch.float32, device=q.device)
+        dv = torch.zeros(B, H, T, V, dtype=torch.float32, device=q.device)
+        dg = torch.zeros(B, H, T, dtype=torch.float32, device=q.device)
+        dbeta = torch.zeros(B, H, T, dtype=torch.float32, device=q.device)
+        dh0 = torch.empty(B, H, K, V, dtype=torch.float32, device=q.device)
+
+        use_final_state_gradient = dht is not None
+        if use_final_state_gradient:
+            dht = dht.to(torch.float32).contiguous()
+        else:
+            dht = torch.empty(B, H, K, V, dtype=torch.float32, device=q.device)
+
+        BK = triton.next_power_of_2(K)
+        BV = min(128, triton.next_power_of_2(V))
+        grid = _make_recurrent_grid(B, H, V, BV)
+
+        gated_delta_net_recurrent_bwd_kernel[grid](
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            do=do,
+            dht=dht,
+            kv_mem_out=kv_mem_out,
+            inv_norm_q=inv_norm_q,
+            inv_norm_k=inv_norm_k,
+            h0=h0,
+            state_chkp=state_chkp,
+            dq=dq,
+            dk=dk,
+            dv=dv,
+            dg=dg,
+            dbeta=dbeta,
+            dh0=dh0,
+            scale=scale,
+            B=B,
+            H=H,
+            T=T,
+            K=K,
+            V=V,
+            BK=BK,
+            BV=BV,
+            CHUNK_LEN=CHUNK_LEN,
+            USE_FINAL_STATE_GRADIENT=use_final_state_gradient,
+            num_warps=1,
+            num_stages=1,
+        )
+
+        if not ctx.head_first:
+            dq = dq.transpose(1, 2)
+            dk = dk.transpose(1, 2)
+            dv = dv.transpose(1, 2)
+            dg = dg.transpose(1, 2)
+            dbeta = dbeta.transpose(1, 2)
+
+        input_dtype = q.dtype
+        dq = dq.to(input_dtype)
+        dk = dk.to(input_dtype)
+        dv = dv.to(input_dtype)
+        dg = dg.to(input_dtype)
+        dbeta = dbeta.to(input_dtype)
+        dh0 = dh0.to(torch.float32)
+
+        return dq, dk, dv, dg, dbeta, dh0, None, None
 
 
 class GatedDeltaNetRecurrentInferenceTritonFunction(torch.autograd.Function):
@@ -142,7 +224,7 @@ class GatedDeltaNetRecurrentInferenceTritonFunction(torch.autograd.Function):
         h0 = _prepare_initial_state(initial_state, B, H, K, V, q.device)
 
         BK = triton.next_power_of_2(K)
-        BV = min(8, triton.next_power_of_2(V))
+        BV = min(128, triton.next_power_of_2(V))
         grid = _make_recurrent_grid(B, H, V, BV)
 
         gated_delta_net_recurrent_inference_fwd_kernel[grid](
@@ -164,8 +246,6 @@ class GatedDeltaNetRecurrentInferenceTritonFunction(torch.autograd.Function):
             BV=BV,
             USE_INITIAL_STATE=True,
             STORE_FINAL_STATE=True,
-            num_warps=1,
-            num_stages=1,
         )
 
         if not head_first:
@@ -213,7 +293,7 @@ class GatedDeltaNetRecurrentSingleStepTritonFunction(torch.autograd.Function):
         h0 = _prepare_initial_state(initial_state, B, H, K, V, q.device)
 
         BK = triton.next_power_of_2(K)
-        BV = min(8, triton.next_power_of_2(V))
+        BV = min(128, triton.next_power_of_2(V))
         grid = (triton.cdiv(V, BV) * B * H,)
 
         gated_delta_net_recurrent_single_step_fwd_kernel[grid](
@@ -234,8 +314,6 @@ class GatedDeltaNetRecurrentSingleStepTritonFunction(torch.autograd.Function):
             BV=BV,
             USE_INITIAL_STATE=True,
             STORE_FINAL_STATE=True,
-            num_warps=1,
-            num_stages=1,
         )
 
         if output_final_state:

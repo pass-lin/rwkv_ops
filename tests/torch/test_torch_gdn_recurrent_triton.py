@@ -31,6 +31,20 @@ def _to_cuda_tensor(arr, device, dtype=torch.float32):
     return torch.from_numpy(arr).to(device=device, dtype=dtype)
 
 
+def _gdn_grads(fn, q, k, v, g, beta, h0):
+    """计算 GDN recurrent 算子各输入梯度。"""
+    q = q.clone().detach().requires_grad_(True)
+    k = k.clone().detach().requires_grad_(True)
+    v = v.clone().detach().requires_grad_(True)
+    g = g.clone().detach().requires_grad_(True)
+    beta = beta.clone().detach().requires_grad_(True)
+    h0 = h0.clone().detach().requires_grad_(True)
+    out, state = fn(q, k, v, g, beta, initial_state=h0, output_final_state=True)
+    loss = (out.float() ** 2).mean() + (state.float() ** 2).mean()
+    loss.backward()
+    return q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
+
+
 @pytest.mark.torch
 @pytest.mark.slow
 def test_gdn_triton_recurrent_matches_native(gdn_inputs, gdn_cuda_device):
@@ -228,3 +242,56 @@ def test_gdn_triton_bfloat16(gdn_inputs, gdn_cuda_device):
     assert_allclose_with_stats(
         state_ref, state_tri, "bf16 triton vs native state", atol=1e-2, rtol=1e-2
     )
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_gdn_triton_recurrent_backward(gdn_inputs, gdn_cuda_device):
+    """Triton recurrent 训练算子反向梯度与 native Keras 参考对齐。"""
+    q = _to_cuda_tensor(gdn_inputs["q"], gdn_cuda_device)
+    k = _to_cuda_tensor(gdn_inputs["k"], gdn_cuda_device)
+    v = _to_cuda_tensor(gdn_inputs["v"], gdn_cuda_device)
+    g = _to_cuda_tensor(gdn_inputs["g"], gdn_cuda_device)
+    beta = _to_cuda_tensor(gdn_inputs["beta"], gdn_cuda_device)
+    h0 = _to_cuda_tensor(gdn_inputs["h0"], gdn_cuda_device)
+
+    g_ref = _gdn_grads(gdn_native_recurrent, q, k, v, g, beta, h0)
+    g_tri = _gdn_grads(gdn_triton_recurrent, q, k, v, g, beta, h0)
+    names = ["q", "k", "v", "g", "beta", "h0"]
+    for name, gr, gt in zip(names, g_ref, g_tri):
+        assert_allclose_with_stats(
+            gr,
+            gt,
+            f"grad_{name} triton vs native",
+            atol=7e-3,
+            rtol=1e-2,
+        )
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+@pytest.mark.parametrize("V", [64, 256, 512])
+def test_gdn_triton_recurrent_backward_various_v(V, gdn_cuda_device):
+    """反向在不同 V 维度（含 NV>1 的 atomic_add 路径）下与 native 对齐。"""
+    torch.manual_seed(42)
+    B, T, H, K = 2, 32, 4, 64
+    q = torch.randn(B, T, H, K, device=gdn_cuda_device, requires_grad=True)
+    k = torch.randn(B, T, H, K, device=gdn_cuda_device, requires_grad=True)
+    v = torch.randn(B, T, H, V, device=gdn_cuda_device, requires_grad=True)
+    g = torch.randn(B, T, H, device=gdn_cuda_device, requires_grad=True)
+    beta = torch.sigmoid(
+        torch.randn(B, T, H, device=gdn_cuda_device, requires_grad=True)
+    )
+    h0 = torch.randn(B, H, K, V, device=gdn_cuda_device, requires_grad=True)
+
+    g_ref = _gdn_grads(gdn_native_recurrent, q, k, v, g, beta, h0)
+    g_tri = _gdn_grads(gdn_triton_recurrent, q, k, v, g, beta, h0)
+    names = ["q", "k", "v", "g", "beta", "h0"]
+    for name, gr, gt in zip(names, g_ref, g_tri):
+        assert_allclose_with_stats(
+            gr,
+            gt,
+            f"V={V} grad_{name} triton vs native",
+            atol=7e-3,
+            rtol=1e-2,
+        )
