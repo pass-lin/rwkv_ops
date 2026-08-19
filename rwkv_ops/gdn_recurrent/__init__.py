@@ -11,7 +11,7 @@ def _force_keras_native():
     return v not in ("", "0", "false")
 
 
-def _use_triton(KERNEL_TYPE):
+def _use_torch_triton(KERNEL_TYPE):
     """torch + 非 CPU 平台且 KERNEL_TYPE=native/triton 时启用 Triton kernel。"""
     if KERNEL_TYPE not in ("native", "triton") or _force_keras_native():
         return False
@@ -23,12 +23,25 @@ def _use_triton(KERNEL_TYPE):
     return torch.cuda.is_available()
 
 
+def _use_jax_triton(KERNEL_TYPE):
+    """jax + GPU 平台且 KERNEL_TYPE=triton 时启用 Triton kernel。"""
+    if KERNEL_TYPE != "triton" or _force_keras_native():
+        return False
+    try:
+        import jax
+        import jax_triton  # noqa: F401
+        import triton  # noqa: F401
+    except Exception:
+        return False
+    return jax.devices()[0].platform == "gpu"
+
+
 def get_gated_delta_net_recurrent(KERNEL_TYPE="native"):
     """按后端与 KERNEL_TYPE 返回 Gated DeltaNet recurrent 训练算子。
 
     Args:
         KERNEL_TYPE: str，"native" / "cuda" / "triton"。
-            当前仅 "triton" 在 torch CUDA 后端提供加速实现，其余静默回退 native。
+            当前 "triton" 在 torch CUDA / jax GPU 后端提供加速实现，其余静默回退 native。
 
     Returns:
         Callable，签名与 `native_keras_op.gated_delta_net_recurrent` 一致。
@@ -36,8 +49,13 @@ def get_gated_delta_net_recurrent(KERNEL_TYPE="native"):
     from .native_keras_op import gated_delta_net_recurrent
 
     if keras.config.backend() == "torch" and KERNEL_TYPE in ("native", "triton"):
-        if _use_triton(KERNEL_TYPE):
+        if _use_torch_triton(KERNEL_TYPE):
             from .torch_triton_kernel import gated_delta_net_recurrent as triton_op
+
+            return triton_op
+    elif keras.config.backend() == "jax" and KERNEL_TYPE == "triton":
+        if _use_jax_triton(KERNEL_TYPE):
+            from .jax_triton_kernel import gated_delta_net_recurrent as triton_op
 
             return triton_op
 
@@ -49,7 +67,7 @@ def get_gated_delta_net_recurrent_inference(KERNEL_TYPE="native"):
 
     Args:
         KERNEL_TYPE: str，"native" / "cuda" / "triton"。
-            当前仅 "triton" 在 torch CUDA 后端提供加速实现，其余静默回退 native。
+            当前 "triton" 在 torch CUDA / jax GPU 后端提供加速实现，其余静默回退 native。
 
     Returns:
         Callable，签名与 `native_keras_op.gated_delta_net_recurrent_inference` 一致。
@@ -57,8 +75,15 @@ def get_gated_delta_net_recurrent_inference(KERNEL_TYPE="native"):
     from .native_keras_op import gated_delta_net_recurrent_inference
 
     if keras.config.backend() == "torch" and KERNEL_TYPE in ("native", "triton"):
-        if _use_triton(KERNEL_TYPE):
+        if _use_torch_triton(KERNEL_TYPE):
             from .torch_triton_kernel import (
+                gated_delta_net_recurrent_inference as triton_op,
+            )
+
+            return triton_op
+    elif keras.config.backend() == "jax" and KERNEL_TYPE == "triton":
+        if _use_jax_triton(KERNEL_TYPE):
+            from .jax_triton_kernel import (
                 gated_delta_net_recurrent_inference as triton_op,
             )
 
@@ -72,7 +97,7 @@ def get_gated_delta_net_recurrent_single_step(KERNEL_TYPE="native"):
 
     Args:
         KERNEL_TYPE: str，"native" / "cuda" / "triton"。
-            当前仅 "triton" 在 torch CUDA 后端提供加速实现，其余静默回退 native。
+            当前 "triton" 在 torch CUDA / jax GPU 后端提供加速实现，其余静默回退 native。
 
     Returns:
         Callable，签名与 `native_keras_op.gated_delta_net_recurrent_single_step` 一致。
@@ -80,8 +105,15 @@ def get_gated_delta_net_recurrent_single_step(KERNEL_TYPE="native"):
     from .native_keras_op import gated_delta_net_recurrent_single_step
 
     if keras.config.backend() == "torch" and KERNEL_TYPE in ("native", "triton"):
-        if _use_triton(KERNEL_TYPE):
+        if _use_torch_triton(KERNEL_TYPE):
             from .torch_triton_kernel import (
+                gated_delta_net_recurrent_single_step as triton_op,
+            )
+
+            return triton_op
+    elif keras.config.backend() == "jax" and KERNEL_TYPE == "triton":
+        if _use_jax_triton(KERNEL_TYPE):
+            from .jax_triton_kernel import (
                 gated_delta_net_recurrent_single_step as triton_op,
             )
 

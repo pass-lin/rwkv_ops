@@ -7,10 +7,10 @@ import triton.language as tl
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [4, 8]
-        for num_stages in [2, 3, 4]
+        for num_warps in [1, 2, 4, 8]
+        for num_stages in [1, 2, 3, 4]
     ],
-    key=["H_SIZE"],
+    key=["K", "V"],
 )
 @triton.jit
 def gated_delta_net_recurrent_fwd_kernel(
@@ -19,17 +19,17 @@ def gated_delta_net_recurrent_fwd_kernel(
     v,
     g,
     beta,
+    h0,
+    scale,
+    B,
+    H,
+    T,
     o,
     kv_mem_out,
     state_chkp,
     inv_norm_q,
     inv_norm_k,
-    h0,
     ht,
-    scale,
-    B,
-    H,
-    T,
     K: tl.constexpr,
     V: tl.constexpr,
     BK: tl.constexpr,
@@ -90,6 +90,8 @@ def gated_delta_net_recurrent_fwd_kernel(
     base_inv_norm = bh * T_i64
     base_state = bh * K_i64 * V_i64 + o_k[:, None] * V_i64 + o_v[None, :]
 
+    scale_f32 = tl.cast(scale, tl.float32)
+
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
     if USE_INITIAL_STATE:
         b_h += tl.load(h0 + base_state, mask=mask_h, other=0.0).to(tl.float32)
@@ -119,7 +121,7 @@ def gated_delta_net_recurrent_fwd_kernel(
         tl.store(inv_norm_q + base_inv_norm + t_i64, inv_norm_q_t)
         tl.store(inv_norm_k + base_inv_norm + t_i64, inv_norm_k_t)
 
-        b_q = b_q * inv_norm_q_t * scale
+        b_q = b_q * inv_norm_q_t * scale_f32
         b_k = b_k * inv_norm_k_t
 
         # log-space decay。
@@ -161,13 +163,32 @@ def gated_delta_net_recurrent_fwd_kernel(
     if STORE_FINAL_STATE:
         tl.store(ht + base_state, b_h.to(ht.dtype.element_ty), mask=mask_h)
 
+
+def _bwd_autotune_pre_hook(nargs, reset_only=False):
+    """反向 kernel 在 autotune benchmark 前清零梯度输出，避免 atomic_add 累加脏值。"""
+    for name in ("dq", "dk", "dv", "dg", "dbeta", "dh0"):
+        buf = nargs.get(name)
+        if buf is None:
+            continue
+        if hasattr(buf, "zero_"):
+            buf.zero_()
+        else:
+            try:
+                import jax.numpy as jnp
+
+                nargs[name] = jnp.zeros_like(buf)
+            except Exception:
+                pass
+
+
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [4, 8]
-        for num_stages in [2, 3, 4]
+        for num_warps in [1, 2, 4, 8]
+        for num_stages in [1, 2, 3, 4]
     ],
-    key=["H_SIZE"],
+    key=["K", "V"],
+    pre_hook=_bwd_autotune_pre_hook,
 )
 @triton.jit
 def gated_delta_net_recurrent_bwd_kernel(
@@ -183,16 +204,16 @@ def gated_delta_net_recurrent_bwd_kernel(
     inv_norm_k,
     h0,
     state_chkp,
+    scale,
+    B,
+    H,
+    T,
     dq,
     dk,
     dv,
     dg,
     dbeta,
     dh0,
-    scale,
-    B,
-    H,
-    T,
     K: tl.constexpr,
     V: tl.constexpr,
     BK: tl.constexpr,
@@ -251,6 +272,8 @@ def gated_delta_net_recurrent_bwd_kernel(
     base_inv_norm = bh * T_i64
     base_state = bh * K_i64 * V_i64 + o_k[:, None] * V_i64 + o_v[None, :]
 
+    scale_f32 = tl.cast(scale, tl.float32)
+
     # 前向重算得到 S_T。
     b_h = tl.load(h0 + base_state, mask=mask_h, other=0.0).to(tl.float32)
     for t in range(T):
@@ -270,7 +293,7 @@ def gated_delta_net_recurrent_bwd_kernel(
         inv_norm_q_t = tl.load(inv_norm_q + base_inv_norm + t_i64)
         inv_norm_k_t = tl.load(inv_norm_k + base_inv_norm + t_i64)
 
-        b_q = b_q * inv_norm_q_t * scale
+        b_q = b_q * inv_norm_q_t * scale_f32
         b_k = b_k * inv_norm_k_t
 
         b_h = b_h * tl.exp(b_g)
@@ -323,7 +346,7 @@ def gated_delta_net_recurrent_bwd_kernel(
 
         q_hat = b_q * inv_norm_q_t
         k_hat = b_k * inv_norm_k_t
-        q_tilde = q_hat * scale
+        q_tilde = q_hat * scale_f32
 
         kv_mem = tl.load(kv_mem_out + p_kv_mem, mask=mask_v, other=0.0).to(tl.float32)
         delta = b_beta * (b_v - kv_mem)
@@ -352,7 +375,7 @@ def gated_delta_net_recurrent_bwd_kernel(
         b_h = state_old
 
         d_q_tilde = tl.sum(state_new * b_do[None, :], axis=1)
-        d_q_hat = scale * d_q_tilde
+        d_q_hat = scale_f32 * d_q_tilde
         q_hat_dot = tl.sum(q_hat * d_q_hat)
         d_q = inv_norm_q_t * (d_q_hat - q_hat * q_hat_dot)
 
@@ -378,10 +401,10 @@ def gated_delta_net_recurrent_bwd_kernel(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [4, 8]
-        for num_stages in [2, 3, 4]
+        for num_warps in [1, 2, 4, 8]
+        for num_stages in [1, 2, 3, 4]
     ],
-    key=["H_SIZE"],
+    key=["K", "V"],
 )
 @triton.jit
 def gated_delta_net_recurrent_inference_fwd_kernel(
@@ -390,13 +413,13 @@ def gated_delta_net_recurrent_inference_fwd_kernel(
     v,
     g,
     beta,
-    o,
     h0,
-    ht,
     scale,
     B,
     H,
     T,
+    o,
+    ht,
     K: tl.constexpr,
     V: tl.constexpr,
     BK: tl.constexpr,
@@ -449,6 +472,8 @@ def gated_delta_net_recurrent_inference_fwd_kernel(
     base_gb = bh * T_i64
     base_state = bh * K_i64 * V_i64 + o_k[:, None] * V_i64 + o_v[None, :]
 
+    scale_f32 = tl.cast(scale, tl.float32)
+
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
     if USE_INITIAL_STATE:
         b_h += tl.load(h0 + base_state, mask=mask_h, other=0.0).to(tl.float32)
@@ -471,7 +496,7 @@ def gated_delta_net_recurrent_inference_fwd_kernel(
 
         b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
         b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
-        b_q = b_q * scale
+        b_q = b_q * scale_f32
 
         b_h = b_h * tl.exp(b_g)
 
@@ -489,10 +514,10 @@ def gated_delta_net_recurrent_inference_fwd_kernel(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [4, 8]
-        for num_stages in [2, 3, 4]
+        for num_warps in [1, 2, 4, 8]
+        for num_stages in [1, 2, 3, 4]
     ],
-    key=["H_SIZE"],
+    key=["K", "V"],
 )
 @triton.jit
 def gated_delta_net_recurrent_single_step_fwd_kernel(
@@ -501,12 +526,12 @@ def gated_delta_net_recurrent_single_step_fwd_kernel(
     v,
     g,
     beta,
-    o,
     h0,
-    ht,
     scale,
     B,
     H,
+    o,
+    ht,
     K: tl.constexpr,
     V: tl.constexpr,
     BK: tl.constexpr,
@@ -557,6 +582,8 @@ def gated_delta_net_recurrent_single_step_fwd_kernel(
     base_vo = bh * V_i64 + o_v
     base_state = bh * K_i64 * V_i64 + o_k[:, None] * V_i64 + o_v[None, :]
 
+    scale_f32 = tl.cast(scale, tl.float32)
+
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
     if USE_INITIAL_STATE:
         b_h += tl.load(h0 + base_state, mask=mask_h, other=0.0).to(tl.float32)
@@ -569,7 +596,7 @@ def gated_delta_net_recurrent_single_step_fwd_kernel(
 
     b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
     b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
-    b_q = b_q * scale
+    b_q = b_q * scale_f32
 
     b_h = b_h * tl.exp(b_g)
     kv_mem = tl.sum(b_h * b_k[:, None], axis=0)

@@ -176,8 +176,6 @@ class GatedDeltaNetRecurrentTritonFunction(torch.autograd.Function):
             BV=BV,
             CHUNK_LEN=CHUNK_LEN,
             USE_FINAL_STATE_GRADIENT=use_final_state_gradient,
-            num_warps=1,
-            num_stages=1,
         )
 
         if not ctx.head_first:
