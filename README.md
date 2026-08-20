@@ -38,6 +38,12 @@
   - [rwkv7op_sane 实现状态](#rwkv7op_sane-实现状态)
 - [rwkv7_op_sane_rnn 使用方法](#rwkv7_op_sane_rnn-使用方法)
   - [rwkv7_op_sane_rnn 实现状态](#rwkv7_op_sane_rnn-实现状态)
+- [gdn_recurrent 使用方法](#gdn_recurrent-使用方法)
+  - [函数接口说明](#函数接口说明-1)
+    - [`gated_delta_net_recurrent`](#gated_delta_net_recurrent)
+    - [`gated_delta_net_recurrent_inference`](#gated_delta_net_recurrent_inference)
+    - [`gated_delta_net_recurrent_single_step`](#gated_delta_net_recurrent_single_step)
+  - [gdn_recurrent 实现状态](#gdn_recurrent-实现状态)
 - [rwkv6op 使用方法](#rwkv6op-使用方法)
 - [分布式并行（JAX）](#分布式并行)
   - [PyTorch 使用注意事项](#pytorch-使用注意事项)
@@ -412,6 +418,104 @@ for step in range(seq_len):
 1. 单步算子**没有梯度**。
 2. CUDA 版本会强制把输入 cast 到 bfloat16，与 rwkv7_op_rnn 行为一致。
 
+<a id="gdn_recurrent-使用方法"></a>
+## gdn_recurrent 使用方法
+
+`gdn_recurrent` 提供 **Gated DeltaNet** 的逐步 recurrent 实现，支持训练、推理与单步 RNN 三种入口。默认输入 layout 为 `[B, T, H, K/V]`，设置 `head_first=True` 可切换为 `[B, H, T, K/V]`。
+
+```python
+from rwkv_ops import (
+    gated_delta_net_recurrent,
+    gated_delta_net_recurrent_inference,
+    gated_delta_net_recurrent_single_step,
+)
+
+# 训练 / prefill（可求梯度）
+out, final_state = gated_delta_net_recurrent(
+    q, k, v, g, beta,
+    initial_state=h0,
+    output_final_state=True,
+    head_first=False,
+)
+
+# 推理专用（无梯度，省显存）
+out, final_state = gated_delta_net_recurrent_inference(
+    q, k, v, g, beta,
+    initial_state=h0,
+    output_final_state=True,
+    head_first=False,
+)
+
+# 单步 RNN（decode 阶段）
+out, state = gated_delta_net_recurrent_single_step(
+    q, k, v, g, beta,
+    initial_state=state,
+    output_final_state=True,
+    head_first=True,  # 单步目前只支持 head_first=True
+)
+```
+
+<a id="函数接口说明-1"></a>
+### 函数接口说明
+
+<a id="gated_delta_net_recurrent"></a>
+#### `gated_delta_net_recurrent`
+
+| 参数 | 形状 | 说明 |
+|---|---|---|
+| q, k | (B, T, H, K) | 查询与键，内部先做 L2 归一化 |
+| v | (B, T, H, V) | 值 |
+| g | (B, T, H) | log-space 衰减门控 |
+| beta | (B, T, H) | 写入强度，需已在外部过 sigmoid，落在 (0, 1) |
+| initial_state | (B, H, K, V) 或 (1, H, K, V)，可选 | 初始 recurrent state |
+| output_final_state | bool | 是否返回最终 state |
+| head_first | bool | 输入输出是否 head 维优先 |
+
+| 返回值 | 形状 | 说明 |
+|---|---|---|
+| out | (B, T, H, V) | 与 `v` 同 dtype |
+| final_state | (B, H, K, V) 或 None | 最终 state |
+
+<a id="gated_delta_net_recurrent_inference"></a>
+#### `gated_delta_net_recurrent_inference`
+
+接口与 `gated_delta_net_recurrent` 完全一致，但**不计算梯度**，因此不保存反向所需的 `kv_mem` 与 `state_chkp` 等中间量，显存占用更低。
+
+<a id="gated_delta_net_recurrent_single_step"></a>
+#### `gated_delta_net_recurrent_single_step`
+
+| 参数 | 形状 | 说明 |
+|---|---|---|
+| q, k | (B, H, K) | 单步查询与键 |
+| v | (B, H, V) | 单步值 |
+| g | (B, H) | 单步 log-space 衰减门控 |
+| beta | (B, H) | 单步写入强度，已 sigmoid |
+| initial_state | (B, H, K, V) 或 (1, H, K, V)，可选 | 当前 state |
+| output_final_state | bool | 是否返回下一步 state |
+| head_first | bool | 单步目前只支持 `head_first=True` |
+
+| 返回值 | 形状 | 说明 |
+|---|---|---|
+| out | (B, H, V) | 与 `v` 同 dtype |
+| next_state | (B, H, K, V) | 下一步 state |
+
+<a id="gdn_recurrent-实现状态"></a>
+### gdn_recurrent 实现状态
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ❌   | ✅     | ✅     |
+| JAX         | ❌   | ✅     | ✅¹    |
+| TensorFlow  | ❌   | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
+
+> ¹ JAX 后端的 `native` 在 GPU/TPU 上为 Pallas 实现（`jax_pallas_kernel.py`），`triton` 显式 `KERNEL_TYPE="triton"` 时为 JAX-Triton 实现；其余为纯 Keras ops。
+
+1. 训练入口支持反向传播；推理与单步入口**没有梯度**。
+2. chunkwise 版本位于 `gdn_chunk/`，目前只有纯 Keras native 实现。
+
+
 <a id="分布式并行"></a>
 ## 分布式并行（JAX）
 
@@ -424,6 +528,7 @@ JAX 侧所有加速算子都通过 `custom_partitioning` + einsum 风格 `shardi
 | rwkv7 cuda / triton / pallas | ✅ | ✅ |
 | rwkv7_sane cuda / triton / pallas | ✅ | ✅ |
 | rwkv7 / rwkv7_sane 单步 cuda | ✅ | ✅ |
+| gdn_recurrent triton / pallas | ✅ | ✅ |
 | rwkv6 cuda | ✅ | ❌ |
 
 > rwkv6 的 channel 维（C = H × N）在分片规则中是一个整体，head 维未暴露，

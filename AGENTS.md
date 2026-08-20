@@ -185,6 +185,7 @@ jax 侧所有加速算子都用 `custom_partitioning` + einsum 风格 `sharding_
 | rwkv7 cuda / triton / pallas | ✅ | ✅ |
 | rwkv7_sane cuda / triton / pallas | ✅ | ✅（含 1-device TP 结构测试） |
 | rwkv7 / rwkv7_sane 单步 cuda | ✅ | ✅ |
+| gdn_recurrent triton / pallas | ✅ | ✅ |
 | rwkv6 cuda | ✅ | ❌（channel 融合为 `c`，head 维未暴露） |
 
 - 规则字母：`b`=batch、`n`/`h`=head、`t`=time、`k`/`m`/`n`=head_size、

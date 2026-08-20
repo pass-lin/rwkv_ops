@@ -36,6 +36,12 @@
   - [rwkv7op_sane implementation status](#rwkv7op_sane-implementation-status)
 - [Usage of `rwkv7_op_sane_rnn`](#usage-of-rwkv7_op_sane_rnn)
   - [Implementation Status of `rwkv7_op_sane_rnn`](#implementation-status-of-rwkv7_op_sane_rnn)
+- [Usage of `gdn_recurrent`](#usage-of-gdn_recurrent)
+  - [API Reference](#api-reference-1)
+    - [`gated_delta_net_recurrent`](#gated_delta_net_recurrent)
+    - [`gated_delta_net_recurrent_inference`](#gated_delta_net_recurrent_inference)
+    - [`gated_delta_net_recurrent_single_step`](#gated_delta_net_recurrent_single_step)
+  - [Implementation Status of `gdn_recurrent`](#implementation-status-of-gdn_recurrent)
 - [Usage of `rwkv6op`](#usage-of-rwkv6op)
 - [Distributed Parallelism (JAX)](#distributed-parallelism)
   - [PyTorch Usage Notes](#pytorch-usage-notes)
@@ -428,6 +434,104 @@ for step in range(seq_len):
 1. Single-step operator **has no gradient support**.
 2. The CUDA version casts inputs to bfloat16 internally, same as `rwkv7_op_rnn`.
 
+<a id="usage-of-gdn_recurrent"></a>
+## Usage of `gdn_recurrent`
+
+`gdn_recurrent` provides a step-by-step recurrent implementation of **Gated DeltaNet**, with training, inference, and single-step RNN entry points. The default input layout is `[B, T, H, K/V]`; set `head_first=True` to use `[B, H, T, K/V]`.
+
+```python
+from rwkv_ops import (
+    gated_delta_net_recurrent,
+    gated_delta_net_recurrent_inference,
+    gated_delta_net_recurrent_single_step,
+)
+
+# Training / prefill (gradient-capable)
+out, final_state = gated_delta_net_recurrent(
+    q, k, v, g, beta,
+    initial_state=h0,
+    output_final_state=True,
+    head_first=False,
+)
+
+# Inference-only (no gradients, lower memory)
+out, final_state = gated_delta_net_recurrent_inference(
+    q, k, v, g, beta,
+    initial_state=h0,
+    output_final_state=True,
+    head_first=False,
+)
+
+# Single-step RNN (decode stage)
+out, state = gated_delta_net_recurrent_single_step(
+    q, k, v, g, beta,
+    initial_state=state,
+    output_final_state=True,
+    head_first=True,  # single-step currently requires head_first=True
+)
+```
+
+<a id="api-reference-1"></a>
+### API Reference
+
+<a id="gated_delta_net_recurrent"></a>
+#### `gated_delta_net_recurrent`
+
+| Parameter | Shape | Description |
+|---|---|---|
+| q, k | (B, T, H, K) | Query and key; internally L2-normalized |
+| v | (B, T, H, V) | Value |
+| g | (B, T, H) | Log-space decay gate |
+| beta | (B, T, H) | Write strength; must already be sigmoid-activated to (0, 1) |
+| initial_state | (B, H, K, V) or (1, H, K, V), optional | Initial recurrent state |
+| output_final_state | bool | Whether to return the final state |
+| head_first | bool | Whether inputs/outputs use head-first layout |
+
+| Return value | Shape | Description |
+|---|---|---|
+| out | (B, T, H, V) | Same dtype as `v` |
+| final_state | (B, H, K, V) or None | Final state |
+
+<a id="gated_delta_net_recurrent_inference"></a>
+#### `gated_delta_net_recurrent_inference`
+
+Same interface as `gated_delta_net_recurrent`, but **does not compute gradients** and therefore avoids storing `kv_mem`, `state_chkp`, and other reverse-only intermediates.
+
+<a id="gated_delta_net_recurrent_single_step"></a>
+#### `gated_delta_net_recurrent_single_step`
+
+| Parameter | Shape | Description |
+|---|---|---|
+| q, k | (B, H, K) | Single-step query and key |
+| v | (B, H, V) | Single-step value |
+| g | (B, H) | Single-step log-space decay gate |
+| beta | (B, H) | Single-step write strength, already sigmoid-activated |
+| initial_state | (B, H, K, V) or (1, H, K, V), optional | Current state |
+| output_final_state | bool | Whether to return the next state |
+| head_first | bool | Single-step currently only supports `head_first=True` |
+
+| Return value | Shape | Description |
+|---|---|---|
+| out | (B, H, V) | Same dtype as `v` |
+| next_state | (B, H, K, V) | State for the next step |
+
+<a id="implementation-status-of-gdn_recurrent"></a>
+### Implementation Status of `gdn_recurrent`
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ❌   | ✅     | ✅     |
+| JAX         | ❌   | ✅     | ✅¹    |
+| TensorFlow  | ❌   | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
+
+> ¹ With the JAX backend, `native` on GPU/TPU uses the Pallas implementation (`jax_pallas_kernel.py`); `triton` is the JAX-Triton implementation when `KERNEL_TYPE="triton"` is set explicitly; elsewhere it falls back to pure Keras ops.
+
+1. The training entry point supports back-propagation; the inference and single-step entry points **do not support gradients**.
+2. The chunkwise counterpart lives in `gdn_chunk/` and currently only has a pure-Keras native implementation.
+
+
 ---
 
 <a id="distributed-parallelism"></a>
@@ -443,6 +547,7 @@ over batch)** and **TP (tensor parallel over heads)**:
 | rwkv7 cuda / triton / pallas | ✅ | ✅ |
 | rwkv7_sane cuda / triton / pallas | ✅ | ✅ |
 | rwkv7 / rwkv7_sane single-step cuda | ✅ | ✅ |
+| gdn_recurrent triton / pallas | ✅ | ✅ |
 | rwkv6 cuda | ✅ | ❌ |
 
 > rwkv6 fuses the channel dim (C = H × N) into a single rule dimension, so the
