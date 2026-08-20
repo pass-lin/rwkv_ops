@@ -110,7 +110,13 @@ def gated_delta_net_chunk(
     g_col = ops.expand_dims(g, -2)
     decay_diff = g_row - g_col
     tril_incl = ops.transpose(ops.triu(ops.ones((chunk_size, chunk_size)), k=0), (1, 0))
-    decay_mask = ops.exp(decay_diff) * tril_incl
+    tril_incl_bool = ops.cast(tril_incl, "bool")
+    # 先对 decay_diff 做 mask，把上三角置 0 后再 exp，避免上三角大正数 exp 溢出。
+    # 若先 exp 再 where，ExpBackward0 仍会在上三角计算 inf*0=NaN。
+    decay_diff_masked = ops.where(
+        tril_incl_bool, decay_diff, ops.zeros_like(decay_diff)
+    )
+    decay_mask = ops.exp(decay_diff_masked)
 
     kbk = ops.einsum("bhcid,bhcjd->bhcij", k_beta, k)
     attn = -(kbk * decay_mask)

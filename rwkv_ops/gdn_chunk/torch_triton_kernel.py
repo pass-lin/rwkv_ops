@@ -7,10 +7,15 @@ import torch
 
 from .triton import (
     chunk_local_cumsum,
+    gdn_chunk_bwd_dhu,
+    gdn_chunk_bwd_dqkwg,
+    gdn_chunk_bwd_dv_local,
     gdn_chunk_fwd_h,
     gdn_chunk_fwd_intra,
     gdn_chunk_fwd_o,
+    gdn_chunk_l2norm_bwd,
     gdn_chunk_l2norm_fwd,
+    gdn_chunk_prepare_wy_repr_bwd,
     gdn_chunk_recompute_w_u,
 )
 
@@ -89,7 +94,100 @@ class GatedDeltaNetChunkTritonFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, do, dht):
-        raise NotImplementedError("GatedDeltaNetChunkTriton 反向传播尚未实现")
+        """反向传播：计算 dq, dk, dv, dg, db, dh0。"""
+        (
+            q,
+            k,
+            v,
+            g,
+            beta,
+            inv_norm_q,
+            inv_norm_k,
+            A,
+            w,
+            u,
+            h,
+            v_new,
+            initial_state,
+        ) = ctx.saved_tensors
+        chunk_size = ctx.chunk_size
+        B, H, T, K = q.shape
+        scale = K**-0.5
+
+        # do 从外部 layout [B, T, H, V] 转成内部 [B, H, T, V]
+        do = do.transpose(1, 2).contiguous()
+
+        # 1. 局部 dv（只含 chunk 内 causal 项）
+        dv_local = gdn_chunk_bwd_dv_local(q, k, g, do, scale, chunk_size=chunk_size)
+
+        # 2. 状态反向扫描
+        dh, dh0, dv = gdn_chunk_bwd_dhu(
+            q,
+            k,
+            w,
+            g,
+            do,
+            dv_local,
+            dht=dht,
+            scale=scale,
+            chunk_size=chunk_size,
+        )
+
+        # 3. dq / dk / dw / chunk 内 dg
+        dq, dk, dw, dg = gdn_chunk_bwd_dqkwg(
+            q,
+            k,
+            v_new,
+            w,
+            g,
+            h,
+            dh,
+            do,
+            dv,
+            scale,
+            chunk_size=chunk_size,
+        )
+
+        # 4. WY 表示反向
+        dk2, dv2, db, dg2 = gdn_chunk_prepare_wy_repr_bwd(
+            k,
+            v,
+            beta,
+            g,
+            A,
+            dw,
+            dv,
+            chunk_size=chunk_size,
+        )
+        dk += dk2
+        dv += dv2
+        dg += dg2
+
+        # 5. g 的 reverse cumsum（因为 forward 对 g 做过 cumsum）
+        dg = chunk_local_cumsum(dg, chunk_size=chunk_size, reverse=True)
+
+        # 6. L2 norm 反向
+        dq = gdn_chunk_l2norm_bwd(q, inv_norm_q, dq)
+        dk = gdn_chunk_l2norm_bwd(k, inv_norm_k, dk)
+
+        # 7. 转回外部 layout [B, T, H, *]
+        dq = dq.transpose(1, 2)
+        dk = dk.transpose(1, 2)
+        dv = dv.transpose(1, 2)
+        dg = dg.transpose(1, 2)
+        db = db.transpose(1, 2)
+
+        # 8. 匹配 forward 输入的梯度位置
+        return (
+            dq,
+            dk,
+            dv,
+            dg,
+            db,
+            dh0,  # initial_state
+            None,  # output_final_state
+            None,  # chunk_size
+        )
 
 
 def gated_delta_net_chunk(

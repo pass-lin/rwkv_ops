@@ -132,3 +132,55 @@ def test_chunk_triton_different_chunk_size(gdn_inputs, device):
             atol=1e-4,
             rtol=1e-3,
         )
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_chunk_triton_bwd_vs_native(gdn_inputs, device):
+    """Triton chunkwise 反向与 native Keras autograd 对拍。"""
+    q, k, v = gdn_inputs["q"], gdn_inputs["k"], gdn_inputs["v"]
+    g, beta, h0 = gdn_inputs["g"], gdn_inputs["beta"], gdn_inputs["h0"]
+
+    def _run_and_grad(op):
+        q_t = torch.from_numpy(q).to(device).requires_grad_(True)
+        k_t = torch.from_numpy(k).to(device).requires_grad_(True)
+        v_t = torch.from_numpy(v).to(device).requires_grad_(True)
+        g_t = torch.from_numpy(g).to(device).requires_grad_(True)
+        beta_t = torch.from_numpy(beta).to(device).requires_grad_(True)
+        h0_t = torch.from_numpy(h0).to(device).requires_grad_(True)
+
+        out, state = op(
+            q_t,
+            k_t,
+            v_t,
+            g_t,
+            beta_t,
+            initial_state=h0_t,
+            output_final_state=True,
+            chunk_size=64,
+        )
+        loss = out.pow(2).mean() + state.pow(2).mean()
+        loss.backward()
+        return (
+            q_t.grad,
+            k_t.grad,
+            v_t.grad,
+            g_t.grad,
+            beta_t.grad,
+            h0_t.grad,
+        )
+
+    grads_native = _run_and_grad(native_chunk)
+    grads_triton = _run_and_grad(triton_chunk)
+
+    names = ["q", "k", "v", "g", "beta", "h0"]
+    for name, ref, tgt in zip(names, grads_native, grads_triton):
+        assert ref is not None, f"native {name} grad is None"
+        assert tgt is not None, f"triton {name} grad is None"
+        assert_allclose_with_stats(
+            ref,
+            tgt,
+            f"bwd {name}",
+            atol=7e-3,
+            rtol=1e-3,
+        )
