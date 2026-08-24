@@ -31,12 +31,12 @@ def _gdn_chunk_bwd_dqkwg_kernel(
     dh_ptr,
     do_ptr,
     dv_ptr,
-    scale,
     B,
     H,
     T,
     K,
     V,
+    scale,
     dq_ptr,
     dk_ptr,
     dw_ptr,
@@ -57,8 +57,8 @@ def _gdn_chunk_bwd_dqkwg_kernel(
         dh_ptr: [B, H, T//C, K, V]，chunk 级状态梯度。
         do_ptr: [B, H, T, V]。
         dv_ptr: [B, H, T, V]。
-        scale: float，`1/sqrt(K)`。
         B, H, T, K, V: 维度。
+        scale: float，`1/sqrt(K)`。
         C: chunk 长度，编译期常量。
         BK, BV: K/V 维 block 大小。
         dq_ptr, dk_ptr, dw_ptr, dg_ptr: 输出。
@@ -213,12 +213,12 @@ def gdn_chunk_bwd_dqkwg(q, k, v_new, w, g, h, dh, do, dv, scale, chunk_size=64):
         dh,
         do,
         dv,
-        scale,
         B,
         H,
         T,
         K,
         V,
+        scale,
         dq,
         dk,
         dw,

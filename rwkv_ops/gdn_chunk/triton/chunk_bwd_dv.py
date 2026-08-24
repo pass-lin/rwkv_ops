@@ -29,12 +29,12 @@ def _gdn_chunk_bwd_dv_local_kernel(
     k_ptr,
     g_ptr,
     do_ptr,
-    scale,
     B,
     H,
     T,
     K,
     V,
+    scale,
     dv_ptr,
     C: tl.constexpr,
     BK: tl.constexpr,
@@ -48,8 +48,8 @@ def _gdn_chunk_bwd_dv_local_kernel(
         q_ptr, k_ptr: [B, H, T, K]，已归一化的 query/key。
         g_ptr: [B, H, T]，cumsum 后的 log-space decay。
         do_ptr: [B, H, T, V]，输出梯度。
-        scale: float，query 缩放系数 `1/sqrt(K)`。
         B, H, T, K, V: 维度。
+        scale: float，query 缩放系数 `1/sqrt(K)`。
         C: chunk 长度，编译期常量。
         BK, BV: K/V 维 block 大小。
         dv_ptr: [B, H, T, V]，输出 dv_local。
@@ -141,12 +141,12 @@ def gdn_chunk_bwd_dv_local(q, k, g, do, scale, chunk_size=64):
         k,
         g,
         do,
-        scale,
         B,
         H,
         T,
         K,
         V,
+        scale,
         dv,
         C=C,
     )

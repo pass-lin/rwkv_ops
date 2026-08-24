@@ -22,15 +22,15 @@ def _gdn_chunk_fwd_h_kernel(
     w_ptr,
     u_ptr,
     g_ptr,
-    h_ptr,
-    v_new_ptr,
     h0_ptr,
-    ht_ptr,
     B,
     H,
     T,
     K,
     V,
+    h_ptr,
+    v_new_ptr,
+    ht_ptr,
     C: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
@@ -46,11 +46,11 @@ def _gdn_chunk_fwd_h_kernel(
         w_ptr: [B, H, T, K]，WY 表示 w。
         u_ptr: [B, H, T, V]，WY 表示 u。
         g_ptr: [B, H, T]，cumsum 后的 log-space decay。
+        h0_ptr: [B, H, K, V]，初始状态。
+        B, H, T, K, V: 维度。
         h_ptr: [B, H, T//C, K, V]，chunk 级输入状态 checkpoint。
         v_new_ptr: [B, H, T, V]，输出修正后的 value。
-        h0_ptr: [B, H, K, V]，初始状态。
         ht_ptr: [B, H, K, V]，最终状态。
-        B, H, T, K, V: 维度。
         C: chunk 长度，编译期常量。
         BV: V 维 block 大小。
     """
@@ -183,15 +183,15 @@ def gdn_chunk_fwd_h(
         w,
         u,
         g,
-        h,
-        v_new,
         h0,
-        ht,
         B,
         H,
         T,
         K,
         V,
+        h,
+        v_new,
+        ht,
         C=C,
         BK=BK,
         USE_INITIAL_STATE=(h0 is not None),

@@ -67,6 +67,9 @@ _set_cuda_host_compiler()
 
 os.environ.setdefault("KERAS_BACKEND", "jax")
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+# JAX 测试默认走 native，避免 rwkv_ops/__init__.py 在导入阶段触发 RWKV-6 CUDA FFI 编译。
+# 需要 triton/cuda 的测试各自在 fixture 里显式传 KERNEL_TYPE。
+os.environ.setdefault("KERNEL_TYPE", "native")
 
 import pytest  # noqa: E402
 

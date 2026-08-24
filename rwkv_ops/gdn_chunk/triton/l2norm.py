@@ -19,23 +19,24 @@ import triton.language as tl
 @triton.jit
 def _gdn_chunk_l2norm_fwd_kernel(
     x_ptr,
-    out_ptr,
-    inv_norm_ptr,
     T,
     K,
+    out_ptr,
+    inv_norm_ptr,
     BK: tl.constexpr,
     BT: tl.constexpr,
 ):
     """L2 归一化前向 kernel。
 
     把前导维度 flatten 成 T，每个 program 处理 BT 个 (b,h,t) 位置，沿 K 维归一化。
+    输出指针放在标量之后，以兼容 jax-triton 的参数传递约定。
 
     Args:
         x_ptr: [T, K]，输入指针。
-        out_ptr: [T, K]，输出指针。
-        inv_norm_ptr: [T]，保存的逆范数 `1 / sqrt(sum(x^2) + eps)`。
         T: 前导维度乘积 B*H*T_seq。
         K: 特征维度。
+        out_ptr: [T, K]，输出指针。
+        inv_norm_ptr: [T]，保存的逆范数 `1 / sqrt(sum(x^2) + eps)`。
         BK: K 维 block 大小。
         BT: 时间/block 大小。
     """
@@ -81,10 +82,10 @@ def gdn_chunk_l2norm_fwd(x):
 
     _gdn_chunk_l2norm_fwd_kernel[grid](
         x_2d,
-        out_2d,
-        inv_norm,
         B * H * T,
         K,
+        out_2d,
+        inv_norm,
         BK=BK,
     )
     out = out_2d.view(B, H, T, K)
@@ -105,9 +106,9 @@ def _gdn_chunk_l2norm_bwd_kernel(
     x_ptr,
     inv_norm_ptr,
     dout_ptr,
-    dx_ptr,
     T,
     K,
+    dx_ptr,
     BK: tl.constexpr,
     BT: tl.constexpr,
 ):
@@ -119,8 +120,8 @@ def _gdn_chunk_l2norm_bwd_kernel(
         x_ptr: [T, K]，前向原始输入。
         inv_norm_ptr: [T]，前向保存的逆范数。
         dout_ptr: [T, K]，输出梯度。
-        dx_ptr: [T, K]，输入梯度输出。
         T, K: 维度。
+        dx_ptr: [T, K]，输入梯度输出。
         BK, BT: block 大小。
     """
     i_t = tl.program_id(0).to(tl.int64)
@@ -173,9 +174,9 @@ def gdn_chunk_l2norm_bwd(x, inv_norm, dout):
         x_2d,
         inv_norm_1d,
         dout_2d,
-        dx_2d,
         B * H * T,
         K,
+        dx_2d,
         BK=BK,
     )
     return dx_2d.view(B, H, T, K)

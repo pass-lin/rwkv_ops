@@ -23,13 +23,13 @@ def _gdn_chunk_fwd_o_kernel(
     v_new_ptr,
     h_ptr,
     g_ptr,
-    o_ptr,
     scale,
     B,
     H,
     T,
     K,
     V,
+    o_ptr,
     C: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
@@ -44,9 +44,9 @@ def _gdn_chunk_fwd_o_kernel(
         v_new_ptr: [B, H, T, V]，修正后的 value。
         h_ptr: [B, H, T//C, K, V]，chunk 级输入状态 checkpoint。
         g_ptr: [B, H, T]，cumsum 后的 log-space decay。
-        o_ptr: [B, H, T, V]，输出。
         scale: float，query 缩放系数 `1/sqrt(K)`。
         B, H, T, K, V: 维度。
+        o_ptr: [B, H, T, V]，输出。
         C: chunk 长度，编译期常量。
         BK, BV: K/V 维 block 大小。
     """
@@ -151,13 +151,13 @@ def gdn_chunk_fwd_o(q, k, v_new, h, g, chunk_size=64):
         v_new,
         h,
         g,
-        o,
         scale,
         B,
         H,
         T,
         K,
         V,
+        o,
         C=C,
     )
     return o

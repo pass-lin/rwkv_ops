@@ -24,11 +24,11 @@ def _gdn_chunk_fwd_intra_kernel(
     k_ptr,
     g_ptr,
     beta_ptr,
-    A_ptr,
     B,
     H,
     T,
     K,
+    A_ptr,
     C: tl.constexpr,
     BK: tl.constexpr,
 ):
@@ -40,8 +40,8 @@ def _gdn_chunk_fwd_intra_kernel(
         k_ptr: [B, H, T, K]，已归一化的 key。
         g_ptr: [B, H, T]，cumsum 后的 log-space decay。
         beta_ptr: [B, H, T]，post-sigmoid beta。
-        A_ptr: [B, H, T//C, C, C]，输出 `(I + L)^{-1}`。
         B, H, T, K: 维度。
+        A_ptr: [B, H, T//C, C, C]，输出 `(I + L)^{-1}`。
         C: chunk 长度，编译期常量。
         BK: K 维 block 大小。
     """
@@ -119,11 +119,11 @@ def gdn_chunk_fwd_intra(k, g, beta, chunk_size=64):
         k,
         g,
         beta,
-        A,
         B,
         H,
         T,
         K,
+        A,
         C=C,
     )
     return A

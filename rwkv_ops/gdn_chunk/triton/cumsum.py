@@ -17,21 +17,22 @@ import triton.language as tl
 @triton.jit
 def _chunk_local_cumsum_kernel(
     s_ptr,
-    o_ptr,
     B,
     H,
     T,
+    o_ptr,
     C: tl.constexpr,
     REVERSE: tl.constexpr,
 ):
     """chunk 内局部 cumsum。
 
     输入输出 layout 均为 [B, H, T]，每个 program 处理一个 (batch, head, chunk)。
+    输出指针放在标量之后，以兼容 jax-triton 的参数传递约定。
 
     Args:
         s_ptr: [B, H, T]，输入标量序列。
-        o_ptr: [B, H, T]，输出 cumsum 结果。
         B, H, T: 维度。
+        o_ptr: [B, H, T]，输出 cumsum 结果。
         C: chunk 长度，编译期常量。
         REVERSE: 是否反向 cumsum。
     """
@@ -76,10 +77,10 @@ def chunk_local_cumsum_torch(s, chunk_size=64, reverse=False):
     grid = (B * H, T // chunk_size)
     _chunk_local_cumsum_kernel[grid](
         s,
-        out,
         B,
         H,
         T,
+        out,
         C=chunk_size,
         REVERSE=reverse,
     )

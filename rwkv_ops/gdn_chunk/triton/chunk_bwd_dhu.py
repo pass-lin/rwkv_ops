@@ -29,12 +29,12 @@ def _gdn_chunk_bwd_dhu_kernel(
     do_ptr,
     dv_local_ptr,
     dht_ptr,
-    scale,
     B,
     H,
     T,
     K,
     V,
+    scale,
     dh_ptr,
     dh0_ptr,
     dv_out_ptr,
@@ -54,8 +54,8 @@ def _gdn_chunk_bwd_dhu_kernel(
         do_ptr: [B, H, T, V]。
         dv_local_ptr: [B, H, T, V]，来自 chunk_bwd_dv_local 的局部 dv。
         dht_ptr: [B, H, K, V]，最终状态梯度；未提供时为全零。
-        scale: float，`1/sqrt(K)`。
         B, H, T, K, V: 维度。
+        scale: float，`1/sqrt(K)`。
         C: chunk 长度，编译期常量。
         BV: V 维 block 大小。
         dh_ptr: [B, H, T//C, K, V]，输出 chunk 级状态梯度。
@@ -235,12 +235,12 @@ def gdn_chunk_bwd_dhu(q, k, w, g, do, dv_local, dht=None, scale=1.0, chunk_size=
         do,
         dv_local,
         dht,
-        scale,
         B,
         H,
         T,
         K,
         V,
+        scale,
         dh,
         dh0,
         dv,

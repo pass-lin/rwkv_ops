@@ -28,13 +28,13 @@ def _gdn_chunk_recompute_w_u_fwd_kernel(
     beta_ptr,
     A_ptr,
     g_ptr,
-    w_ptr,
-    u_ptr,
     B,
     H,
     T,
     K,
     V,
+    w_ptr,
+    u_ptr,
     C: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
@@ -49,9 +49,9 @@ def _gdn_chunk_recompute_w_u_fwd_kernel(
         beta_ptr: [B, H, T]，post-sigmoid beta。
         A_ptr: [B, H, T//C, C, C]，`(I - L)^{-1}`。
         g_ptr: [B, H, T]，cumsum 后的 log-space decay。
+        B, H, T, K, V: 维度。
         w_ptr: [B, H, T, K]，输出 w。
         u_ptr: [B, H, T, V]，输出 u。
-        B, H, T, K, V: 维度。
         C: chunk 长度，编译期常量。
         BK, BV: K/V 维 block 大小。
     """
@@ -130,13 +130,13 @@ def gdn_chunk_recompute_w_u(k, v, beta, A, g, chunk_size=64):
         beta,
         A,
         g,
-        w,
-        u,
         B,
         H,
         T,
         K,
         V,
+        w,
+        u,
         C=C,
     )
     return w, u
