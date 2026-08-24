@@ -29,37 +29,38 @@ def _gdn_chunk_bwd_dhu_kernel(
     do_ptr,
     dv_local_ptr,
     dht_ptr,
-    dh_ptr,
-    dh0_ptr,
-    dv_out_ptr,
     scale,
     B,
     H,
     T,
     K,
     V,
+    dh_ptr,
+    dh0_ptr,
+    dv_out_ptr,
     C: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    USE_DHT: tl.constexpr,
 ):
     """状态反向扫描 kernel。
 
     每个 program 处理一个 (batch, head, V-block)，沿 chunk 维反向扫描。
+    固定读取 dht；调用方在未提供时传零张量，避免 USE_DHT constexpr 造成
+    Triton cache/specialization 串扰。
 
     Args:
         q_ptr, k_ptr, w_ptr: [B, H, T, K]。
         g_ptr: [B, H, T]，cumsum 后的 log-space decay。
         do_ptr: [B, H, T, V]。
         dv_local_ptr: [B, H, T, V]，来自 chunk_bwd_dv_local 的局部 dv。
-        dht_ptr: [B, H, K, V]，最终状态梯度；可为 None。
-        dh_ptr: [B, H, T//C, K, V]，输出 chunk 级状态梯度。
-        dh0_ptr: [B, H, K, V]，输出初始状态梯度；可为 None。
-        dv_out_ptr: [B, H, T, V]，输出累加后的 dv。
+        dht_ptr: [B, H, K, V]，最终状态梯度；未提供时为全零。
         scale: float，`1/sqrt(K)`。
         B, H, T, K, V: 维度。
         C: chunk 长度，编译期常量。
         BV: V 维 block 大小。
+        dh_ptr: [B, H, T//C, K, V]，输出 chunk 级状态梯度。
+        dh0_ptr: [B, H, K, V]，输出初始状态梯度。
+        dv_out_ptr: [B, H, T, V]，输出累加后的 dv。
     """
     pid = tl.program_id(0).to(tl.int64)
     NV = tl.cdiv(V, BV)
@@ -81,11 +82,9 @@ def _gdn_chunk_bwd_dhu_kernel(
     base_gb = base_bh * T
     base_dh = base_bh * N
 
-    # 初始化 dh
-    b_dh = tl.zeros([BK, BV], dtype=tl.float32)
-    if USE_DHT:
-        p_dht = dht_ptr + base_bh * K * V + o_k[:, None] * V + o_v[None, :]
-        b_dh += tl.load(p_dht, mask=m_h, other=0.0).to(tl.float32)
+    # 初始化 dh；未提供 dht 时传零张量，结果等价于零初始化。
+    p_dht = dht_ptr + base_bh * K * V + o_k[:, None] * V + o_v[None, :]
+    b_dh = tl.load(p_dht, mask=m_h, other=0.0).to(tl.float32)
 
     scale_f32 = tl.cast(scale, tl.float32)
 
@@ -225,6 +224,9 @@ def gdn_chunk_bwd_dhu(q, k, w, g, do, dv_local, dht=None, scale=1.0, chunk_size=
     def grid(meta):
         return (B * H * triton.cdiv(V, meta["BV"]),)
 
+    if dht is None:
+        dht = torch.zeros(B, H, K, V, dtype=torch.float32, device=q.device)
+
     _gdn_chunk_bwd_dhu_kernel[grid](
         q,
         k,
@@ -233,17 +235,16 @@ def gdn_chunk_bwd_dhu(q, k, w, g, do, dv_local, dht=None, scale=1.0, chunk_size=
         do,
         dv_local,
         dht,
-        dh,
-        dh0,
-        dv,
         scale,
         B,
         H,
         T,
         K,
         V,
+        dh,
+        dh0,
+        dv,
         C=C,
         BK=BK,
-        USE_DHT=(dht is not None),
     )
     return dh, dh0, dv

@@ -11,6 +11,22 @@ from .chunk_o import gdn_chunk_fwd_o as gdn_chunk_fwd_o
 from .intra import gdn_chunk_fwd_intra as gdn_chunk_fwd_intra
 from .l2norm import gdn_chunk_l2norm_bwd as gdn_chunk_l2norm_bwd
 from .l2norm import gdn_chunk_l2norm_fwd as gdn_chunk_l2norm_fwd
-from .utils import chunk_local_cumsum as chunk_local_cumsum
+from .cumsum import chunk_local_cumsum_torch as chunk_local_cumsum
+from .utils import chunk_local_cumsum_native
 from .wy_bwd import gdn_chunk_prepare_wy_repr_bwd as gdn_chunk_prepare_wy_repr_bwd
 from .wy import gdn_chunk_recompute_w_u as gdn_chunk_recompute_w_u
+
+__all__ = [
+    "gdn_chunk_bwd_dhu",
+    "gdn_chunk_bwd_dqkwg",
+    "gdn_chunk_bwd_dv_local",
+    "gdn_chunk_fwd_h",
+    "gdn_chunk_fwd_intra",
+    "gdn_chunk_fwd_o",
+    "gdn_chunk_l2norm_bwd",
+    "gdn_chunk_l2norm_fwd",
+    "chunk_local_cumsum",
+    "chunk_local_cumsum_native",
+    "gdn_chunk_prepare_wy_repr_bwd",
+    "gdn_chunk_recompute_w_u",
+]

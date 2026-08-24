@@ -71,7 +71,7 @@ def _gdn_chunk_fwd_intra_kernel(
         m_k = o_k < K
         p_k = k_ptr + base_k + o_c[:, None] * K + o_k[None, :]
         b_k = tl.load(p_k, mask=m_c[:, None] & m_k[None, :], other=0.0).to(tl.float32)
-        b_kkt += tl.dot(b_k, tl.trans(b_k))
+        b_kkt += tl.dot(b_k, tl.trans(b_k), allow_tf32=False)
 
     # L = beta_i * k_i^T k_j * exp(g_i - g_j)，严格下三角
     decay = tl.exp(b_g[:, None] - b_g[None, :])

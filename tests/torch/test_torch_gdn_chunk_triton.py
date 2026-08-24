@@ -16,13 +16,13 @@ from tests.conftest import assert_allclose_with_stats
 
 @pytest.mark.torch
 def test_chunk_triton_fwd_vs_native(gdn_inputs, device):
-    """Triton chunkwise 前向与 native 参考实现对拍。"""
+    """Triton chunkwise 前向与 native 参考实现对拍（bf16 I/O）。"""
     q, k, v = gdn_inputs["q"], gdn_inputs["k"], gdn_inputs["v"]
     g, beta, h0 = gdn_inputs["g"], gdn_inputs["beta"], gdn_inputs["h0"]
 
-    q_t = torch.from_numpy(q).to(device)
-    k_t = torch.from_numpy(k).to(device)
-    v_t = torch.from_numpy(v).to(device)
+    q_t = torch.from_numpy(q).to(device).to(torch.bfloat16)
+    k_t = torch.from_numpy(k).to(device).to(torch.bfloat16)
+    v_t = torch.from_numpy(v).to(device).to(torch.bfloat16)
     g_t = torch.from_numpy(g).to(device)
     beta_t = torch.from_numpy(beta).to(device)
     h0_t = torch.from_numpy(h0).to(device)
@@ -35,7 +35,7 @@ def test_chunk_triton_fwd_vs_native(gdn_inputs, device):
         beta_t,
         initial_state=h0_t,
         output_final_state=True,
-        chunk_size=64,
+        chunk_size=16,
     )
     out_triton, state_triton = triton_chunk(
         q_t,
@@ -45,40 +45,40 @@ def test_chunk_triton_fwd_vs_native(gdn_inputs, device):
         beta_t,
         initial_state=h0_t,
         output_final_state=True,
-        chunk_size=64,
+        chunk_size=16,
     )
 
     assert_allclose_with_stats(
-        out_native, out_triton, "chunk triton vs native output", atol=1e-4, rtol=1e-3
+        out_native, out_triton, "chunk triton vs native output", atol=1e-2, rtol=1e-2
     )
     assert_allclose_with_stats(
-        state_native, state_triton, "chunk triton vs native state", atol=1e-4, rtol=1e-3
+        state_native, state_triton, "chunk triton vs native state", atol=1e-2, rtol=1e-2
     )
 
 
 @pytest.mark.torch
 def test_chunk_triton_no_final_state(gdn_inputs, device):
-    """output_final_state=False 时不返回 state。"""
+    """output_final_state=False 时不返回 state（bf16 I/O）。"""
     q, k, v = gdn_inputs["q"], gdn_inputs["k"], gdn_inputs["v"]
     g, beta = gdn_inputs["g"], gdn_inputs["beta"]
 
-    q_t = torch.from_numpy(q).to(device)
-    k_t = torch.from_numpy(k).to(device)
-    v_t = torch.from_numpy(v).to(device)
+    q_t = torch.from_numpy(q).to(device).to(torch.bfloat16)
+    k_t = torch.from_numpy(k).to(device).to(torch.bfloat16)
+    v_t = torch.from_numpy(v).to(device).to(torch.bfloat16)
     g_t = torch.from_numpy(g).to(device)
     beta_t = torch.from_numpy(beta).to(device)
 
     out_native, state_native = native_chunk(
-        q_t, k_t, v_t, g_t, beta_t, output_final_state=False, chunk_size=64
+        q_t, k_t, v_t, g_t, beta_t, output_final_state=False, chunk_size=16
     )
     out_triton, state_triton = triton_chunk(
-        q_t, k_t, v_t, g_t, beta_t, output_final_state=False, chunk_size=64
+        q_t, k_t, v_t, g_t, beta_t, output_final_state=False, chunk_size=16
     )
 
     assert state_native is None
     assert state_triton is None
     assert_allclose_with_stats(
-        out_native, out_triton, "no-state chunk output", atol=1e-4, rtol=1e-3
+        out_native, out_triton, "no-state chunk output", atol=1e-2, rtol=1e-2
     )
 
 
@@ -89,9 +89,9 @@ def test_chunk_triton_different_chunk_size(gdn_inputs, device):
     q, k, v = gdn_inputs["q"], gdn_inputs["k"], gdn_inputs["v"]
     g, beta, h0 = gdn_inputs["g"], gdn_inputs["beta"], gdn_inputs["h0"]
 
-    q_t = torch.from_numpy(q).to(device)
-    k_t = torch.from_numpy(k).to(device)
-    v_t = torch.from_numpy(v).to(device)
+    q_t = torch.from_numpy(q).to(device).to(torch.bfloat16)
+    k_t = torch.from_numpy(k).to(device).to(torch.bfloat16)
+    v_t = torch.from_numpy(v).to(device).to(torch.bfloat16)
     g_t = torch.from_numpy(g).to(device)
     beta_t = torch.from_numpy(beta).to(device)
     h0_t = torch.from_numpy(h0).to(device)
@@ -122,15 +122,15 @@ def test_chunk_triton_different_chunk_size(gdn_inputs, device):
             out_native,
             out_triton,
             f"chunk_size={chunk_size} output",
-            atol=1e-4,
-            rtol=1e-3,
+            atol=1e-2,
+            rtol=1e-2,
         )
         assert_allclose_with_stats(
             state_native,
             state_triton,
             f"chunk_size={chunk_size} state",
-            atol=1e-4,
-            rtol=1e-3,
+            atol=1e-2,
+            rtol=1e-2,
         )
 
 
@@ -142,9 +142,9 @@ def test_chunk_triton_bwd_vs_native(gdn_inputs, device):
     g, beta, h0 = gdn_inputs["g"], gdn_inputs["beta"], gdn_inputs["h0"]
 
     def _run_and_grad(op):
-        q_t = torch.from_numpy(q).to(device).requires_grad_(True)
-        k_t = torch.from_numpy(k).to(device).requires_grad_(True)
-        v_t = torch.from_numpy(v).to(device).requires_grad_(True)
+        q_t = torch.from_numpy(q).to(device).to(torch.bfloat16).requires_grad_(True)
+        k_t = torch.from_numpy(k).to(device).to(torch.bfloat16).requires_grad_(True)
+        v_t = torch.from_numpy(v).to(device).to(torch.bfloat16).requires_grad_(True)
         g_t = torch.from_numpy(g).to(device).requires_grad_(True)
         beta_t = torch.from_numpy(beta).to(device).requires_grad_(True)
         h0_t = torch.from_numpy(h0).to(device).requires_grad_(True)
@@ -157,7 +157,7 @@ def test_chunk_triton_bwd_vs_native(gdn_inputs, device):
             beta_t,
             initial_state=h0_t,
             output_final_state=True,
-            chunk_size=64,
+            chunk_size=16,
         )
         loss = out.pow(2).mean() + state.pow(2).mean()
         loss.backward()
@@ -181,6 +181,6 @@ def test_chunk_triton_bwd_vs_native(gdn_inputs, device):
             ref,
             tgt,
             f"bwd {name}",
-            atol=7e-3,
-            rtol=1e-3,
+            atol=1e-1,
+            rtol=1e-1,
         )

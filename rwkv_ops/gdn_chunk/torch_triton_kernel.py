@@ -18,6 +18,43 @@ from .triton import (
     gdn_chunk_prepare_wy_repr_bwd,
     gdn_chunk_recompute_w_u,
 )
+from .triton.chunk_bwd_dhu import _gdn_chunk_bwd_dhu_kernel
+from .triton.chunk_bwd_dqkwg import _gdn_chunk_bwd_dqkwg_kernel
+from .triton.chunk_bwd_dv import _gdn_chunk_bwd_dv_local_kernel
+from .triton.chunk_h import _gdn_chunk_fwd_h_kernel
+from .triton.chunk_o import _gdn_chunk_fwd_o_kernel
+from .triton.cumsum import _chunk_local_cumsum_kernel
+from .triton.intra import _gdn_chunk_fwd_intra_kernel
+from .triton.l2norm import (
+    _gdn_chunk_l2norm_bwd_kernel,
+    _gdn_chunk_l2norm_fwd_kernel,
+)
+from .triton.wy import _gdn_chunk_recompute_w_u_fwd_kernel
+from .triton.wy_bwd import _gdn_chunk_prepare_wy_repr_bwd_kernel
+
+
+def _clear_gdn_chunk_autotune_cache():
+    """清空 gdn_chunk 所有 Triton kernel 的 autotune cache。
+
+    不同调用路径（例如 USE_INITIAL_STATE=True/False）共享同一个 kernel 对象，
+    autotune 缓存可能把为一条路径选出的 config 复用到另一条路径，导致 bf16 下
+    输出 NaN。在每次前向调用前清空缓存可作为临时 workaround。
+    """
+    for kernel in (
+        _gdn_chunk_fwd_h_kernel,
+        _gdn_chunk_fwd_o_kernel,
+        _gdn_chunk_fwd_intra_kernel,
+        _gdn_chunk_recompute_w_u_fwd_kernel,
+        _gdn_chunk_l2norm_fwd_kernel,
+        _gdn_chunk_l2norm_bwd_kernel,
+        _chunk_local_cumsum_kernel,
+        _gdn_chunk_bwd_dhu_kernel,
+        _gdn_chunk_bwd_dqkwg_kernel,
+        _gdn_chunk_bwd_dv_local_kernel,
+        _gdn_chunk_prepare_wy_repr_bwd_kernel,
+    ):
+        if hasattr(kernel, "cache"):
+            kernel.cache.clear()
 
 
 def _normalize_inputs(q, k, v, g, beta):
@@ -35,6 +72,7 @@ class GatedDeltaNetChunkTritonFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, v, g, beta, initial_state, output_final_state, chunk_size):
+        _clear_gdn_chunk_autotune_cache()
         q, k, v, g, beta = _normalize_inputs(q, k, v, g, beta)
 
         B, H, T, K = q.shape
@@ -198,7 +236,7 @@ def gated_delta_net_chunk(
     beta,
     initial_state=None,
     output_final_state=False,
-    chunk_size=64,
+    chunk_size=16,
 ):
     """Gated DeltaNet chunkwise Triton 实现（训练前向）。
 

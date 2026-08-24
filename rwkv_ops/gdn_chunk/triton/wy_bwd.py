@@ -29,15 +29,15 @@ def _gdn_chunk_prepare_wy_repr_bwd_kernel(
     A_ptr,
     dw_ptr,
     du_ptr,
-    dk_ptr,
-    dv_ptr,
-    db_ptr,
-    dg_ptr,
     B,
     H,
     T,
     K,
     V,
+    dk_ptr,
+    dv_ptr,
+    db_ptr,
+    dg_ptr,
     C: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
@@ -53,10 +53,10 @@ def _gdn_chunk_prepare_wy_repr_bwd_kernel(
         g_ptr: [B, H, T]，cumsum 后的 log-space decay。
         A_ptr: [B, H, T//C, C, C]，`(I + L)^{-1}`。
         dw_ptr, du_ptr: [B, H, T, K], [B, H, T, V]。
-        dk_ptr, dv_ptr, db_ptr, dg_ptr: 输出。
         B, H, T, K, V: 维度。
         C: chunk 长度，编译期常量。
         BK, BV: K/V 维 block 大小。
+        dk_ptr, dv_ptr, db_ptr, dg_ptr: 输出。
     """
     pid = tl.program_id(0).to(tl.int64)
     N = T // C
@@ -101,7 +101,7 @@ def _gdn_chunk_prepare_wy_repr_bwd_kernel(
         b_kbg = b_k * (b_beta * b_g_exp)[:, None]
         b_dw = tl.load(p_dw, mask=m_k, other=0.0).to(tl.float32)
 
-        b_dA += tl.dot(b_dw, tl.trans(b_kbg).to(b_dw.dtype), allow_tf32=False)
+        b_dA += tl.dot(b_dw, tl.trans(b_kbg), allow_tf32=False)
         b_dkbg = tl.dot(b_A, b_dw, allow_tf32=False)
 
         b_dk = b_dkbg * (b_g_exp * b_beta)[:, None]
@@ -120,7 +120,7 @@ def _gdn_chunk_prepare_wy_repr_bwd_kernel(
         p_du = du_ptr + (base_v * V + o_c[:, None] * V + o_v[None, :]).to(tl.int64)
 
         b_v = tl.load(p_v, mask=m_v, other=0.0).to(tl.float32)
-        b_vb = (b_v * b_beta[:, None]).to(b_v.dtype)
+        b_vb = b_v * b_beta[:, None]
         b_du = tl.load(p_du, mask=m_v, other=0.0).to(tl.float32)
 
         b_dA += tl.dot(b_du, tl.trans(b_vb), allow_tf32=False)
@@ -133,15 +133,13 @@ def _gdn_chunk_prepare_wy_repr_bwd_kernel(
     # dA = A @ dA @ A，注意符号与 decay
     mask_lower = o_c[:, None] > o_c[None, :]
     b_dA = tl.where(mask_lower & m_c[:, None] & m_c[None, :], b_dA, 0.0)
-    b_dA = tl.dot(b_dA.to(b_A.dtype), b_A, allow_tf32=False)
-    b_dA = tl.dot(b_A, b_dA.to(b_A.dtype), allow_tf32=False)
+    b_dA = tl.dot(b_dA, b_A, allow_tf32=False)
+    b_dA = tl.dot(b_A, b_dA, allow_tf32=False)
     # 只在严格下三角计算 exp，避免上三角 exp(大正数) 溢出成 NaN
     diff = b_g[:, None] - b_g[None, :]
     decay = tl.exp(tl.where(mask_lower, diff, 0.0))
     b_dA *= decay
-    b_dA = tl.where(mask_lower & m_c[:, None] & m_c[None, :], -b_dA, 0.0).to(
-        k_ptr.dtype.element_ty
-    )
+    b_dA = tl.where(mask_lower & m_c[:, None] & m_c[None, :], -b_dA, 0.0)
 
     # 用 dA 重新计算 dk 和 db
     tl.debug_barrier()
@@ -161,7 +159,7 @@ def _gdn_chunk_prepare_wy_repr_bwd_kernel(
         b_dkb = tl.dot(b_dA, b_k, allow_tf32=False)
         b_db += tl.sum(b_dkb * b_k, axis=1)
         b_dk = b_dkb * b_beta[:, None] + tl.trans(
-            tl.dot(tl.trans(b_kb).to(b_dA.dtype), b_dA, allow_tf32=False)
+            tl.dot(tl.trans(b_kb), b_dA, allow_tf32=False)
         )
         b_dk += tl.load(p_dk, mask=m_k, other=0.0).to(tl.float32)
 
@@ -214,15 +212,15 @@ def gdn_chunk_prepare_wy_repr_bwd(k, v, beta, g, A, dw, du, chunk_size=64):
         A,
         dw,
         du,
-        dk,
-        dv,
-        db,
-        dg,
         B,
         H,
         T,
         K,
         V,
+        dk,
+        dv,
+        db,
+        dg,
         C=C,
     )
     return dk, dv, db, dg

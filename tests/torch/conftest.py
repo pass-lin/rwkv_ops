@@ -1,6 +1,7 @@
 """Torch 后端测试的 session 级配置。"""
 
 import os
+import shutil
 
 # 必须在 import keras / rwkv_ops 之前设定 KERAS_BACKEND。
 os.environ.setdefault("KERAS_BACKEND", "torch")
@@ -9,6 +10,13 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 import pytest
 
 pytest.importorskip("torch")
+
+
+def pytest_sessionstart(session):
+    """session 开始时清除 Triton cache，避免跨 session 的 kernel 复用导致数值错误。"""
+    triton_cache = os.path.expanduser("~/.triton/cache")
+    if os.path.isdir(triton_cache):
+        shutil.rmtree(triton_cache)
 
 
 @pytest.fixture(scope="session")

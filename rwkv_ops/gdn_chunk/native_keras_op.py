@@ -26,7 +26,7 @@ def gated_delta_net_chunk(
     beta,
     initial_state=None,
     output_final_state=False,
-    chunk_size=64,
+    chunk_size=16,
 ):
     """Gated DeltaNet chunkwise 原生实现（数值参考）。
 

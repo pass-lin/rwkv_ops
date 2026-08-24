@@ -12,10 +12,7 @@ import triton.language as tl
 
 @triton.autotune(
     configs=[
-        triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
-        for BV in [32, 64]
-        for num_warps in [2, 4]
-        for num_stages in [2]
+        triton.Config({"BV": 64}, num_warps=4, num_stages=2),
     ],
     key=["K", "V", "C"],
 )

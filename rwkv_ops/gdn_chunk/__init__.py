@@ -26,4 +26,10 @@ def get_gated_delta_net_chunk(KERNEL_TYPE="native"):
 
             return triton_op
 
+    if keras.config.backend() == "jax" and KERNEL_TYPE == "triton":
+        if _use_triton(KERNEL_TYPE):
+            from .jax_triton_kernel import gated_delta_net_chunk as triton_op
+
+            return triton_op
+
     return gated_delta_net_chunk

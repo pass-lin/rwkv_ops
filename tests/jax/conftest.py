@@ -74,6 +74,13 @@ pytest.importorskip("jax")
 pytest.importorskip("jax.numpy")
 
 
+def pytest_sessionstart(session):
+    """session 开始时清除 Triton cache，避免跨 session 的 kernel 复用导致数值错误。"""
+    triton_cache = os.path.expanduser("~/.triton/cache")
+    if os.path.isdir(triton_cache):
+        shutil.rmtree(triton_cache)
+
+
 @pytest.fixture(scope="session")
 def jax_op(sample_shape):
     """RWKV-6 JAX CUDA 算子。
@@ -306,3 +313,28 @@ def rwkv7_sane_jax_pallas_op(rwkv7_shape):
     _, _, _, K = rwkv7_shape
     op, _ = get_generalized_delta_rule_sane(HEAD_SIZE=K, KERNEL_TYPE="native")
     return op
+
+
+@pytest.fixture(scope="session")
+def gdn_chunk_jax_native_op():
+    """Gated DeltaNet chunkwise native Keras 参考算子。
+
+    Returns:
+        Callable: `gdn_chunk.native_keras_op.gated_delta_net_chunk`。
+    """
+    from rwkv_ops.gdn_chunk.native_keras_op import gated_delta_net_chunk
+
+    return gated_delta_net_chunk
+
+
+@pytest.fixture(scope="session")
+def gdn_chunk_jax_triton_op():
+    """Gated DeltaNet chunkwise JAX-Triton 训练算子。
+
+    Returns:
+        Callable: `gdn_chunk.jax_triton_kernel.gated_delta_net_chunk`。
+    """
+    pytest.importorskip("triton")
+    from rwkv_ops.gdn_chunk.jax_triton_kernel import gated_delta_net_chunk
+
+    return gated_delta_net_chunk
