@@ -149,11 +149,14 @@ MANIFEST.in                  # 源码分发清单
 
 | Framework | cuda | triton | native |
 |-----------|------|--------|--------|
-| PyTorch   | ❌   | ❌     | ✅     |
-| JAX       | ❌   | ❌     | ✅     |
+| PyTorch   | ❌   | ✅     | ✅     |
+| JAX       | ❌   | ✅     | ✅     |
 | TensorFlow| ❌   | ❌     | ✅     |
 | NumPy     | ❌   | ❌     | ✅     |
 | OpenVINO  | ❌   | ❌     | ✅     |
+
+> PyTorch / JAX 后端的 `triton` 已实现 chunkwise 训练 kernel（前向 + 反向）。
+> JAX 侧需显式 `KERNEL_TYPE="triton"` 且安装 `jax-triton`。
 
 #### Gated DeltaNet recurrent `gated_delta_net_recurrent` / `gated_delta_net_recurrent_inference` / `gated_delta_net_recurrent_single_step`
 
@@ -169,8 +172,6 @@ MANIFEST.in                  # 源码分发清单
 > JAX 侧 `triton` 显式 `KERNEL_TYPE="triton"` 时启用 JAX-Triton 前向 kernel，
 > `native` 在 GPU/TPU 上为 Pallas 实现（`jax_pallas_kernel.py`），并覆盖训练/推理/单步
 > RNN 三个入口。
-> `gdn_chunk` 仍只有纯 Keras native，后续 cuda / triton / pallas 加速内核会接入
-> `gdn_chunk/` 目录。
 
 > ³ JAX 后端的 `native` 在 GPU/TPU 上为 Pallas 实现，其余为纯 Keras ops；
 > `triton` 需要显式 `KERNEL_TYPE="triton"` 且安装 `jax-triton`。
@@ -279,6 +280,8 @@ y_t = state_t @ r_t
   `[B, H]`（per-head）、`do_sane` 为 `[B]`（per-sample），规则同样覆盖。
 
 ### 4.2 RWKV-7 State Anomaly Neutralization（`rwkv7_sane_kernel`）
+
+SANE（State Anomaly Neutralization）是一种在 chunk 边界对 RWKV-7 的 state 做软裁剪的数值稳定技术，详见论文 [SANE: State Anomaly Neutralization for RWKV-7](https://arxiv.org/pdf/2608.22354)。
 
 在 RWKV-7 递推之上，于 chunk 边界（每 16 tokens）做 State Anomaly Neutralization：
 
@@ -792,6 +795,18 @@ __global__ void wkv7_forward(...)
 9. **rwkv6 的 `KERNEL_TYPE="triton"` 静默回退 native**，不报错。
 10. **递推对拍必须用 fixture 的稳定输入分布**（见 §7.2），随手造的随机数据
     会让递推指数发散，得出"实现错了"的假结论。
+11. **JAX-Triton 桥接的 `*args` 顺序必须与 Triton kernel 签名完全一致**：
+    Triton kernel 里 `scale` 等标量参数的位置（在 `B,H,T,K,V` 之前还是之后）
+    会直接决定编译器如何解释 grid 与指针算术。`gdn_chunk` 曾因把 `scale`
+    放在维度标量之前而导致 CUDA illegal address / 梯度 NaN。新增 kernel
+    时务必逐一对照 `triton_kernel.py` 里的 torch 封装顺序。
+12. **L2 norm 反向 kernel 需要传入原始输入而非归一化结果**：
+    `gdn_chunk` 的 Triton L2 norm 反向公式基于原始输入推导，传归一化后的
+    `q2/k2` 会在 fp32 下产生系统性偏差。JAX/Torch 封装都应在 forward 中额外
+    保存原始 q/k 供 backward 使用。
+13. **显式传 `BK`/`BV` 等 `tl.constexpr` 时，值必须在 autotune config 中存在**：
+    否则 autotune prune 会报 "No valid autotuner configs"。`fwd_h` /
+    `bwd_dhu` 的 autotune config 只含 `BV=64`，不要传 `BV=128`。
 
 ---
 
@@ -826,6 +841,7 @@ __global__ void wkv7_forward(...)
 - 本文档**不教如何写 Triton kernel**，只教如何在 JAX 中做**桥接封装**。
 - 核心难点：JAX 侧需要显式声明输出形状、常量参数、grid，并处理 PyTorch 侧隐式完成的事情（如 `None` 输入、内存初始化、SPMD 分片等）。
 - 所有桥接文件共享同一个 `triton_kernel.py`，因此修改 kernel 数学时必须同步检查 JAX 与 PyTorch 两侧桥接。
+- **`jt.triton_call` 的 `*args` 顺序必须与 Triton kernel 签名逐参数对齐**，包括 `scale` 这类标量张量在维度标量 `B,H,T,K,V` 之前还是之后。顺序错位不会报错，但会把标量解释成维度、把维度解释成标量，导致 CUDA illegal address、NaN 或静默错误。新增反向 kernel 时建议直接复制 torch 侧 `_kernel[grid](...)` 里的参数顺序。
 
 ### 11.2 基础调用范式
 

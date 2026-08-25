@@ -44,6 +44,10 @@
     - [`gated_delta_net_recurrent_inference`](#gated_delta_net_recurrent_inference)
     - [`gated_delta_net_recurrent_single_step`](#gated_delta_net_recurrent_single_step)
   - [gdn_recurrent 实现状态](#gdn_recurrent-实现状态)
+- [gdn_chunk 使用方法](#gdn_chunk-使用方法)
+  - [函数接口说明](#函数接口说明-2)
+    - [`gated_delta_net_chunk`](#gated_delta_net_chunk)
+  - [gdn_chunk 实现状态](#gdn_chunk-实现状态)
 - [rwkv6op 使用方法](#rwkv6op-使用方法)
 - [分布式并行（JAX）](#分布式并行)
   - [PyTorch 使用注意事项](#pytorch-使用注意事项)
@@ -310,6 +314,8 @@ def rwkv7_op_rnn(
 <a id="rwkv7op_sane-使用方法"></a>
 ## rwkv7op_sane 使用方法
 
+`rwkv7op_sane` 实现 **State Anomaly Neutralization（SANE）**，一种在 chunk 边界对 RWKV-7 的 state 做软裁剪的数值稳定技术。详见论文 [SANE: State Anomaly Neutralization for RWKV-7](https://arxiv.org/pdf/2608.22354)。
+
 ```python
 from rwkv_ops import generalized_delta_rule_sane, generalized_delta_rule_sane_inference
 
@@ -513,8 +519,57 @@ out, state = gated_delta_net_recurrent_single_step(
 > ¹ JAX 后端的 `native` 在 GPU/TPU 上为 Pallas 实现（`jax_pallas_kernel.py`），`triton` 显式 `KERNEL_TYPE="triton"` 时为 JAX-Triton 实现；其余为纯 Keras ops。
 
 1. 训练入口支持反向传播；推理与单步入口**没有梯度**。
-2. chunkwise 版本位于 `gdn_chunk/`，目前只有纯 Keras native 实现。
+2. chunkwise 版本位于 `gdn_chunk/`，见下节。
 
+<a id="gdn_chunk-使用方法"></a>
+## gdn_chunk 使用方法
+
+`gdn_chunk` 提供 **Gated DeltaNet** 的分块并行（chunkwise）训练实现。默认输入 layout 为 `[B, T, H, K/V]`；内部会转置为 `[B, H, T, K/V]` 以匹配 Triton kernel。
+
+```python
+from rwkv_ops import gated_delta_net_chunk
+
+out, final_state = gated_delta_net_chunk(
+    q, k, v, g, beta,
+    initial_state=h0,
+    output_final_state=True,
+    chunk_size=16,
+)
+```
+
+<a id="函数接口说明-2"></a>
+### 函数接口说明
+
+<a id="gated_delta_net_chunk"></a>
+#### `gated_delta_net_chunk`
+
+| 参数 | 形状 | 说明 |
+|---|---|---|
+| q, k | (B, T, H, K) | 查询与键，内部先做 L2 归一化 |
+| v | (B, T, H, V) | 值 |
+| g | (B, T, H) | log-space 衰减门控 |
+| beta | (B, T, H) | 写入强度，需已在外部过 sigmoid，落在 (0, 1) |
+| initial_state | (B, H, K, V) 或 (1, H, K, V)，可选 | 初始 recurrent state |
+| output_final_state | bool | 是否返回最终 state |
+| chunk_size | int | chunk 长度，必须整除 T |
+
+| 返回值 | 形状 | 说明 |
+|---|---|---|
+| out | (B, T, H, V) | 与 `v` 同 dtype |
+| final_state | (B, H, K, V) 或 None | 最终 state |
+
+<a id="gdn_chunk-实现状态"></a>
+### gdn_chunk 实现状态
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ❌   | ✅     | ✅     |
+| JAX         | ❌   | ✅     | ✅     |
+| TensorFlow  | ❌   | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
+
+> 训练入口支持反向传播。JAX 侧 `triton` 需显式 `KERNEL_TYPE="triton"` 并安装 `jax-triton`。
 
 <a id="分布式并行"></a>
 ## 分布式并行（JAX）
@@ -529,6 +584,7 @@ JAX 侧所有加速算子都通过 `custom_partitioning` + einsum 风格 `shardi
 | rwkv7_sane cuda / triton / pallas | ✅ | ✅ |
 | rwkv7 / rwkv7_sane 单步 cuda | ✅ | ✅ |
 | gdn_recurrent triton / pallas | ✅ | ✅ |
+| gdn_chunk triton | ✅ | ✅ |
 | rwkv6 cuda | ✅ | ❌ |
 
 > rwkv6 的 channel 维（C = H × N）在分片规则中是一个整体，head 维未暴露，

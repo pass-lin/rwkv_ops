@@ -70,6 +70,8 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 # JAX 测试默认走 native，避免 rwkv_ops/__init__.py 在导入阶段触发 RWKV-6 CUDA FFI 编译。
 # 需要 triton/cuda 的测试各自在 fixture 里显式传 KERNEL_TYPE。
 os.environ.setdefault("KERNEL_TYPE", "native")
+# gdn_chunk 等 JAX-Triton 测试在 autotune 阶段 OOM；强制使用首个 config 可跳过 tuning。
+os.environ.setdefault("TRITON_AUTOTUNE", "0")
 
 import pytest  # noqa: E402
 

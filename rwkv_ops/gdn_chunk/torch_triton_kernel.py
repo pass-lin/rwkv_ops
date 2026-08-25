@@ -80,6 +80,10 @@ class GatedDeltaNetChunkTritonFunction(torch.autograd.Function):
         if T % chunk_size != 0:
             raise ValueError(f"T={T} 必须被 chunk_size={chunk_size} 整除")
 
+        # 保存原始 q/k 供 L2 norm 反向使用。
+        q_orig = q.clone()
+        k_orig = k.clone()
+
         # L2 归一化（在 Triton 内完成，与 gdn_recurrent 一致）
         q, inv_norm_q = gdn_chunk_l2norm_fwd(q)
         k, inv_norm_k = gdn_chunk_l2norm_fwd(k)
@@ -110,6 +114,8 @@ class GatedDeltaNetChunkTritonFunction(torch.autograd.Function):
         ctx.save_for_backward(
             q,
             k,
+            q_orig,
+            k_orig,
             v,
             g,
             beta,
@@ -136,6 +142,8 @@ class GatedDeltaNetChunkTritonFunction(torch.autograd.Function):
         (
             q,
             k,
+            q_orig,
+            k_orig,
             v,
             g,
             beta,
@@ -204,9 +212,9 @@ class GatedDeltaNetChunkTritonFunction(torch.autograd.Function):
         # 5. g 的 reverse cumsum（因为 forward 对 g 做过 cumsum）
         dg = chunk_local_cumsum(dg, chunk_size=chunk_size, reverse=True)
 
-        # 6. L2 norm 反向
-        dq = gdn_chunk_l2norm_bwd(q, inv_norm_q, dq)
-        dk = gdn_chunk_l2norm_bwd(k, inv_norm_k, dk)
+        # 6. L2 norm 反向（需要原始输入而非归一化结果）
+        dq = gdn_chunk_l2norm_bwd(q_orig, inv_norm_q, dq)
+        dk = gdn_chunk_l2norm_bwd(k_orig, inv_norm_k, dk)
 
         # 7. 转回外部 layout [B, T, H, *]
         dq = dq.transpose(1, 2)

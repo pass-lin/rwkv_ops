@@ -42,6 +42,10 @@
     - [`gated_delta_net_recurrent_inference`](#gated_delta_net_recurrent_inference)
     - [`gated_delta_net_recurrent_single_step`](#gated_delta_net_recurrent_single_step)
   - [Implementation Status of `gdn_recurrent`](#implementation-status-of-gdn_recurrent)
+- [Usage of `gdn_chunk`](#usage-of-gdn_chunk)
+  - [API Reference](#api-reference-2)
+    - [`gated_delta_net_chunk`](#gated_delta_net_chunk)
+  - [Implementation Status of `gdn_chunk`](#implementation-status-of-gdn_chunk)
 - [Usage of `rwkv6op`](#usage-of-rwkv6op)
 - [Distributed Parallelism (JAX)](#distributed-parallelism)
   - [PyTorch Usage Notes](#pytorch-usage-notes)
@@ -322,6 +326,8 @@ def rwkv7_op_rnn(
 <a id="usage-of-rwkv7op_sane"></a>
 ## Usage of `rwkv7op_sane`
 
+`rwkv7op_sane` implements **State Anomaly Neutralization (SANE)**, a numerical stabilization technique that softly clips the RWKV-7 state at chunk boundaries. See the paper [SANE: State Anomaly Neutralization for RWKV-7](https://arxiv.org/pdf/2608.22354) for details.
+
 ```python
 from rwkv_ops import generalized_delta_rule_sane, generalized_delta_rule_sane_inference
 
@@ -529,8 +535,57 @@ Same interface as `gated_delta_net_recurrent`, but **does not compute gradients*
 > ¹ With the JAX backend, `native` on GPU/TPU uses the Pallas implementation (`jax_pallas_kernel.py`); `triton` is the JAX-Triton implementation when `KERNEL_TYPE="triton"` is set explicitly; elsewhere it falls back to pure Keras ops.
 
 1. The training entry point supports back-propagation; the inference and single-step entry points **do not support gradients**.
-2. The chunkwise counterpart lives in `gdn_chunk/` and currently only has a pure-Keras native implementation.
+2. The chunkwise counterpart lives in `gdn_chunk/`, see below.
 
+<a id="usage-of-gdn_chunk"></a>
+## Usage of `gdn_chunk`
+
+`gdn_chunk` provides a **chunkwise parallel** training implementation of Gated DeltaNet. The default input layout is `[B, T, H, K/V]`; internally it is transposed to `[B, H, T, K/V]` to match the Triton kernels.
+
+```python
+from rwkv_ops import gated_delta_net_chunk
+
+out, final_state = gated_delta_net_chunk(
+    q, k, v, g, beta,
+    initial_state=h0,
+    output_final_state=True,
+    chunk_size=16,
+)
+```
+
+<a id="api-reference-2"></a>
+### API Reference
+
+<a id="gated_delta_net_chunk"></a>
+#### `gated_delta_net_chunk`
+
+| Argument | Shape | Description |
+|---|---|---|
+| q, k | (B, T, H, K) | Query and key; L2-normalized inside the operator |
+| v | (B, T, H, V) | Value |
+| g | (B, T, H) | Log-space decay gate |
+| beta | (B, T, H) | Write strength; must have already passed through sigmoid, i.e. in (0, 1) |
+| initial_state | (B, H, K, V) or (1, H, K, V), optional | Initial recurrent state |
+| output_final_state | bool | Whether to return the final state |
+| chunk_size | int | Chunk length; must divide T |
+
+| Return | Shape | Description |
+|---|---|---|
+| out | (B, T, H, V) | Same dtype as `v` |
+| final_state | (B, H, K, V) or None | Final state |
+
+<a id="implementation-status-of-gdn_chunk"></a>
+### Implementation Status of `gdn_chunk`
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ❌   | ✅     | ✅     |
+| JAX         | ❌   | ✅     | ✅     |
+| TensorFlow  | ❌   | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
+
+> The training entry point supports back-propagation. On the JAX side, `triton` requires explicit `KERNEL_TYPE="triton"` and the `jax-triton` package.
 
 ---
 
@@ -548,6 +603,7 @@ over batch)** and **TP (tensor parallel over heads)**:
 | rwkv7_sane cuda / triton / pallas | ✅ | ✅ |
 | rwkv7 / rwkv7_sane single-step cuda | ✅ | ✅ |
 | gdn_recurrent triton / pallas | ✅ | ✅ |
+| gdn_chunk triton | ✅ | ✅ |
 | rwkv6 cuda | ✅ | ❌ |
 
 > rwkv6 fuses the channel dim (C = H × N) into a single rule dimension, so the

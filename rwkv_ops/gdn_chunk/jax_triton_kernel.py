@@ -3,8 +3,6 @@
 代码参考自 https://github.com/fla-org/flash-linear-attention
 """
 
-from functools import partial
-
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
@@ -26,6 +24,33 @@ from .triton.l2norm import (
     _gdn_chunk_l2norm_bwd_kernel,
     _gdn_chunk_l2norm_fwd_kernel,
 )
+
+
+# ===== autotune cache helpers =====
+
+
+def _clear_gdn_chunk_autotune_cache():
+    """清空 gdn_chunk 所有 Triton kernel 的 autotune cache。
+
+    与 torch 侧 workaround 一致：不同调用路径（有/无 initial_state、
+    output_final_state=True/False）共享 kernel 对象，autotune cache 可能
+    把为一条路径选出的 config 复用到另一条路径，导致 bf16 下输出 NaN。
+    """
+    for kernel in (
+        _gdn_chunk_fwd_h_kernel,
+        _gdn_chunk_fwd_o_kernel,
+        _gdn_chunk_fwd_intra_kernel,
+        _gdn_chunk_recompute_w_u_fwd_kernel,
+        _gdn_chunk_l2norm_fwd_kernel,
+        _gdn_chunk_l2norm_bwd_kernel,
+        _chunk_local_cumsum_kernel,
+        _gdn_chunk_bwd_dhu_kernel,
+        _gdn_chunk_bwd_dqkwg_kernel,
+        _gdn_chunk_bwd_dv_local_kernel,
+        _gdn_chunk_prepare_wy_repr_bwd_kernel,
+    ):
+        if hasattr(kernel, "cache"):
+            kernel.cache.clear()
 
 
 # ===== layout helpers =====
@@ -230,6 +255,7 @@ def _fwd_intra_call(k, g, beta, chunk_size):
     out_shapes = [jax.ShapeDtypeStruct((B, H, N, C, C), k.dtype)]
 
     grid = (B * H * N,)
+    BK = 2 ** ((K - 1).bit_length())
     (A,) = jt.triton_call(
         k,
         g,
@@ -242,6 +268,7 @@ def _fwd_intra_call(k, g, beta, chunk_size):
         out_shape=out_shapes,
         grid=grid,
         C=C,
+        BK=BK,
     )
     return A
 
@@ -266,6 +293,8 @@ def _recompute_w_u_call(k, v, beta, A, g, chunk_size):
     ]
 
     grid = (B * H * (T // C),)
+    BK = 2 ** ((K - 1).bit_length())
+    BV = 2 ** ((V - 1).bit_length())
     w, u = jt.triton_call(
         k,
         v,
@@ -281,6 +310,8 @@ def _recompute_w_u_call(k, v, beta, A, g, chunk_size):
         out_shape=out_shapes,
         grid=grid,
         C=C,
+        BK=BK,
+        BV=BV,
     )
     return w, u
 
@@ -308,9 +339,10 @@ def _fwd_h_call(k, w, u, g, h0, chunk_size):
     ]
 
     def grid(meta):
-        return (B * H * jt.cdiv(V, meta.get("BV", 32)),)
+        return (B * H * jt.cdiv(V, meta.get("BV", 64)),)
 
     BK = 2 ** ((K - 1).bit_length())
+    BV = 64
     h, v_new, ht = jt.triton_call(
         k,
         w,
@@ -327,6 +359,9 @@ def _fwd_h_call(k, w, u, g, h0, chunk_size):
         grid=grid,
         C=C,
         BK=BK,
+        BV=BV,
+        USE_INITIAL_STATE=True,
+        STORE_FINAL_STATE=True,
     )
     return h, v_new, ht
 
@@ -407,12 +442,12 @@ def _bwd_dv_local_call(q, k, g, do, chunk_size):
         k,
         g,
         do,
-        scale,
         B,
         H,
         T,
         K,
         V,
+        scale,
         kernel=_gdn_chunk_bwd_dv_local_kernel,
         out_shape=out_shapes,
         grid=grid,
@@ -445,9 +480,10 @@ def _bwd_dhu_call(q, k, w, g, do, dv_local, dht, chunk_size):
     ]
 
     def grid(meta):
-        return (B * H * jt.cdiv(V, meta.get("BV", 32)),)
+        return (B * H * jt.cdiv(V, meta.get("BV", 64)),)
 
     BK = 2 ** ((K - 1).bit_length())
+    BV = 64
     scale = float(K**-0.5)
     if dht is None:
         dht = jnp.zeros((B, H, K, V), dtype=jnp.float32)
@@ -460,17 +496,18 @@ def _bwd_dhu_call(q, k, w, g, do, dv_local, dht, chunk_size):
         do,
         dv_local,
         dht,
-        scale,
         B,
         H,
         T,
         K,
         V,
+        scale,
         kernel=_gdn_chunk_bwd_dhu_kernel,
         out_shape=out_shapes,
         grid=grid,
         C=C,
         BK=BK,
+        BV=BV,
     )
     return dh, dh0, dv
 
@@ -498,11 +535,9 @@ def _bwd_dqkwg_call(q, k, v_new, w, g, h, dh, do, dv, chunk_size):
         jax.ShapeDtypeStruct((B, H, T), jnp.float32),
     ]
     scale = float(K**-0.5)
-    BK = 2 ** ((K - 1).bit_length())
-    BV = 64
 
     def grid(meta):
-        return (B * H * (T // C) * jt.cdiv(K, meta.get("BK", BK)),)
+        return (B * H * (T // C) * jt.cdiv(K, meta.get("BK", 64)),)
 
     dq, dk, dw, dg = jt.triton_call(
         q,
@@ -514,18 +549,16 @@ def _bwd_dqkwg_call(q, k, v_new, w, g, h, dh, do, dv, chunk_size):
         dh,
         do,
         dv,
-        scale,
         B,
         H,
         T,
         K,
         V,
+        scale,
         kernel=_gdn_chunk_bwd_dqkwg_kernel,
         out_shape=out_shapes,
         grid=grid,
         C=C,
-        BK=BK,
-        BV=BV,
     )
     return dq, dk, dw, dg
 
@@ -616,7 +649,24 @@ def _get_gdn_chunk_triton_op(chunk_size):
         h, v_new, ht = _fwd_h_spmd(k2, w, u, g_cum, h0, chunk_size)
         o = _fwd_o_spmd(q2, k2, v_new, h, g_cum, chunk_size)
 
-        res = (q2, k2, v, g_cum, beta, A, w, u, h, v_new, ht, inv_norm_q, inv_norm_k)
+        # l2norm_bwd 需要原始输入（非归一化结果），因此同时保存原始 q/k。
+        res = (
+            q,
+            k,
+            q2,
+            k2,
+            v,
+            g_cum,
+            beta,
+            A,
+            w,
+            u,
+            h,
+            v_new,
+            ht,
+            inv_norm_q,
+            inv_norm_k,
+        )
         return o, ht, res
 
     @jax.custom_vjp
@@ -629,7 +679,24 @@ def _get_gdn_chunk_triton_op(chunk_size):
         return (o, ht), res
 
     def _bwd(res, grads):
-        q2, k2, v, g_cum, beta, A, w, u, h, v_new, ht, inv_norm_q, inv_norm_k = res
+        _clear_gdn_chunk_autotune_cache()
+        (
+            q_orig,
+            k_orig,
+            q2,
+            k2,
+            v,
+            g_cum,
+            beta,
+            A,
+            w,
+            u,
+            h,
+            v_new,
+            ht,
+            inv_norm_q,
+            inv_norm_k,
+        ) = res
         do, dht = grads
 
         dv_local = _bwd_dv_local_spmd(q2, k2, g_cum, do, chunk_size)
@@ -644,8 +711,8 @@ def _get_gdn_chunk_triton_op(chunk_size):
 
         dg = _chunk_local_cumsum_spmd(dg, chunk_size, True)
 
-        dq = _l2norm_bwd_spmd(q2, inv_norm_q, dq)
-        dk = _l2norm_bwd_spmd(k2, inv_norm_k, dk)
+        dq = _l2norm_bwd_spmd(q_orig, inv_norm_q, dq)
+        dk = _l2norm_bwd_spmd(k_orig, inv_norm_k, dk)
 
         return dq, dk, dv, dg, db, dh0
 
@@ -654,7 +721,6 @@ def _get_gdn_chunk_triton_op(chunk_size):
     return _op
 
 
-@partial(jax.jit, static_argnums=(6, 7))
 def gated_delta_net_chunk(
     q,
     k,
@@ -686,6 +752,8 @@ def gated_delta_net_chunk(
     Raises:
         ValueError: T 不被 chunk_size 整除。
     """
+    _clear_gdn_chunk_autotune_cache()
+
     dtype = q.dtype
     q = _transpose_head(jnp.asarray(q, dtype))
     k = _transpose_head(jnp.asarray(k, dtype))
@@ -710,6 +778,6 @@ def gated_delta_net_chunk(
     out = jnp.asarray(out, dtype)
     final_state = jnp.asarray(final_state, jnp.float32)
 
-    if output_final_state:
-        return out, final_state
-    return out
+    if not output_final_state:
+        final_state = None
+    return out, final_state
