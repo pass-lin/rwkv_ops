@@ -1,6 +1,4 @@
 """JAX 版 Gated DeltaNet chunkwise Triton kernel 封装。
-
-代码参考自 https://github.com/fla-org/flash-linear-attention
 """
 
 import jax

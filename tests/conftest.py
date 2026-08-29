@@ -194,6 +194,30 @@ def gdn_inputs(rng, gdn_shape):
 
 
 @pytest.fixture(scope="session")
+def gdn_sane_inputs(rng, gdn_inputs):
+    """GDN-SANE 测试输入，在 gdn_inputs 基础上补充 tau 与 mask。
+
+    tau = softplus(x) + 1，x 均值约 7 使 tau 接近 1000，近似恒等映射；
+    mask 随机取 0/1，用于验证 padding chunk 行为。
+
+    Args:
+        rng: np.random.Generator，随机数生成器。
+        gdn_inputs: dict, GDN 基础输入。
+
+    Returns:
+        dict: 包含 gdn_inputs 全部字段与 tau/mask。
+            tau: [B, T//16, H], float32。
+            mask: [B, T//16], float32。
+    """
+    B, T, H, _ = gdn_inputs["q"].shape
+    chunk_num = T // 16
+    x = rng.standard_normal((B, max(chunk_num, 1), H), dtype=np.float32) * 0.5 + 7.0
+    tau = np.log1p(np.exp(x)) + 1.0
+    mask = rng.integers(0, 2, (B, max(chunk_num, 1))).astype(np.float32)
+    return {**gdn_inputs, "tau": tau.astype(np.float32), "mask": mask}
+
+
+@pytest.fixture(scope="session")
 def mhc_shape():
     """mHC 测试默认形状。
 

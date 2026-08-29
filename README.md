@@ -44,8 +44,14 @@
     - [`gated_delta_net_recurrent_inference`](#gated_delta_net_recurrent_inference)
     - [`gated_delta_net_recurrent_single_step`](#gated_delta_net_recurrent_single_step)
   - [gdn_recurrent 实现状态](#gdn_recurrent-实现状态)
-- [gdn_chunk 使用方法](#gdn_chunk-使用方法)
+- [gdn_recurrent_sane 使用方法](#gdn_recurrent_sane-使用方法)
   - [函数接口说明](#函数接口说明-2)
+    - [`gated_delta_net_recurrent_sane`](#gated_delta_net_recurrent_sane)
+    - [`gated_delta_net_recurrent_sane_inference`](#gated_delta_net_recurrent_sane_inference)
+    - [`gated_delta_net_recurrent_sane_single_step`](#gated_delta_net_recurrent_sane_single_step)
+  - [gdn_recurrent_sane 实现状态](#gdn_recurrent_sane-实现状态)
+- [gdn_chunk 使用方法](#gdn_chunk-使用方法)
+  - [函数接口说明](#函数接口说明-3)
     - [`gated_delta_net_chunk`](#gated_delta_net_chunk)
   - [gdn_chunk 实现状态](#gdn_chunk-实现状态)
 - [rwkv6op 使用方法](#rwkv6op-使用方法)
@@ -521,6 +527,107 @@ out, state = gated_delta_net_recurrent_single_step(
 1. 训练入口支持反向传播；推理与单步入口**没有梯度**。
 2. chunkwise 版本位于 `gdn_chunk/`，见下节。
 
+<a id="gdn_recurrent_sane-使用方法"></a>
+## gdn_recurrent_sane 使用方法
+
+`gdn_recurrent_sane` 在 `gdn_recurrent` 基础上加入 **State Anomaly Neutralization（SANE）**：在每个 chunk 边界对 state 做 `state = tau * tanh(state / tau)` 软裁剪，用于抑制 padding chunk 或异常状态污染。支持训练、推理与单步 RNN 三种入口。
+
+```python
+from rwkv_ops import (
+    gated_delta_net_recurrent_sane,
+    gated_delta_net_recurrent_sane_inference,
+    gated_delta_net_recurrent_sane_single_step,
+)
+
+# 训练 / prefill（可求梯度）
+out, final_state = gated_delta_net_recurrent_sane(
+    q, k, v, g, beta, tau, mask=mask,
+    initial_state=h0,
+    output_final_state=True,
+    head_first=False,
+)
+
+# 推理专用（无梯度，省显存）
+out, final_state = gated_delta_net_recurrent_sane_inference(
+    q, k, v, g, beta, tau, mask=mask,
+    initial_state=h0,
+    output_final_state=True,
+    head_first=False,
+)
+
+# 单步 RNN（decode 阶段）
+out, state = gated_delta_net_recurrent_sane_single_step(
+    q, k, v, g, beta, tau, do_sane,
+    initial_state=state,
+    output_final_state=True,
+    head_first=True,  # 单步目前只支持 head_first=True
+)
+```
+
+<a id="函数接口说明-2"></a>
+### 函数接口说明
+
+<a id="gated_delta_net_recurrent_sane"></a>
+#### `gated_delta_net_recurrent_sane`
+
+| 参数 | 形状 | 说明 |
+|---|---|---|
+| q, k | (B, T, H, K) | 查询与键，内部先做 L2 归一化 |
+| v | (B, T, H, V) | 值 |
+| g | (B, T, H) | log-space 衰减门控 |
+| beta | (B, T, H) | 写入强度，需已在外部过 sigmoid，落在 (0, 1) |
+| tau | (B, T//16, H) | SANE 阈值，必须 > 0 |
+| mask | (B, T//16)，可选 | >0 的 chunk 边界执行 SANE；仅当 `output_final_state=True` 时生效 |
+| initial_state | (B, H, K, V) 或 (1, H, K, V)，可选 | 初始 recurrent state |
+| output_final_state | bool | 是否返回最终 state |
+| head_first | bool | 输入输出是否 head 维优先 |
+
+| 返回值 | 形状 | 说明 |
+|---|---|---|
+| out | (B, T, H, V) | 与 `v` 同 dtype，基于 SANE 之前的 state |
+| final_state | (B, H, K, V) 或 None | 最终 state；`mask=None` 且 `output_final_state=True` 时为 None 并报警告 |
+
+<a id="gated_delta_net_recurrent_sane_inference"></a>
+#### `gated_delta_net_recurrent_sane_inference`
+
+接口与 `gated_delta_net_recurrent_sane` 基本一致，但**不计算梯度**，不保存反向所需的 `kv_mem` 与 `state_chkp` 等中间量，显存占用更低。支持任意长度 `T`。
+
+<a id="gated_delta_net_recurrent_sane_single_step"></a>
+#### `gated_delta_net_recurrent_sane_single_step`
+
+| 参数 | 形状 | 说明 |
+|---|---|---|
+| q, k | (B, H, K) | 单步查询与键 |
+| v | (B, H, V) | 单步值 |
+| g | (B, H) | 单步 log-space 衰减门控 |
+| beta | (B, H) | 单步写入强度，已 sigmoid |
+| tau | (B, H) | 单步 SANE 阈值 |
+| do_sane | (B,) | >0 执行 SANE，否则跳过 |
+| initial_state | (B, H, K, V) 或 (1, H, K, V)，可选 | 当前 state |
+| output_final_state | bool | 是否返回下一步 state |
+| head_first | bool | 单步目前只支持 `head_first=True` |
+
+| 返回值 | 形状 | 说明 |
+|---|---|---|
+| out | (B, H, V) | 与 `v` 同 dtype |
+| next_state | (B, H, K, V) | 下一步 state |
+
+<a id="gdn_recurrent_sane-实现状态"></a>
+### gdn_recurrent_sane 实现状态
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ❌   | ✅     | ✅     |
+| JAX         | ❌   | ✅     | ✅¹    |
+| TensorFlow  | ❌   | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
+
+> ¹ JAX 后端的 `native` 在 GPU/TPU 上为 Pallas 实现（`jax_pallas_kernel.py`），`triton` 显式 `KERNEL_TYPE="triton"` 时为 JAX-Triton 实现；其余为纯 Keras ops。
+
+1. 训练入口支持反向传播（含 `tau` 梯度）；推理与单步入口**没有梯度**。
+2. `mask=None` 时仍执行无条件 SANE，但 `output_final_state=True` 会发出 `UserWarning` 并将 `final_state` 置为 `None`，避免 padding 污染被误用。
+
 <a id="gdn_chunk-使用方法"></a>
 ## gdn_chunk 使用方法
 
@@ -537,7 +644,7 @@ out, final_state = gated_delta_net_chunk(
 )
 ```
 
-<a id="函数接口说明-2"></a>
+<a id="函数接口说明-3"></a>
 ### 函数接口说明
 
 <a id="gated_delta_net_chunk"></a>
@@ -584,6 +691,7 @@ JAX 侧所有加速算子都通过 `custom_partitioning` + einsum 风格 `shardi
 | rwkv7_sane cuda / triton / pallas | ✅ | ✅ |
 | rwkv7 / rwkv7_sane 单步 cuda | ✅ | ✅ |
 | gdn_recurrent triton / pallas | ✅ | ✅ |
+| gdn_recurrent_sane triton / pallas | ✅ | ✅ |
 | gdn_chunk triton | ✅ | ✅ |
 | rwkv6 cuda | ✅ | ❌ |
 

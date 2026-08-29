@@ -6,7 +6,7 @@ from ..utils import _use_triton
 
 def _use_jax_triton(KERNEL_TYPE):
     """jax + GPU 平台且 KERNEL_TYPE=triton 时启用 Triton kernel。"""
-    if not _use_triton():
+    if not _use_triton(KERNEL_TYPE):
         return False
     try:
         import jax

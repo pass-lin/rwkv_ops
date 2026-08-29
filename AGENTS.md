@@ -47,8 +47,10 @@ MANIFEST.in                  # 源码分发清单
 | `generalized_delta_rule_sane_inference` / `rwkv7_op_sane_inference` | RWKV-7-SANE 推理算子（T 不必被 16 整除） |
 | `rnn_generalized_delta_rule_sane` / `rwkv7_op_sane_rnn` | RWKV-7-SANE 单步算子 |
 | `rwkv6_op` / `RWKV6_OP` | RWKV-6 函数式算子（`RWKV6_OP` 为兼容别名） |
+| `gated_delta_net_recurrent` / `gated_delta_net_recurrent_inference` / `gated_delta_net_recurrent_single_step` | Gated DeltaNet recurrent 算子 |
+| `gated_delta_net_recurrent_sane` / `gated_delta_net_recurrent_sane_inference` / `gated_delta_net_recurrent_sane_single_step` | Gated DeltaNet recurrent SANE 算子 |
 | `mhc_pre_op` / `mhc_post_op` | mHC 预处理/后处理算子 |
-| `get_generalized_delta_rule` 等 6 个工厂函数 | 按 head_size / KERNEL_TYPE 获取算子 |
+| `get_generalized_delta_rule` 等 9 个工厂函数 | 按 head_size / KERNEL_TYPE 获取算子 |
 
 ---
 
@@ -176,6 +178,23 @@ MANIFEST.in                  # 源码分发清单
 > ³ JAX 后端的 `native` 在 GPU/TPU 上为 Pallas 实现，其余为纯 Keras ops；
 > `triton` 需要显式 `KERNEL_TYPE="triton"` 且安装 `jax-triton`。
 
+#### Gated DeltaNet recurrent SANE `gated_delta_net_recurrent_sane` / `gated_delta_net_recurrent_sane_inference` / `gated_delta_net_recurrent_sane_single_step`
+
+| Framework | cuda | triton | native |
+|-----------|------|--------|--------|
+| PyTorch   | ❌   | ✅     | ✅     |
+| JAX       | ❌   | ✅     | ✅     |
+| TensorFlow| ❌   | ❌     | ✅     |
+| NumPy     | ❌   | ❌     | ✅     |
+| OpenVINO  | ❌   | ❌     | ✅     |
+
+> PyTorch 侧 `gdn_recurrent_sane` 已提供 Triton kernel（训练/推理/单步 RNN 三个入口）；
+> JAX 侧 `triton` 显式 `KERNEL_TYPE="triton"` 时启用 JAX-Triton 前向 kernel，
+> `native` 在 GPU/TPU 上为 Pallas 实现（`jax_pallas_kernel.py`），覆盖训练/推理/单步
+> RNN 三个入口；其余环境回退 native Keras ops。
+> `mask=None` 时仍执行无条件 SANE，但 `output_final_state=True` 会发出 `UserWarning` 并将
+> `final_state` 置为 `None`（与 `rwkv7_sane` 语义一致）。
+
 ### 2.3 分布式分片（jax）
 
 jax 侧所有加速算子都用 `custom_partitioning` + einsum 风格 `sharding_rule`
@@ -187,6 +206,7 @@ jax 侧所有加速算子都用 `custom_partitioning` + einsum 风格 `sharding_
 | rwkv7_sane cuda / triton / pallas | ✅ | ✅（含 1-device TP 结构测试） |
 | rwkv7 / rwkv7_sane 单步 cuda | ✅ | ✅ |
 | gdn_recurrent triton / pallas | ✅ | ✅ |
+| gdn_recurrent_sane triton / pallas | ✅ | ✅ |
 | rwkv6 cuda | ✅ | ❌（channel 融合为 `c`，head 维未暴露） |
 
 - 规则字母：`b`=batch、`n`/`h`=head、`t`=time、`k`/`m`/`n`=head_size、

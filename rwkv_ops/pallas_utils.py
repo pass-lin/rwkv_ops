@@ -234,8 +234,8 @@ def launch(name, kernel, out_shape, grid, args):
 
 
 def _use_jax_pallas(KERNEL_TYPE):
-    """jax + GPU/TPU 且 KERNEL_TYPE=native 时启用 Pallas kernel。"""
-    if KERNEL_TYPE != "native" or _force_keras_native():
+    """jax + GPU/TPU 且 KERNEL_TYPE 为 native/pallas 时启用 Pallas kernel。"""
+    if KERNEL_TYPE not in ("native", "pallas") or _force_keras_native():
         return False
     try:
         import jax

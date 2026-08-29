@@ -42,8 +42,14 @@
     - [`gated_delta_net_recurrent_inference`](#gated_delta_net_recurrent_inference)
     - [`gated_delta_net_recurrent_single_step`](#gated_delta_net_recurrent_single_step)
   - [Implementation Status of `gdn_recurrent`](#implementation-status-of-gdn_recurrent)
-- [Usage of `gdn_chunk`](#usage-of-gdn_chunk)
+- [Usage of `gdn_recurrent_sane`](#usage-of-gdn_recurrent_sane)
   - [API Reference](#api-reference-2)
+    - [`gated_delta_net_recurrent_sane`](#gated_delta_net_recurrent_sane)
+    - [`gated_delta_net_recurrent_sane_inference`](#gated_delta_net_recurrent_sane_inference)
+    - [`gated_delta_net_recurrent_sane_single_step`](#gated_delta_net_recurrent_sane_single_step)
+  - [Implementation Status of `gdn_recurrent_sane`](#implementation-status-of-gdn_recurrent_sane)
+- [Usage of `gdn_chunk`](#usage-of-gdn_chunk)
+  - [API Reference](#api-reference-3)
     - [`gated_delta_net_chunk`](#gated_delta_net_chunk)
   - [Implementation Status of `gdn_chunk`](#implementation-status-of-gdn_chunk)
 - [Usage of `rwkv6op`](#usage-of-rwkv6op)
@@ -537,6 +543,107 @@ Same interface as `gated_delta_net_recurrent`, but **does not compute gradients*
 1. The training entry point supports back-propagation; the inference and single-step entry points **do not support gradients**.
 2. The chunkwise counterpart lives in `gdn_chunk/`, see below.
 
+<a id="usage-of-gdn_recurrent_sane"></a>
+## Usage of `gdn_recurrent_sane`
+
+`gdn_recurrent_sane` extends `gdn_recurrent` with **State Anomaly Neutralization (SANE)**: at every chunk boundary the state is soft-clipped via `state = tau * tanh(state / tau)`, which helps prevent padding chunks or anomalous states from contaminating the recurrent state. It also exposes training, inference, and single-step RNN entry points.
+
+```python
+from rwkv_ops import (
+    gated_delta_net_recurrent_sane,
+    gated_delta_net_recurrent_sane_inference,
+    gated_delta_net_recurrent_sane_single_step,
+)
+
+# Training / prefill (gradient-capable)
+out, final_state = gated_delta_net_recurrent_sane(
+    q, k, v, g, beta, tau, mask=mask,
+    initial_state=h0,
+    output_final_state=True,
+    head_first=False,
+)
+
+# Inference-only (no gradients, lower memory)
+out, final_state = gated_delta_net_recurrent_sane_inference(
+    q, k, v, g, beta, tau, mask=mask,
+    initial_state=h0,
+    output_final_state=True,
+    head_first=False,
+)
+
+# Single-step RNN (decode stage)
+out, state = gated_delta_net_recurrent_sane_single_step(
+    q, k, v, g, beta, tau, do_sane,
+    initial_state=state,
+    output_final_state=True,
+    head_first=True,  # single-step currently only supports head_first=True
+)
+```
+
+<a id="api-reference-2"></a>
+### API Reference
+
+<a id="gated_delta_net_recurrent_sane"></a>
+#### `gated_delta_net_recurrent_sane`
+
+| Parameter | Shape | Description |
+|---|---|---|
+| q, k | (B, T, H, K) | Query and key; L2-normalized inside the operator |
+| v | (B, T, H, V) | Value |
+| g | (B, T, H) | Log-space decay gate |
+| beta | (B, T, H) | Write strength; must have already passed through sigmoid, i.e. in (0, 1) |
+| tau | (B, T//16, H) | SANE threshold; must be > 0 |
+| mask | (B, T//16), optional | SANE is applied at chunk boundaries where mask > 0; only effective when `output_final_state=True` |
+| initial_state | (B, H, K, V) or (1, H, K, V), optional | Initial recurrent state |
+| output_final_state | bool | Whether to return the final state |
+| head_first | bool | Whether the input/output is head-first |
+
+| Return value | Shape | Description |
+|---|---|---|
+| out | (B, T, H, V) | Same dtype as `v`; computed from the state **before** SANE |
+| final_state | (B, H, K, V) or None | Final state; `None` with a `UserWarning` when `mask=None` and `output_final_state=True` |
+
+<a id="gated_delta_net_recurrent_sane_inference"></a>
+#### `gated_delta_net_recurrent_sane_inference`
+
+Same interface as `gated_delta_net_recurrent_sane`, but **does not compute gradients** and therefore avoids storing `kv_mem`, `state_chkp`, and other reverse-only intermediates. Supports arbitrary sequence length `T`.
+
+<a id="gated_delta_net_recurrent_sane_single_step"></a>
+#### `gated_delta_net_recurrent_sane_single_step`
+
+| Parameter | Shape | Description |
+|---|---|---|
+| q, k | (B, H, K) | Single-step query and key |
+| v | (B, H, V) | Single-step value |
+| g | (B, H) | Single-step log-space decay gate |
+| beta | (B, H) | Single-step write strength, already sigmoided |
+| tau | (B, H) | Single-step SANE threshold |
+| do_sane | (B,) | Apply SANE where > 0, skip otherwise |
+| initial_state | (B, H, K, V) or (1, H, K, V), optional | Current state |
+| output_final_state | bool | Whether to return the next state |
+| head_first | bool | Single-step currently only supports `head_first=True` |
+
+| Return value | Shape | Description |
+|---|---|---|
+| out | (B, H, V) | Same dtype as `v` |
+| next_state | (B, H, K, V) | State for the next step |
+
+<a id="implementation-status-of-gdn_recurrent_sane"></a>
+### Implementation Status of `gdn_recurrent_sane`
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ❌   | ✅     | ✅     |
+| JAX         | ❌   | ✅     | ✅¹    |
+| TensorFlow  | ❌   | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
+
+> ¹ With the JAX backend, `native` on GPU/TPU uses the Pallas implementation (`jax_pallas_kernel.py`); `triton` is the JAX-Triton implementation when `KERNEL_TYPE="triton"` is set explicitly; elsewhere it falls back to pure Keras ops.
+
+1. The training entry point supports back-propagation (including `tau` gradients); the inference and single-step entry points **do not support gradients**.
+2. When `mask=None`, unconditional SANE is still performed, but `output_final_state=True` emits a `UserWarning` and sets `final_state=None` to avoid using a state potentially contaminated by padding.
+
 <a id="usage-of-gdn_chunk"></a>
 ## Usage of `gdn_chunk`
 
@@ -553,7 +660,7 @@ out, final_state = gated_delta_net_chunk(
 )
 ```
 
-<a id="api-reference-2"></a>
+<a id="api-reference-3"></a>
 ### API Reference
 
 <a id="gated_delta_net_chunk"></a>
@@ -603,6 +710,7 @@ over batch)** and **TP (tensor parallel over heads)**:
 | rwkv7_sane cuda / triton / pallas | ✅ | ✅ |
 | rwkv7 / rwkv7_sane single-step cuda | ✅ | ✅ |
 | gdn_recurrent triton / pallas | ✅ | ✅ |
+| gdn_recurrent_sane triton / pallas | ✅ | ✅ |
 | gdn_chunk triton | ✅ | ✅ |
 | rwkv6 cuda | ✅ | ❌ |
 

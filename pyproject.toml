@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rwkv-ops"
-version = "0.9.0"
+version = "0.10.0"
 authors = [
     { name = "pass-lin", email = "qw_lin@qq.com" },
 ]
@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8.0", "jax-triton>=0.3.1"]
+test = ["pytest>=8.0"]
 
 [project.urls]
 "Homepage" = "https://github.com/pass-lin/rwkv_ops"

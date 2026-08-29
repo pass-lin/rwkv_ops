@@ -1,0 +1,380 @@
+"""Gated DeltaNet recurrent SANE Triton kernel 的 JAX 后端测试。"""
+
+import warnings
+
+import jax
+import jax.numpy as jnp
+import pytest
+
+from tests.conftest import assert_allclose_with_stats
+
+pytest.importorskip("jax_triton")
+
+from rwkv_ops.gdn_recurrent.native_keras_op import (
+    gated_delta_net_recurrent as gdn_native_recurrent,
+)
+from rwkv_ops.gdn_recurrent_sane.jax_triton_kernel import (
+    gated_delta_net_recurrent_sane as gdn_triton_recurrent,
+    gated_delta_net_recurrent_sane_inference as gdn_triton_inference,
+    gated_delta_net_recurrent_sane_single_step as gdn_triton_single_step,
+)
+from rwkv_ops.gdn_recurrent_sane.native_keras_op import (
+    gated_delta_net_recurrent_sane as gdn_native_sane,
+    gated_delta_net_recurrent_sane_inference as gdn_native_sane_inference,
+    gated_delta_net_recurrent_sane_single_step as gdn_native_sane_single_step,
+)
+
+
+def _to_jax_tensor(arr, device, dtype=jnp.float32):
+    """把 numpy 数组转成指定 dtype 的 JAX 设备数组。"""
+    return jax.device_put(jnp.asarray(arr, dtype=dtype), device)
+
+
+@pytest.fixture(scope="session")
+def gdn_sane_jax_triton_device():
+    """JAX-Triton SANE kernel 需要 JAX GPU，否则跳过整个文件。"""
+    if jax.devices()[0].platform != "gpu":
+        pytest.skip("Gated DeltaNet recurrent SANE JAX-Triton kernel requires JAX GPU.")
+    return jax.devices()[0]
+
+
+def _prepare_sane_inputs(gdn_sane_inputs, device, dtype="float32"):
+    """把 gdn_sane_inputs fixture 转成 JAX 测试张量。"""
+    q = _to_jax_tensor(gdn_sane_inputs["q"], device, dtype)
+    k = _to_jax_tensor(gdn_sane_inputs["k"], device, dtype)
+    v = _to_jax_tensor(gdn_sane_inputs["v"], device, dtype)
+    g = _to_jax_tensor(gdn_sane_inputs["g"], device, jnp.float32)
+    beta = _to_jax_tensor(gdn_sane_inputs["beta"], device, jnp.float32)
+    tau = _to_jax_tensor(gdn_sane_inputs["tau"], device, jnp.float32)
+    mask = _to_jax_tensor(gdn_sane_inputs["mask"], device, jnp.float32)
+    h0 = _to_jax_tensor(gdn_sane_inputs["h0"], device, jnp.float32)
+    return q, k, v, g, beta, tau, mask, h0
+
+
+def _sane_loss_fn(op, q, k, v, g, beta, tau, mask, h0, output_final_state=True):
+    """统一的 SANE 损失函数，用于反向梯度测试。"""
+    out, state = op(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau,
+        mask=mask,
+        initial_state=h0,
+        output_final_state=output_final_state,
+    )
+    loss = jnp.mean(jnp.asarray(out, jnp.float32) ** 2)
+    if state is not None:
+        loss = loss + jnp.mean(jnp.asarray(state, jnp.float32) ** 2)
+    return loss
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+def test_gdn_triton_sane_forward_matches_native(
+    gdn_sane_inputs, gdn_sane_jax_triton_device
+):
+    """JAX-Triton SANE 训练算子前向/最终 state 与 native Keras 参考对齐。"""
+    q, k, v, g, beta, tau, mask, h0 = _prepare_sane_inputs(
+        gdn_sane_inputs, gdn_sane_jax_triton_device, dtype="bfloat16"
+    )
+
+    out_ref, state_ref = gdn_native_sane(
+        q, k, v, g, beta, tau, mask=mask, initial_state=h0, output_final_state=True
+    )
+    out_triton, state_triton = gdn_triton_recurrent(
+        q, k, v, g, beta, tau, mask=mask, initial_state=h0, output_final_state=True
+    )
+
+    assert_allclose_with_stats(
+        out_ref, out_triton, "triton sane vs native output", atol=1e-4, rtol=1e-3
+    )
+    assert_allclose_with_stats(
+        state_ref, state_triton, "triton sane vs native state", atol=1e-4, rtol=1e-3
+    )
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+def test_gdn_triton_sane_backward_matches_native(
+    gdn_sane_inputs, gdn_sane_jax_triton_device
+):
+    """JAX-Triton SANE 训练算子反向梯度（含 dtau）与 native 参考对齐。"""
+    q, k, v, g, beta, tau, mask, h0 = _prepare_sane_inputs(
+        gdn_sane_inputs, gdn_sane_jax_triton_device, dtype="bfloat16"
+    )
+
+    ref_grads = jax.grad(
+        lambda q, k, v, g, beta, tau, h0: _sane_loss_fn(
+            gdn_native_sane, q, k, v, g, beta, tau, mask, h0
+        ),
+        argnums=(0, 1, 2, 3, 4, 5, 6),
+    )(q, k, v, g, beta, tau, h0)
+
+    triton_grads = jax.grad(
+        lambda q, k, v, g, beta, tau, h0: _sane_loss_fn(
+            gdn_triton_recurrent, q, k, v, g, beta, tau, mask, h0
+        ),
+        argnums=(0, 1, 2, 3, 4, 5, 6),
+    )(q, k, v, g, beta, tau, h0)
+
+    names = ["q", "k", "v", "g", "beta", "tau", "h0"]
+    for name, gr, gt in zip(names, ref_grads, triton_grads):
+        assert_allclose_with_stats(
+            gr, gt, f"grad_{name} triton vs native", atol=7e-3, rtol=1e-3
+        )
+
+
+@pytest.mark.jax
+def test_gdn_triton_sane_no_mask_warning_and_none_state(
+    gdn_sane_inputs, gdn_sane_jax_triton_device
+):
+    """mask=None 且 output_final_state=True 时发出 UserWarning 并返回 None state。"""
+    q, k, v, g, beta, tau, _, h0 = _prepare_sane_inputs(
+        gdn_sane_inputs, gdn_sane_jax_triton_device, dtype="bfloat16"
+    )
+
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        out, final_state = gdn_triton_recurrent(
+            q, k, v, g, beta, tau, mask=None, initial_state=h0, output_final_state=True
+        )
+        user_warnings = [w for w in rec if issubclass(w.category, UserWarning)]
+        assert len(user_warnings) == 1
+        assert "mask is None" in str(user_warnings[0].message)
+
+    assert final_state is None
+    assert out.shape == q.shape[:-1] + (v.shape[-1],)
+
+
+@pytest.mark.jax
+def test_gdn_triton_sane_all_one_mask_equals_no_mask(
+    gdn_sane_inputs, gdn_sane_jax_triton_device
+):
+    """全 1 mask 与 mask=None 的输出一致，且后者返回 None state。"""
+    B, T, _, _ = gdn_sane_inputs["q"].shape
+    all_one_mask = jnp.ones((B, T // 16), dtype=jnp.float32)
+
+    q, k, v, g, beta, tau, _, h0 = _prepare_sane_inputs(
+        gdn_sane_inputs, gdn_sane_jax_triton_device, dtype="bfloat16"
+    )
+
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
+        y_no_mask, s_no_mask = gdn_triton_recurrent(
+            q, k, v, g, beta, tau, mask=None, initial_state=h0, output_final_state=True
+        )
+
+    y_all_one, s_all_one = gdn_triton_recurrent(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau,
+        mask=all_one_mask,
+        initial_state=h0,
+        output_final_state=True,
+    )
+
+    assert s_no_mask is None
+    assert s_all_one is not None
+    assert_allclose_with_stats(
+        y_no_mask, y_all_one, "no_mask vs all_one_mask output", atol=1e-5, rtol=1e-5
+    )
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+def test_gdn_triton_sane_all_zero_mask_matches_non_sane(
+    gdn_sane_inputs, gdn_sane_jax_triton_device
+):
+    """全 0 mask 等价于不使用 SANE 的 GDN recurrent。"""
+    B, T, _, _ = gdn_sane_inputs["q"].shape
+    zero_mask = jnp.zeros((B, T // 16), dtype=jnp.float32)
+
+    q, k, v, g, beta, tau, _, h0 = _prepare_sane_inputs(
+        gdn_sane_inputs, gdn_sane_jax_triton_device, dtype="bfloat16"
+    )
+
+    out_triton, state_triton = gdn_triton_recurrent(
+        q, k, v, g, beta, tau, mask=zero_mask, initial_state=h0, output_final_state=True
+    )
+    out_ref, state_ref = gdn_native_recurrent(
+        q, k, v, g, beta, initial_state=h0, output_final_state=True
+    )
+
+    assert_allclose_with_stats(
+        out_ref, out_triton, "all_zero_mask vs non-sane output", atol=1e-4, rtol=1e-3
+    )
+    assert_allclose_with_stats(
+        state_ref, state_triton, "all_zero_mask vs non-sane state", atol=1e-4, rtol=1e-3
+    )
+
+
+@pytest.mark.jax
+def test_gdn_triton_sane_inference_matches_native(
+    gdn_sane_inputs, gdn_sane_jax_triton_device
+):
+    """JAX-Triton SANE 推理算子前向/最终 state 与 native 参考对齐。"""
+    q, k, v, g, beta, tau, mask, h0 = _prepare_sane_inputs(
+        gdn_sane_inputs, gdn_sane_jax_triton_device, dtype="bfloat16"
+    )
+
+    out_triton, state_triton = gdn_triton_inference(
+        q, k, v, g, beta, tau, mask=mask, initial_state=h0, output_final_state=True
+    )
+    out_ref, state_ref = gdn_native_sane_inference(
+        q, k, v, g, beta, tau, mask=mask, initial_state=h0, output_final_state=True
+    )
+
+    assert_allclose_with_stats(
+        out_ref,
+        out_triton,
+        "triton sane inference vs native output",
+        atol=1e-4,
+        rtol=1e-3,
+    )
+    assert_allclose_with_stats(
+        state_ref,
+        state_triton,
+        "triton sane inference vs native state",
+        atol=1e-4,
+        rtol=1e-3,
+    )
+
+
+@pytest.mark.jax
+def test_gdn_triton_sane_inference_arbitrary_length(
+    gdn_sane_inputs, gdn_sane_jax_triton_device
+):
+    """JAX-Triton SANE 推理算子支持 T 不被 16 整除的任意长度。"""
+    T = 34
+    q = _to_jax_tensor(
+        gdn_sane_inputs["q"][:, :T], gdn_sane_jax_triton_device, jnp.bfloat16
+    )
+    k = _to_jax_tensor(
+        gdn_sane_inputs["k"][:, :T], gdn_sane_jax_triton_device, jnp.bfloat16
+    )
+    v = _to_jax_tensor(
+        gdn_sane_inputs["v"][:, :T], gdn_sane_jax_triton_device, jnp.bfloat16
+    )
+    g = _to_jax_tensor(
+        gdn_sane_inputs["g"][:, :T], gdn_sane_jax_triton_device, jnp.float32
+    )
+    beta = _to_jax_tensor(
+        gdn_sane_inputs["beta"][:, :T], gdn_sane_jax_triton_device, jnp.float32
+    )
+    tau = _to_jax_tensor(
+        gdn_sane_inputs["tau"][:, : (T // 16), :],
+        gdn_sane_jax_triton_device,
+        jnp.float32,
+    )
+    mask = _to_jax_tensor(
+        gdn_sane_inputs["mask"][:, : (T // 16)], gdn_sane_jax_triton_device, jnp.float32
+    )
+    h0 = _to_jax_tensor(gdn_sane_inputs["h0"], gdn_sane_jax_triton_device, jnp.float32)
+
+    out_triton, state_triton = gdn_triton_inference(
+        q, k, v, g, beta, tau, mask=mask, initial_state=h0, output_final_state=True
+    )
+    out_ref, state_ref = gdn_native_sane_inference(
+        q, k, v, g, beta, tau, mask=mask, initial_state=h0, output_final_state=True
+    )
+
+    assert out_triton.shape == out_ref.shape
+    assert_allclose_with_stats(
+        out_ref,
+        out_triton,
+        "triton sane inference arbitrary length output",
+        atol=1e-4,
+        rtol=1e-3,
+    )
+    assert_allclose_with_stats(
+        state_ref,
+        state_triton,
+        "triton sane inference arbitrary length state",
+        atol=1e-4,
+        rtol=1e-3,
+    )
+
+
+@pytest.mark.jax
+def test_gdn_triton_sane_single_step(gdn_sane_inputs, gdn_sane_jax_triton_device):
+    """JAX-Triton SANE 单步 RNN 与 native 参考对齐（do_sane=1/0 两种情形）。"""
+    for do_sane_val in (1.0, 0.0):
+        q = _to_jax_tensor(
+            gdn_sane_inputs["q"][:, 0], gdn_sane_jax_triton_device, jnp.bfloat16
+        )
+        k = _to_jax_tensor(
+            gdn_sane_inputs["k"][:, 0], gdn_sane_jax_triton_device, jnp.bfloat16
+        )
+        v = _to_jax_tensor(
+            gdn_sane_inputs["v"][:, 0], gdn_sane_jax_triton_device, jnp.bfloat16
+        )
+        g = _to_jax_tensor(
+            gdn_sane_inputs["g"][:, 0], gdn_sane_jax_triton_device, jnp.float32
+        )
+        beta = _to_jax_tensor(
+            gdn_sane_inputs["beta"][:, 0], gdn_sane_jax_triton_device, jnp.float32
+        )
+        tau = _to_jax_tensor(
+            gdn_sane_inputs["tau"][:, 0, :], gdn_sane_jax_triton_device, jnp.float32
+        )
+        do_sane = jnp.full(
+            (gdn_sane_inputs["q"].shape[0],), do_sane_val, dtype=jnp.float32
+        )
+        h0 = _to_jax_tensor(
+            gdn_sane_inputs["h0"], gdn_sane_jax_triton_device, jnp.float32
+        )
+
+        out_triton, state_triton = gdn_triton_single_step(
+            q, k, v, g, beta, tau, do_sane, initial_state=h0, output_final_state=True
+        )
+        out_ref, state_ref = gdn_native_sane_single_step(
+            q, k, v, g, beta, tau, do_sane, initial_state=h0, output_final_state=True
+        )
+
+        assert_allclose_with_stats(
+            out_ref,
+            out_triton,
+            f"triton sane single_step do_sane={do_sane_val} output",
+            atol=1e-4,
+            rtol=1e-3,
+        )
+        assert_allclose_with_stats(
+            state_ref,
+            state_triton,
+            f"triton sane single_step do_sane={do_sane_val} state",
+            atol=1e-4,
+            rtol=1e-3,
+        )
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+def test_gdn_triton_sane_bfloat16_io(gdn_sane_inputs, gdn_sane_jax_triton_device):
+    """bfloat16 I/O 下 JAX-Triton SANE 训练算子仍与 native 参考对齐。"""
+    q, k, v, g, beta, tau, mask, h0 = _prepare_sane_inputs(
+        gdn_sane_inputs, gdn_sane_jax_triton_device, dtype="bfloat16"
+    )
+
+    out_ref, state_ref = gdn_native_sane(
+        q, k, v, g, beta, tau, mask=mask, initial_state=h0, output_final_state=True
+    )
+    out_triton, state_triton = gdn_triton_recurrent(
+        q, k, v, g, beta, tau, mask=mask, initial_state=h0, output_final_state=True
+    )
+
+    assert out_triton.dtype == jnp.bfloat16
+    assert_allclose_with_stats(
+        out_ref, out_triton, "bf16 triton sane vs native output", atol=1e-4, rtol=1e-3
+    )
+    assert_allclose_with_stats(
+        state_ref,
+        state_triton,
+        "bf16 triton sane vs native state",
+        atol=1e-4,
+        rtol=1e-3,
+    )

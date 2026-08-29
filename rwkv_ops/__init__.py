@@ -1,6 +1,6 @@
 """RWKV-OPS 包入口：解析环境变量并暴露全部算子 API。"""
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 import os
 
 KERNEL_TYPE = os.environ.get("KERNEL_TYPE", "cuda").lower()
@@ -33,6 +33,11 @@ from .rwkv6_kernel import get_rwkv6_kernel  # noqa: E402
 from .mhc_kernel import get_mhc_kernel  # noqa: E402
 from .gdn_recurrent import get_gated_delta_net_recurrent  # noqa: E402
 from .gdn_chunk import get_gated_delta_net_chunk  # noqa: E402
+from .gdn_recurrent_sane import (  # noqa: E402
+    get_gated_delta_net_recurrent_sane,
+    get_gated_delta_net_recurrent_sane_inference,
+    get_gated_delta_net_recurrent_sane_single_step,
+)
 
 generalized_delta_rule, generalized_delta_rule_inference = get_generalized_delta_rule(
     KERNEL_TYPE=KERNEL_TYPE
@@ -40,6 +45,17 @@ generalized_delta_rule, generalized_delta_rule_inference = get_generalized_delta
 
 gated_delta_net_recurrent = get_gated_delta_net_recurrent(KERNEL_TYPE=KERNEL_TYPE)
 gated_delta_net_chunk = get_gated_delta_net_chunk(KERNEL_TYPE=KERNEL_TYPE)
+
+gated_delta_net_recurrent_sane = get_gated_delta_net_recurrent_sane(
+    KERNEL_TYPE=KERNEL_TYPE
+)
+gated_delta_net_recurrent_sane_inference = get_gated_delta_net_recurrent_sane_inference(
+    KERNEL_TYPE=KERNEL_TYPE
+)
+gated_delta_net_recurrent_sane_single_step = (
+    get_gated_delta_net_recurrent_sane_single_step(KERNEL_TYPE=KERNEL_TYPE)
+)
+
 rwkv7_op = generalized_delta_rule
 rwkv7_op_inference = generalized_delta_rule_inference
 
