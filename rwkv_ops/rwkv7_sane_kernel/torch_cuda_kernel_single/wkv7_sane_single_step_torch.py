@@ -3,7 +3,10 @@ import torch
 from torch.utils.cpp_extension import load
 
 
-def get_torch_generalized_delta_rule_sane_single_step(HEAD_SIZE=64):
+def get_torch_generalized_delta_rule_sane_single_step(
+    HEAD_SIZE=64, chunk_size: int = 16
+):
+    # chunk_size 仅用于签名一致，单步 kernel 内部固定 CHUNK_LEN_=1，忽略该值。
     flags = [
         "-res-usage",
         f"-D_C_={HEAD_SIZE}",
@@ -64,6 +67,7 @@ def get_torch_generalized_delta_rule_sane_single_step(HEAD_SIZE=64):
         initial_state=None,
         output_final_state=True,
         head_first=False,
+        chunk_size=16,
     ):
         if w.device.type != "cuda":
             from ..native_keras_op import generalized_delta_rule_sane_single_step
@@ -80,6 +84,7 @@ def get_torch_generalized_delta_rule_sane_single_step(HEAD_SIZE=64):
                 initial_state=initial_state,
                 output_final_state=output_final_state,
                 head_first=head_first,
+                chunk_size=chunk_size,
             )
 
         time_axis = 2 if head_first else 1

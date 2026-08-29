@@ -117,7 +117,10 @@ void forward_inference_sane_no_mask(torch::Tensor &w, torch::Tensor &q,
       (float *)h0.data_ptr());
 }
 
-TORCH_LIBRARY(wind_backstepping_sane, m) {
+#ifndef TORCH_LIBRARY_NAME
+#define TORCH_LIBRARY_NAME wind_backstepping_sane
+#endif
+TORCH_LIBRARY(TORCH_LIBRARY_NAME, m) {
   m.def("forward_sane(Tensor w, Tensor q, Tensor k, Tensor v, Tensor a, Tensor "
         "b, Tensor tau, Tensor mask, Tensor(a!) y, Tensor(b!) s, Tensor(c!) "
         "sa, Tensor(d!) h0) -> ()");
@@ -140,7 +143,7 @@ TORCH_LIBRARY(wind_backstepping_sane, m) {
         "Tensor(c!) h0) -> ()");
 }
 
-TORCH_LIBRARY_IMPL(wind_backstepping_sane, CUDA, m) {
+TORCH_LIBRARY_IMPL(TORCH_LIBRARY_NAME, CUDA, m) {
   m.impl("forward_sane", &forward_sane);
   m.impl("backward_sane", &backward_sane);
   m.impl("forward_inference_sane", &forward_inference_sane);

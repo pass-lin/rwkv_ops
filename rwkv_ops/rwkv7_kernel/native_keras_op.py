@@ -33,6 +33,7 @@ def generalized_delta_rule(
     initial_state=None,
     output_final_state: bool = True,
     head_first: bool = False,
+    chunk_size: int = 16,
     mask=None,
 ):
     """RWKV-7 广义 delta 规则的逐 token 原生实现（数值 ground truth）。
@@ -48,6 +49,8 @@ def generalized_delta_rule(
         initial_state: [B, H, K, K] 或 [1, H, K, K]，float32，可选。
         output_final_state: bool，是否返回最终 state。
         head_first: bool，输入/输出是否采用 [B, H, T, K] layout。
+        chunk_size: int，chunk 长度，仅用于签名一致，本实现逐 token 计算，
+            该参数被忽略。
         mask: [B, T] 或 [B, T, 1, 1]，float32，1 表示更新状态、0 表示冻结状态。
 
     Returns:

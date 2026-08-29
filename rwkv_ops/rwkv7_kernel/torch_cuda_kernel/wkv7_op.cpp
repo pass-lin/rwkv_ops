@@ -107,8 +107,13 @@ void forward_inference_with_mask(torch::Tensor &w, torch::Tensor &q,
       (bf *)mask.data_ptr());
 }
 
-// 算子注册。
-TORCH_LIBRARY(wind_backstepping, m) {
+// 算子注册。命名空间由编译宏 TORCH_LIBRARY_NAME 决定，
+// 默认保持 wind_backstepping 以兼容旧用法；Python 侧按 (HEAD_SIZE, chunk_size)
+// 传入不同名称实现同一进程内的多版本隔离。
+#ifndef TORCH_LIBRARY_NAME
+#define TORCH_LIBRARY_NAME wind_backstepping
+#endif
+TORCH_LIBRARY(TORCH_LIBRARY_NAME, m) {
   m.def("forward(Tensor w, Tensor q, Tensor k, Tensor v, Tensor z, Tensor a, "
         "Tensor(a!) y, Tensor(b!) s, Tensor(c!) sa, Tensor(d!) h0) -> ()");
   m.def("backward(Tensor w, Tensor q, Tensor k, Tensor v, Tensor z, Tensor a, "
@@ -130,7 +135,7 @@ TORCH_LIBRARY(wind_backstepping, m) {
         "Tensor(c!) h0) -> ()");
 }
 
-TORCH_LIBRARY_IMPL(wind_backstepping, CUDA, m) {
+TORCH_LIBRARY_IMPL(TORCH_LIBRARY_NAME, CUDA, m) {
   m.impl("forward", &forward);
   m.impl("backward", &backward);
   m.impl("forward_inference", &forward_inference);

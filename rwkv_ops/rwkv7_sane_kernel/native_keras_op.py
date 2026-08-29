@@ -14,12 +14,12 @@ def transpose_head(x, head_first):
     return ops.transpose(x, (0, 2, 1, 3))
 
 
-def _apply_state_norm_cond(state, t, tau, mask):
+def _apply_state_norm_cond(state, t, tau, mask, chunk_size):
     """训练用：只在 chunk 边界按 mask 执行 State Anomaly Neutralization。"""
-    is_boundary = ops.equal(ops.mod(t + 1, 16), 0)
+    is_boundary = ops.equal(ops.mod(t + 1, chunk_size), 0)
 
     def _true_fn():
-        chunk_idx = ops.maximum((t + 1) // 16 - 1, 0)
+        chunk_idx = ops.maximum((t + 1) // chunk_size - 1, 0)
         chunk_idx = ops.reshape(chunk_idx, [1])
 
         tau_t = ops.take(tau, chunk_idx, axis=1)
@@ -46,12 +46,12 @@ def _apply_state_norm_cond(state, t, tau, mask):
     return ops.cond(is_boundary, _true_fn, _false_fn)
 
 
-def _apply_state_norm_uncond(state, t, tau):
+def _apply_state_norm_uncond(state, t, tau, chunk_size):
     """训练用：在 chunk 边界无条件执行 State Anomaly Neutralization。"""
-    is_boundary = ops.equal(ops.mod(t + 1, 16), 0)
+    is_boundary = ops.equal(ops.mod(t + 1, chunk_size), 0)
 
     def _true_fn():
-        chunk_idx = ops.maximum((t + 1) // 16 - 1, 0)
+        chunk_idx = ops.maximum((t + 1) // chunk_size - 1, 0)
         chunk_idx = ops.reshape(chunk_idx, [1])
 
         tau_t = ops.take(tau, chunk_idx, axis=1)
@@ -82,20 +82,22 @@ def generalized_delta_rule_sane(
     initial_state=None,
     output_final_state=True,
     head_first=False,
+    chunk_size: int = 16,
 ):
     """带 State Anomaly Neutralization 的 RWKV-7 广义 delta 规则（chunkwise 训练版）。
 
-    在 chunk 边界（每 16 个 token）按 mask 对 state 执行
+    在 chunk 边界（每 chunk_size 个 token）按 mask 对 state 执行
     `state = tau * tanh(state / tau)`；输出始终基于 SANE 之前的 state。
 
     Args:
-        r, w, k, v, a, b: [B, T, H, K]，bfloat16。T 必须被 16 整除。
-        tau: [B, T//16, H]，float32。阈值，必须严格 > 1。
-        mask: [B, T//16]，float32 或 None。>0 的 chunk 边界执行 SANE；
+        r, w, k, v, a, b: [B, T, H, K]，bfloat16。T 必须被 chunk_size 整除。
+        tau: [B, T//chunk_size, H]，float32。阈值，必须严格 > 1。
+        mask: [B, T//chunk_size]，float32 或 None。>0 的 chunk 边界执行 SANE；
             仅当 output_final_state=True 时生效。
         initial_state: [B, H, K, K] 或 [1, H, K, K]，float32，可选。
         output_final_state: bool，是否返回最终 state。
         head_first: bool，输入输出是否 head 维优先 ([B, H, T, K])。
+        chunk_size: int，chunk 长度，默认 16。
 
     Returns:
         out: [B, T, H, K]，与输入同 dtype。
@@ -103,7 +105,7 @@ def generalized_delta_rule_sane(
             output_final_state=False 时不返回；mask=None 时为 None。
 
     Raises:
-        ValueError: T 不被 16 整除，或 tau/mask 形状不匹配。
+        ValueError: T 不被 chunk_size 整除，或 tau/mask 形状不匹配。
 
     Examples:
         >>> y, state = generalized_delta_rule_sane(
@@ -121,9 +123,10 @@ def generalized_delta_rule_sane(
 
     B, H, T, N = ops.shape(r)
 
-    if ops.mod(T, 16) != 0:
+    if ops.mod(T, chunk_size) != 0:
         raise ValueError(
-            f"RWKV-SANE training/prefill requires T divisible by 16, but got T={T}."
+            f"RWKV-SANE training/prefill requires T divisible by chunk_size={chunk_size}, "
+            f"but got T={T}."
         )
 
     tau = ops.cast(tau, "float32")
@@ -133,9 +136,10 @@ def generalized_delta_rule_sane(
 
     if use_mask:
         mask = ops.cast(mask, "float32")
-        if ops.shape(mask) != (B, T // 16):
+        if ops.shape(mask) != (B, T // chunk_size):
             raise ValueError(
-                f"mask shape {ops.shape(mask)} must match (B, T//16) = ({B}, {T // 16})"
+                f"mask shape {ops.shape(mask)} must match (B, T//chunk_size) = "
+                f"({B}, {T // chunk_size})"
             )
     elif mask is not None and output_final_state:
         # mask 被显式提供但 output_final_state=False：为节省算力将忽略 mask。
@@ -175,9 +179,9 @@ def generalized_delta_rule_sane(
             out = ops.slice_update(out, [0, 0, t, 0], ops.reshape(o, (B, H, 1, N)))
 
         if use_mask:
-            state = apply_state_norm(state, t, tau, mask)
+            state = apply_state_norm(state, t, tau, mask, chunk_size)
         else:
-            state = apply_state_norm(state, t, tau)
+            state = apply_state_norm(state, t, tau, chunk_size)
         return [state, out]
 
     if keras_backend == "tensorflow":
@@ -279,6 +283,7 @@ def generalized_delta_rule_sane_single_step(
     initial_state=None,
     output_final_state=True,
     head_first=False,
+    chunk_size: int = 16,
 ):
     """带 State Anomaly Neutralization 的 RWKV-7 单步推理（native 入口）。
 
@@ -289,6 +294,7 @@ def generalized_delta_rule_sane_single_step(
         initial_state: [B, H, N, N] 或 [1, H, N, N]，float32，可选。
         output_final_state: bool，是否返回最终 state。
         head_first: bool，输入输出是否 head 维优先。
+        chunk_size: int，chunk 长度，仅用于签名一致，单步算子忽略该参数。
 
     Returns:
         out: [B, 1, H, N]（或 [B, H, 1, N]），与输入同 dtype。

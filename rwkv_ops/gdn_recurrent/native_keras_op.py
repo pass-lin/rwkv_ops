@@ -70,7 +70,14 @@ def _gdn_recurrent_step(t, inputs, q, k, v, g, beta, scale, B, H, V, DTYPE):
 
 
 def gated_delta_net_recurrent(
-    q, k, v, g, beta, initial_state=None, output_final_state=False
+    q,
+    k,
+    v,
+    g,
+    beta,
+    initial_state=None,
+    output_final_state=False,
+    chunk_size: int = 16,
 ):
     """Gated DeltaNet 串行 recurrent 原生实现。
 
@@ -84,6 +91,8 @@ def gated_delta_net_recurrent(
         beta: [B, T, H]，写入强度门控，需已落在 (0,1) 内（外部 sigmoid）。
         initial_state: [B, H, K, V] 或 [1, H, K, V]，float32，可选。
         output_final_state: bool，是否返回最终状态。
+        chunk_size: int，chunk 长度，仅用于签名一致，recurrent 实现逐 token
+            计算，该参数被忽略。
 
     Returns:
         out: [B, T, H, V]，与 v 同 dtype。
@@ -148,7 +157,14 @@ def gated_delta_net_recurrent(
 
 
 def gated_delta_net_reference(
-    q, k, v, g, beta, initial_state=None, output_final_state=False
+    q,
+    k,
+    v,
+    g,
+    beta,
+    initial_state=None,
+    output_final_state=False,
+    chunk_size: int = 16,
 ):
     """Gated DeltaNet 最简 recurrent 黄金参考实现。
 
@@ -163,6 +179,8 @@ def gated_delta_net_reference(
         beta: [B, T, H]，写入强度门控，需已落在 (0,1) 内。
         initial_state: [B, H, K, V] 或 [1, H, K, V]，float32，可选。
         output_final_state: bool，是否返回最终状态。
+        chunk_size: int，chunk 长度，仅用于签名一致，recurrent 实现逐 token
+            计算，该参数被忽略。
 
     Returns:
         out: [B, T, H, V]，与 v 同 dtype。
@@ -224,7 +242,14 @@ def gated_delta_net_reference(
 
 
 def gated_delta_net_recurrent_inference(
-    q, k, v, g, beta, initial_state=None, output_final_state=True
+    q,
+    k,
+    v,
+    g,
+    beta,
+    initial_state=None,
+    output_final_state=True,
+    chunk_size: int = 16,
 ):
     """Gated DeltaNet recurrent 推理原生封装（无梯度）。
 
@@ -238,6 +263,7 @@ def gated_delta_net_recurrent_inference(
         beta: [B, T, H]，写入强度门控，需已落在 (0,1) 内。
         initial_state: [B, H, K, V] 或 [1, H, K, V]，float32，可选。
         output_final_state: bool，是否返回最终状态。
+        chunk_size: int，chunk 长度，仅用于签名一致，recurrent 实现忽略该参数。
 
     Returns:
         out: [B, T, H, V]，与 v 同 dtype。
@@ -251,11 +277,19 @@ def gated_delta_net_recurrent_inference(
         beta,
         initial_state=initial_state,
         output_final_state=output_final_state,
+        chunk_size=chunk_size,
     )
 
 
 def gated_delta_net_recurrent_single_step(
-    q, k, v, g, beta, initial_state=None, output_final_state=True
+    q,
+    k,
+    v,
+    g,
+    beta,
+    initial_state=None,
+    output_final_state=True,
+    chunk_size: int = 16,
 ):
     """Gated DeltaNet recurrent 单步 RNN 原生实现。
 
@@ -267,6 +301,7 @@ def gated_delta_net_recurrent_single_step(
         beta: [B, H]，写入强度门控，需已落在 (0,1) 内。
         initial_state: [B, H, K, V] 或 [1, H, K, V]，float32，可选。
         output_final_state: bool，是否返回 next state。
+        chunk_size: int，chunk 长度，仅用于签名一致，单步实现忽略该参数。
 
     Returns:
         out: [B, H, V]，与 v 同 dtype。
@@ -279,7 +314,14 @@ def gated_delta_net_recurrent_single_step(
     beta = ops.expand_dims(beta, axis=1)
 
     out, state = gated_delta_net_recurrent(
-        q, k, v, g, beta, initial_state=initial_state, output_final_state=True
+        q,
+        k,
+        v,
+        g,
+        beta,
+        initial_state=initial_state,
+        output_final_state=True,
+        chunk_size=chunk_size,
     )
 
     out = ops.squeeze(out, axis=1)

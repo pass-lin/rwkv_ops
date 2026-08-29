@@ -21,8 +21,6 @@ from .triton_kernel import (
     rwkv7_sane_fwd_kernel_with_mask,
 )
 
-CHUNK_LEN = 16
-
 #  SPMD 切分规则（Einsum 风格）
 # b=Batch, n=Head, t=Time, h=HeadDim, c=Chunk
 FWD_RULE = (
@@ -165,10 +163,10 @@ def _apply_sane_to_final_state(
 
 
 #  无 mask 的 JAX-Triton launcher
-def _wkv7_sane_fwd_triton_call(r, w, k, v, a, b, tau, h0):
+def _wkv7_sane_fwd_triton_call(r, w, k, v, a, b, tau, h0, chunk_size: int):
     B, N, T, H = r.shape
     dtype = r.dtype
-    chunk_num = T // CHUNK_LEN
+    chunk_num = T // chunk_size
 
     out_shapes = [
         jax.ShapeDtypeStruct((B, N, T, H), dtype),  # OUT
@@ -195,14 +193,14 @@ def _wkv7_sane_fwd_triton_call(r, w, k, v, a, b, tau, h0):
         out_shape=out_shapes,
         grid=grid,
         H_SIZE=H,
-        CHUNK_LEN=CHUNK_LEN,
+        CHUNK_LEN=chunk_size,
     )
     return out, sa_out, state_chkp
 
 
 @custom_partitioning
-def _wkv7_sane_fwd_spmd(r, w, k, v, a, b, tau, h0):
-    return _wkv7_sane_fwd_triton_call(r, w, k, v, a, b, tau, h0)
+def _wkv7_sane_fwd_spmd(r, w, k, v, a, b, tau, h0, chunk_size: int):
+    return _wkv7_sane_fwd_triton_call(r, w, k, v, a, b, tau, h0, chunk_size)
 
 
 _wkv7_sane_fwd_spmd.def_partition(
@@ -212,7 +210,9 @@ _wkv7_sane_fwd_spmd.def_partition(
 )
 
 
-def _wkv7_sane_bwd_triton_call(r, w, k, v, a, b, sa, state_chkp, tau, dy, dht):
+def _wkv7_sane_bwd_triton_call(
+    r, w, k, v, a, b, sa, state_chkp, tau, dy, dht, chunk_size: int
+):
     B, N, T, H = r.shape
     dtype = r.dtype
 
@@ -223,7 +223,7 @@ def _wkv7_sane_bwd_triton_call(r, w, k, v, a, b, sa, state_chkp, tau, dy, dht):
         jax.ShapeDtypeStruct((B, N, T, H), dtype),  # DV
         jax.ShapeDtypeStruct((B, N, T, H), dtype),  # DA
         jax.ShapeDtypeStruct((B, N, T, H), dtype),  # DB
-        jax.ShapeDtypeStruct((B, N, T // CHUNK_LEN), jnp.float32),  # DTAU
+        jax.ShapeDtypeStruct((B, N, T // chunk_size), jnp.float32),  # DTAU
         jax.ShapeDtypeStruct((B, N, H, H), jnp.float32),  # DH0
     ]
 
@@ -249,14 +249,18 @@ def _wkv7_sane_bwd_triton_call(r, w, k, v, a, b, sa, state_chkp, tau, dy, dht):
         out_shape=out_shapes,
         grid=grid,
         H_SIZE=H,
-        CHUNK_LEN=CHUNK_LEN,
+        CHUNK_LEN=chunk_size,
     )
     return dr, dw, dk, dv, da, db, dtau, dh0
 
 
 @custom_partitioning
-def _wkv7_sane_bwd_spmd(r, w, k, v, a, b, sa, state_chkp, tau, dy, dht):
-    return _wkv7_sane_bwd_triton_call(r, w, k, v, a, b, sa, state_chkp, tau, dy, dht)
+def _wkv7_sane_bwd_spmd(
+    r, w, k, v, a, b, sa, state_chkp, tau, dy, dht, chunk_size: int
+):
+    return _wkv7_sane_bwd_triton_call(
+        r, w, k, v, a, b, sa, state_chkp, tau, dy, dht, chunk_size
+    )
 
 
 _wkv7_sane_bwd_spmd.def_partition(
@@ -267,21 +271,21 @@ _wkv7_sane_bwd_spmd.def_partition(
 
 
 @jax.custom_vjp
-def rwkv7_sane_kernel_triton(r, w, k, v, a, b, tau, h0):
+def rwkv7_sane_kernel_triton(r, w, k, v, a, b, tau, h0, chunk_size: int):
     """无 mask JAX-Triton 训练 kernel 公开入口。"""
     out, sa_out, state_chkp = _wkv7_sane_fwd_spmd(r, w, k, v, a, b, tau, h0)
     final_state = _apply_sane_to_final_state(state_chkp[:, :, -1, :, :], tau)
     return out, final_state
 
 
-def _fwd(r, w, k, v, a, b, tau, h0):
-    out, sa_out, state_chkp = _wkv7_sane_fwd_spmd(r, w, k, v, a, b, tau, h0)
+def _fwd(r, w, k, v, a, b, tau, h0, chunk_size: int):
+    out, sa_out, state_chkp = _wkv7_sane_fwd_spmd(r, w, k, v, a, b, tau, h0, chunk_size)
     final_state = _apply_sane_to_final_state(state_chkp[:, :, -1, :, :], tau)
-    return (out, final_state), (r, w, k, v, a, b, tau, sa_out, state_chkp)
+    return (out, final_state), (r, w, k, v, a, b, tau, sa_out, state_chkp, chunk_size)
 
 
 def _bwd(res, grads):
-    r, w, k, v, a, b, tau, sa_out, state_chkp = res
+    r, w, k, v, a, b, tau, sa_out, state_chkp, chunk_size = res
     dy, dht = grads
     dy = jnp.asarray(dy, jnp.bfloat16)
     if dht is None:
@@ -291,7 +295,7 @@ def _bwd(res, grads):
         dht = jnp.asarray(dht, jnp.float32)
 
     dr, dw, dk, dv, da, db, dtau, dh0 = _wkv7_sane_bwd_spmd(
-        r, w, k, v, a, b, sa_out, state_chkp, tau, dy, dht
+        r, w, k, v, a, b, sa_out, state_chkp, tau, dy, dht, chunk_size
     )
     return dr, dw, dk, dv, da, db, dtau, dh0
 
@@ -300,10 +304,12 @@ rwkv7_sane_kernel_triton.defvjp(_fwd, _bwd)
 
 
 #  带 mask 的 JAX-Triton launcher
-def _wkv7_sane_fwd_with_mask_triton_call(r, w, k, v, a, b, tau, mask, h0):
+def _wkv7_sane_fwd_with_mask_triton_call(
+    r, w, k, v, a, b, tau, mask, h0, chunk_size: int
+):
     B, N, T, H = r.shape
     dtype = r.dtype
-    chunk_num = T // CHUNK_LEN
+    chunk_num = T // chunk_size
 
     out_shapes = [
         jax.ShapeDtypeStruct((B, N, T, H), dtype),
@@ -331,14 +337,16 @@ def _wkv7_sane_fwd_with_mask_triton_call(r, w, k, v, a, b, tau, mask, h0):
         out_shape=out_shapes,
         grid=grid,
         H_SIZE=H,
-        CHUNK_LEN=CHUNK_LEN,
+        CHUNK_LEN=chunk_size,
     )
     return out, sa_out, state_chkp
 
 
 @custom_partitioning
-def _wkv7_sane_fwd_with_mask_spmd(r, w, k, v, a, b, tau, mask, h0):
-    return _wkv7_sane_fwd_with_mask_triton_call(r, w, k, v, a, b, tau, mask, h0)
+def _wkv7_sane_fwd_with_mask_spmd(r, w, k, v, a, b, tau, mask, h0, chunk_size: int):
+    return _wkv7_sane_fwd_with_mask_triton_call(
+        r, w, k, v, a, b, tau, mask, h0, chunk_size
+    )
 
 
 _wkv7_sane_fwd_with_mask_spmd.def_partition(
@@ -349,7 +357,7 @@ _wkv7_sane_fwd_with_mask_spmd.def_partition(
 
 
 def _wkv7_sane_bwd_with_mask_triton_call(
-    r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht
+    r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht, chunk_size: int
 ):
     B, N, T, H = r.shape
     dtype = r.dtype
@@ -361,7 +369,7 @@ def _wkv7_sane_bwd_with_mask_triton_call(
         jax.ShapeDtypeStruct((B, N, T, H), dtype),  # DV
         jax.ShapeDtypeStruct((B, N, T, H), dtype),  # DA
         jax.ShapeDtypeStruct((B, N, T, H), dtype),  # DB
-        jax.ShapeDtypeStruct((B, N, T // CHUNK_LEN), jnp.float32),  # DTAU
+        jax.ShapeDtypeStruct((B, N, T // chunk_size), jnp.float32),  # DTAU
         jax.ShapeDtypeStruct((B, N, H, H), jnp.float32),  # DH0
     ]
 
@@ -388,15 +396,17 @@ def _wkv7_sane_bwd_with_mask_triton_call(
         out_shape=out_shapes,
         grid=grid,
         H_SIZE=H,
-        CHUNK_LEN=CHUNK_LEN,
+        CHUNK_LEN=chunk_size,
     )
     return dr, dw, dk, dv, da, db, dtau, dh0
 
 
 @custom_partitioning
-def _wkv7_sane_bwd_with_mask_spmd(r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht):
+def _wkv7_sane_bwd_with_mask_spmd(
+    r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht, chunk_size: int
+):
     return _wkv7_sane_bwd_with_mask_triton_call(
-        r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht
+        r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht, chunk_size
     )
 
 
@@ -408,7 +418,9 @@ _wkv7_sane_bwd_with_mask_spmd.def_partition(
 
 
 @jax.custom_vjp
-def rwkv7_sane_kernel_with_mask_triton(r, w, k, v, a, b, tau, mask, h0):
+def rwkv7_sane_kernel_with_mask_triton(
+    r, w, k, v, a, b, tau, mask, h0, chunk_size: int
+):
     """带 mask JAX-Triton 训练 kernel 公开入口。"""
     out, sa_out, state_chkp = _wkv7_sane_fwd_with_mask_spmd(
         r, w, k, v, a, b, tau, mask, h0
@@ -417,16 +429,28 @@ def rwkv7_sane_kernel_with_mask_triton(r, w, k, v, a, b, tau, mask, h0):
     return out, final_state
 
 
-def _fwd_with_mask(r, w, k, v, a, b, tau, mask, h0):
+def _fwd_with_mask(r, w, k, v, a, b, tau, mask, h0, chunk_size: int):
     out, sa_out, state_chkp = _wkv7_sane_fwd_with_mask_spmd(
-        r, w, k, v, a, b, tau, mask, h0
+        r, w, k, v, a, b, tau, mask, h0, chunk_size
     )
     final_state = _apply_sane_to_final_state(state_chkp[:, :, -1, :, :], tau, mask=mask)
-    return (out, final_state), (r, w, k, v, a, b, tau, mask, sa_out, state_chkp)
+    return (out, final_state), (
+        r,
+        w,
+        k,
+        v,
+        a,
+        b,
+        tau,
+        mask,
+        sa_out,
+        state_chkp,
+        chunk_size,
+    )
 
 
 def _bwd_with_mask(res, grads):
-    r, w, k, v, a, b, tau, mask, sa_out, state_chkp = res
+    r, w, k, v, a, b, tau, mask, sa_out, state_chkp, chunk_size = res
     dy, dht = grads
     dy = jnp.asarray(dy, jnp.bfloat16)
     if dht is None:
@@ -436,7 +460,7 @@ def _bwd_with_mask(res, grads):
         dht = jnp.asarray(dht, jnp.float32)
 
     dr, dw, dk, dv, da, db, dtau, dh0 = _wkv7_sane_bwd_with_mask_spmd(
-        r, w, k, v, a, b, sa_out, state_chkp, tau, mask, dy, dht
+        r, w, k, v, a, b, sa_out, state_chkp, tau, mask, dy, dht, chunk_size
     )
     return dr, dw, dk, dv, da, db, dtau, None, dh0
 
@@ -457,6 +481,7 @@ def generalized_delta_rule_sane(
     initial_state: Optional[jnp.ndarray] = None,
     output_final_state: bool = True,
     head_first: bool = False,
+    chunk_size: int = 16,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
     """带 State Anomaly Neutralization 的 RWKV-7 广义 delta 规则（JAX-Triton chunkwise 训练版）。
 
@@ -489,14 +514,14 @@ def generalized_delta_rule_sane(
     tau = _transpose_tau(tau)
 
     B, N, T, H = r.shape
-    if T % CHUNK_LEN != 0:
+    if T % chunk_size != 0:
         raise ValueError(
-            f"Triton SANE kernel requires sequence length T={T} to be divisible by {CHUNK_LEN}"
+            f"Triton SANE kernel requires sequence length T={T} to be divisible by {chunk_size}"
         )
 
-    if tau.shape != (B, N, T // CHUNK_LEN):
+    if tau.shape != (B, N, T // chunk_size):
         raise ValueError(
-            f"tau shape {tau.shape} does not match expected (B={B}, N={N}, T//16={T // CHUNK_LEN})"
+            f"tau shape {tau.shape} does not match expected (B={B}, N={N}, T//16={T // chunk_size})"
         )
 
     if initial_state is None:
@@ -508,12 +533,12 @@ def generalized_delta_rule_sane(
 
     if use_mask:
         mask = jnp.asarray(mask, dtype=jnp.float32)
-        if mask.shape != (B, T // CHUNK_LEN):
+        if mask.shape != (B, T // chunk_size):
             raise ValueError(
-                f"mask shape {mask.shape} must match (B, T//16) = ({B}, {T // CHUNK_LEN})"
+                f"mask shape {mask.shape} must match (B, T//16) = ({B}, {T // chunk_size})"
             )
         out, last_state = rwkv7_sane_kernel_with_mask_triton(
-            r, w, k, v, a, b, tau, mask, h0
+            r, w, k, v, a, b, tau, mask, h0, chunk_size
         )
         out = jnp.transpose(out, (0, 2, 1, 3))
         out = jnp.asarray(out, dtype)

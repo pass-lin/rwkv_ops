@@ -13,9 +13,12 @@ from typing import Optional, Tuple, Union
 from jax.experimental.custom_partitioning import custom_partitioning
 from jax.sharding import NamedSharding, PartitionSpec
 
-CHUNK_LEN = 16
 _CURRENT_DIR = pathlib.Path(__file__).parent.absolute()
 _NVCC_WRAPPER = _CURRENT_DIR.parents[1] / "cuda_tools" / "nvcc_wrap"
+
+# 按 (HEAD_SIZE, chunk_size) 缓存已编译的 CUDA 库，避免重复注册 FFI target。
+_COMPILED_LIBS: dict[tuple[int, int], ctypes.CDLL] = {}
+_REGISTERED_FFI_TARGETS: set[str] = set()
 
 FWD_RULE = (
     "b t h k, b t h k, b t h k, b t h k, b t h k, b t h k, b c h, b c, b h k v -> "
@@ -129,8 +132,8 @@ def _create_partition(impl_fn):
     return partition
 
 
-def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
-    _BUILD_DIR = _CURRENT_DIR / f"build_{HEAD_SIZE}"
+def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64, chunk_size: int = 16):
+    _BUILD_DIR = _CURRENT_DIR / f"build_{HEAD_SIZE}_{chunk_size}"
     _SO_PATH = _BUILD_DIR / "wkv7_sane.so"
 
     def _ensure_compiled() -> pathlib.Path:
@@ -156,7 +159,7 @@ def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
             "-res-usage",
             "--extra-device-vectorization",
             f"-D_C_={HEAD_SIZE}",
-            f"-D_CHUNK_LEN_={CHUNK_LEN}",
+            f"-D_CHUNK_LEN_={chunk_size}",
         ]
 
         cmake_args = [
@@ -181,34 +184,54 @@ def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
         print("[rwkv7_sane_jax] Compilation finished – output at", _SO_PATH)
         return _SO_PATH
 
-    _lib = ctypes.CDLL(_ensure_compiled())
+    _lib_key = (HEAD_SIZE, chunk_size)
+    if _lib_key not in _COMPILED_LIBS:
+        _COMPILED_LIBS[_lib_key] = ctypes.CDLL(_ensure_compiled())
+    _lib = _COMPILED_LIBS[_lib_key]
 
-    jax.ffi.register_ffi_target(
-        "wkv7_sane_fwd", jax.ffi.pycapsule(_lib.Wkv7SaneFwd), platform="CUDA"
+    _fwd_name = f"wkv7_sane_fwd_{HEAD_SIZE}_{chunk_size}"
+    _bwd_name = f"wkv7_sane_bwd_{HEAD_SIZE}_{chunk_size}"
+    _inf_name = f"wkv7_sane_inference_{HEAD_SIZE}_{chunk_size}"
+    _fwd_no_mask_name = f"wkv7_sane_fwd_no_mask_{HEAD_SIZE}_{chunk_size}"
+    _bwd_no_mask_name = f"wkv7_sane_bwd_no_mask_{HEAD_SIZE}_{chunk_size}"
+    _inf_no_mask_name = f"wkv7_sane_inference_no_mask_{HEAD_SIZE}_{chunk_size}"
+
+    _names = (
+        _fwd_name,
+        _bwd_name,
+        _inf_name,
+        _fwd_no_mask_name,
+        _bwd_no_mask_name,
+        _inf_no_mask_name,
     )
-    jax.ffi.register_ffi_target(
-        "wkv7_sane_bwd", jax.ffi.pycapsule(_lib.Wkv7SaneBwd), platform="CUDA"
-    )
-    jax.ffi.register_ffi_target(
-        "wkv7_sane_inference",
-        jax.ffi.pycapsule(_lib.Wkv7SaneInference),
-        platform="CUDA",
-    )
-    jax.ffi.register_ffi_target(
-        "wkv7_sane_fwd_no_mask",
-        jax.ffi.pycapsule(_lib.Wkv7SaneFwdNoMask),
-        platform="CUDA",
-    )
-    jax.ffi.register_ffi_target(
-        "wkv7_sane_bwd_no_mask",
-        jax.ffi.pycapsule(_lib.Wkv7SaneBwdNoMask),
-        platform="CUDA",
-    )
-    jax.ffi.register_ffi_target(
-        "wkv7_sane_inference_no_mask",
-        jax.ffi.pycapsule(_lib.Wkv7SaneInferenceNoMask),
-        platform="CUDA",
-    )
+    if _fwd_name not in _REGISTERED_FFI_TARGETS:
+        jax.ffi.register_ffi_target(
+            _fwd_name, jax.ffi.pycapsule(_lib.Wkv7SaneFwd), platform="CUDA"
+        )
+        jax.ffi.register_ffi_target(
+            _bwd_name, jax.ffi.pycapsule(_lib.Wkv7SaneBwd), platform="CUDA"
+        )
+        jax.ffi.register_ffi_target(
+            _inf_name,
+            jax.ffi.pycapsule(_lib.Wkv7SaneInference),
+            platform="CUDA",
+        )
+        jax.ffi.register_ffi_target(
+            _fwd_no_mask_name,
+            jax.ffi.pycapsule(_lib.Wkv7SaneFwdNoMask),
+            platform="CUDA",
+        )
+        jax.ffi.register_ffi_target(
+            _bwd_no_mask_name,
+            jax.ffi.pycapsule(_lib.Wkv7SaneBwdNoMask),
+            platform="CUDA",
+        )
+        jax.ffi.register_ffi_target(
+            _inf_no_mask_name,
+            jax.ffi.pycapsule(_lib.Wkv7SaneInferenceNoMask),
+            platform="CUDA",
+        )
+        _REGISTERED_FFI_TARGETS.update(_names)
 
     def _transpose_head(x: jnp.ndarray, head_first: bool) -> jnp.ndarray:
         x = jnp.asarray(x, dtype=jnp.bfloat16)
@@ -220,13 +243,13 @@ def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
     def _wkv7_sane_kernel_impl(w, q, k, v, a, b, tau, mask, h0):
         B, T, H, K = q.shape
         dtype = q.dtype
-        chunk_num = int(T // CHUNK_LEN)
+        chunk_num = int(T // chunk_size)
         out_type = jax.ShapeDtypeStruct((B, T, H, K), dtype)
         s_type = jax.ShapeDtypeStruct((B, H, chunk_num, K, K), jnp.float32)
         sa_type = jax.ShapeDtypeStruct((B, T, H, K), jnp.float32)
 
         return jax.ffi.ffi_call(
-            "wkv7_sane_fwd", (out_type, s_type, sa_type), vmap_method="broadcast_all"
+            _fwd_name, (out_type, s_type, sa_type), vmap_method="broadcast_all"
         )(w, q, k, v, a, b, tau, mask, h0)
 
     @custom_partitioning
@@ -243,13 +266,13 @@ def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
     def _wkv7_sane_kernel_no_mask_impl(w, q, k, v, a, b, tau, h0):
         B, T, H, K = q.shape
         dtype = q.dtype
-        chunk_num = int(T // CHUNK_LEN)
+        chunk_num = int(T // chunk_size)
         out_type = jax.ShapeDtypeStruct((B, T, H, K), dtype)
         s_type = jax.ShapeDtypeStruct((B, H, chunk_num, K, K), jnp.float32)
         sa_type = jax.ShapeDtypeStruct((B, T, H, K), jnp.float32)
 
         return jax.ffi.ffi_call(
-            "wkv7_sane_fwd_no_mask",
+            _fwd_no_mask_name,
             (out_type, s_type, sa_type),
             vmap_method="broadcast_all",
         )(w, q, k, v, a, b, tau, h0)
@@ -311,7 +334,7 @@ def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
         db_type = jax.ShapeDtypeStruct(b.shape, b.dtype)
 
         dh0, dtau, dw, dq, dk, dv, da, db = jax.ffi.ffi_call(
-            "wkv7_sane_bwd",
+            _bwd_name,
             (dh0_type, dtau_type, dw_type, dq_type, dk_type, dv_type, da_type, db_type),
             vmap_method="broadcast_all",
         )(w, q, k, v, a, b, tau, mask, dy, s, sa, dht)
@@ -360,7 +383,7 @@ def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
         db_type = jax.ShapeDtypeStruct(b.shape, b.dtype)
 
         dh0, dtau, dw, dq, dk, dv, da, db = jax.ffi.ffi_call(
-            "wkv7_sane_bwd_no_mask",
+            _bwd_no_mask_name,
             (dh0_type, dtau_type, dw_type, dq_type, dk_type, dv_type, da_type, db_type),
             vmap_method="broadcast_all",
         )(w, q, k, v, a, b, tau, dy, s, sa, dht)
@@ -395,7 +418,7 @@ def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
         s_type = jax.ShapeDtypeStruct((B, H, K, K), jnp.float32)
 
         y, s = jax.ffi.ffi_call(
-            "wkv7_sane_inference", (out_type, s_type), vmap_method="broadcast_all"
+            _inf_name, (out_type, s_type), vmap_method="broadcast_all"
         )(w, q, k, v, a, b, tau, mask, h0)
         return y, s
 
@@ -417,7 +440,7 @@ def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
         s_type = jax.ShapeDtypeStruct((B, H, K, K), jnp.float32)
 
         y, s = jax.ffi.ffi_call(
-            "wkv7_sane_inference_no_mask",
+            _inf_no_mask_name,
             (out_type, s_type),
             vmap_method="broadcast_all",
         )(w, q, k, v, a, b, tau, h0)
@@ -433,6 +456,8 @@ def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
         partition=_create_partition(_wkv7_sane_inference_kernel_no_mask_impl),
     )
 
+    _compiled_chunk_size = chunk_size
+
     # 公共 API
     def generalized_delta_rule_sane(
         r: jnp.ndarray,
@@ -446,6 +471,7 @@ def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
         initial_state: Optional[jnp.ndarray] = None,
         output_final_state: bool = True,
         head_first: bool = False,
+        chunk_size: int = _compiled_chunk_size,
     ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
         """带 State Anomaly Neutralization 的 RWKV-7 广义 delta 规则（训练版）。
 
@@ -468,6 +494,12 @@ def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
         Raises:
             ValueError: T 不被 16 整除，或 tau/mask 形状不匹配。
         """
+        if chunk_size != _compiled_chunk_size:
+            raise ValueError(
+                f"CUDA kernel was compiled for chunk_size={_compiled_chunk_size}, "
+                f"got {chunk_size}"
+            )
+
         dtype = r.dtype
         r = _transpose_head(r, head_first)
         w = _transpose_head(w, head_first)
@@ -477,13 +509,13 @@ def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
         b = _transpose_head(b, head_first)
         tau = jnp.asarray(tau, jnp.float32)
         B, T, H, K = r.shape
-        if T % CHUNK_LEN:
+        if T % chunk_size:
             raise ValueError(
-                f"Sequence length T={T} must be divisible by chunk_len={CHUNK_LEN}"
+                f"Sequence length T={T} must be divisible by chunk_len={chunk_size}"
             )
-        if tau.shape != (B, T // CHUNK_LEN, H):
+        if tau.shape != (B, T // chunk_size, H):
             raise ValueError(
-                f"tau shape {tau.shape} does not match expected (B={B}, T//16={T // CHUNK_LEN}, H={H})"
+                f"tau shape {tau.shape} does not match expected (B={B}, T//16={T // chunk_size}, H={H})"
             )
 
         if initial_state is None:
@@ -496,9 +528,9 @@ def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
 
         if use_mask:
             mask = jnp.asarray(mask, jnp.float32)
-            if mask.shape != (B, T // CHUNK_LEN):
+            if mask.shape != (B, T // chunk_size):
                 raise ValueError(
-                    f"mask shape {mask.shape} must match (B, T//16) = ({B}, {T // CHUNK_LEN})"
+                    f"mask shape {mask.shape} must match (B, T//16) = ({B}, {T // chunk_size})"
                 )
             out, last_state = wk7_sane_kernel(w, r, k, v, a, b, tau, mask, h0)
             out = jnp.asarray(out, dtype)
@@ -536,6 +568,7 @@ def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
         initial_state: Optional[jnp.ndarray] = None,
         output_final_state: bool = True,
         head_first: bool = False,
+        chunk_size: int = _compiled_chunk_size,
     ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
         """带 State Anomaly Neutralization 的 RWKV-7 推理入口（无梯度）。
 
@@ -558,6 +591,12 @@ def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
         Raises:
             ValueError: tau/mask 形状不匹配。
         """
+        if chunk_size != _compiled_chunk_size:
+            raise ValueError(
+                f"CUDA kernel was compiled for chunk_size={_compiled_chunk_size}, "
+                f"got {chunk_size}"
+            )
+
         dtype = r.dtype
         r = _transpose_head(r, head_first)
         w = _transpose_head(w, head_first)
@@ -568,9 +607,9 @@ def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
         tau = jnp.asarray(tau, jnp.float32)
 
         B, T, H, K = r.shape
-        if tau.shape != (B, T // CHUNK_LEN, H):
+        if tau.shape != (B, T // chunk_size, H):
             raise ValueError(
-                f"tau shape {tau.shape} does not match expected (B={B}, T//16={T // CHUNK_LEN}, H={H})"
+                f"tau shape {tau.shape} does not match expected (B={B}, T//16={T // chunk_size}, H={H})"
             )
 
         if initial_state is None:
@@ -582,9 +621,9 @@ def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
 
         if use_mask:
             mask = jnp.asarray(mask, jnp.float32)
-            if mask.shape != (B, T // CHUNK_LEN):
+            if mask.shape != (B, T // chunk_size):
                 raise ValueError(
-                    f"mask shape {mask.shape} must match (B, T//16) = ({B}, {T // CHUNK_LEN})"
+                    f"mask shape {mask.shape} must match (B, T//16) = ({B}, {T // chunk_size})"
                 )
             out, final_state = _wkv7_sane_inference_kernel(
                 w, r, k, v, a, b, tau, mask, h0

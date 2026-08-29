@@ -379,6 +379,7 @@ def gated_delta_net_recurrent_sane_single_step(
     initial_state=None,
     output_final_state=True,
     head_first=False,
+    chunk_size: int = 16,
 ):
     """Gated DeltaNet recurrent SANE 单步 RNN 原生实现。
 
@@ -393,6 +394,7 @@ def gated_delta_net_recurrent_sane_single_step(
         initial_state: [B, H, K, V] 或 [1, H, K, V]，float32，可选。
         output_final_state: bool，是否返回 next state。
         head_first: bool，输入输出是否 head 维优先（单步下无时间维，此参数保留为兼容）。
+        chunk_size: int，chunk 长度，仅用于签名一致，单步实现忽略该参数。
 
     Returns:
         out: [B, H, V]，与 v 同 dtype。

@@ -13,7 +13,6 @@ from jax.sharding import NamedSharding, PartitionSpec
 
 from ..pallas_utils import create_partition, ensure_config, launch
 
-CHUNK_LEN = 16
 
 #  SPMD 切分规则（Einsum 风格）
 # b=Batch, n=Head, t=Time, h=HeadDim, c=Chunk
@@ -114,9 +113,8 @@ def _transpose_head(x: jnp.ndarray, head_first: bool) -> jnp.ndarray:
 
 
 def _transpose_tau(tau: jnp.ndarray) -> jnp.ndarray:
-    """tau 公共接口始终为 [B, T//16, N]；需要转成 head-first [B, N, T//16]。"""
+    """tau 公共接口始终为 [B, T//chunk_size, N]；需要转成 head-first [B, N, T//chunk_size]。"""
     tau = jnp.asarray(tau, dtype=jnp.float32)
-    # [B, T//16, N] -> [B, N, T//16]
     return jnp.transpose(tau, (0, 2, 1))
 
 
@@ -144,311 +142,310 @@ def _apply_sane_to_final_state(
     return jnp.where(last_mask > 0, sane_state, state)
 
 
-#  Pallas kernel 本体（纯公开 API）
-def _rwkv7_sane_fwd_kernel(
-    r_ref,
-    w_ref,
-    k_ref,
-    v_ref,
-    a_ref,
-    b_ref,
-    tau_ref,
-    h0_ref,
-    o_ref,
-    sa_ref,
-    chkp_ref,
-):
-    """无 mask 前向 Pallas kernel。
+def _make_rwkv7_sane_fwd_kernel(chunk_size: int):
+    def _rwkv7_sane_fwd_kernel(
+        r_ref,
+        w_ref,
+        k_ref,
+        v_ref,
+        a_ref,
+        b_ref,
+        tau_ref,
+        h0_ref,
+        o_ref,
+        sa_ref,
+        chkp_ref,
+    ):
+        b = pl.program_id(0)
+        h = pl.program_id(1)
+        num_chunks = r_ref.shape[2] // chunk_size
 
-    grid 为 (B, N)，每个 program 处理一个 (batch, head)。
-    chunk 内静态展开 16 步，chunk 边界无条件执行 SANE。
-    """
-    b = pl.program_id(0)
-    h = pl.program_id(1)
-    num_chunks = r_ref.shape[2] // CHUNK_LEN
+        state = h0_ref[b, h].astype(jnp.float32)
 
-    state = h0_ref[b, h].astype(jnp.float32)
+        def chunk_body(c, state):
+            for j in range(chunk_size):
+                t = c * chunk_size + j
+                rv = r_ref[b, h, t, :].astype(jnp.float32)
+                wv = w_ref[b, h, t, :].astype(jnp.float32)
+                kv = k_ref[b, h, t, :].astype(jnp.float32)
+                vv = v_ref[b, h, t, :].astype(jnp.float32)
+                av = a_ref[b, h, t, :].astype(jnp.float32)
+                bv = b_ref[b, h, t, :].astype(jnp.float32)
 
-    def chunk_body(c, state):
-        for j in range(CHUNK_LEN):
-            t = c * CHUNK_LEN + j
-            rv = r_ref[b, h, t, :].astype(jnp.float32)
-            wv = w_ref[b, h, t, :].astype(jnp.float32)
-            kv = k_ref[b, h, t, :].astype(jnp.float32)
-            vv = v_ref[b, h, t, :].astype(jnp.float32)
-            av = a_ref[b, h, t, :].astype(jnp.float32)
-            bv = b_ref[b, h, t, :].astype(jnp.float32)
+                w_decay = jnp.exp(-jnp.exp(wv))
+                sa_vec = jnp.sum(state * av[None, :], axis=1)
+                sa_ref[b, h, t, :] = sa_vec
 
-            w_decay = jnp.exp(-jnp.exp(wv))
-            sa_vec = jnp.sum(state * av[None, :], axis=1)
-            sa_ref[b, h, t, :] = sa_vec
+                state = (
+                    state * w_decay[None, :]
+                    + sa_vec[:, None] * bv[None, :]
+                    + vv[:, None] * kv[None, :]
+                )
 
-            state = (
-                state * w_decay[None, :]
-                + sa_vec[:, None] * bv[None, :]
-                + vv[:, None] * kv[None, :]
-            )
+                y_vec = jnp.sum(state * rv[None, :], axis=1)
+                o_ref[b, h, t, :] = y_vec.astype(o_ref.dtype)
 
-            y_vec = jnp.sum(state * rv[None, :], axis=1)
-            o_ref[b, h, t, :] = y_vec.astype(o_ref.dtype)
+            # checkpoint 保存 SANE 之前的 state 供反向使用。
+            chkp_ref[b, h, c] = state
+            tau_v = tau_ref[b, h, c].astype(jnp.float32)
+            tau_safe = jnp.maximum(tau_v, 1e-6)
+            state = tau_safe * jnp.tanh(state / tau_safe)
+            return state
 
-        # checkpoint 保存 SANE 之前的 state 供反向使用。
-        chkp_ref[b, h, c] = state
-        tau_v = tau_ref[b, h, c].astype(jnp.float32)
-        tau_safe = jnp.maximum(tau_v, 1e-6)
-        state = tau_safe * jnp.tanh(state / tau_safe)
-        return state
+        jax.lax.fori_loop(0, num_chunks, chunk_body, state)
 
-    jax.lax.fori_loop(0, num_chunks, chunk_body, state)
+    return _rwkv7_sane_fwd_kernel
 
 
-def _rwkv7_sane_fwd_kernel_with_mask(
-    r_ref,
-    w_ref,
-    k_ref,
-    v_ref,
-    a_ref,
-    b_ref,
-    tau_ref,
-    mask_ref,
-    h0_ref,
-    o_ref,
-    sa_ref,
-    chkp_ref,
-):
-    """带 mask 前向 Pallas kernel。
+def _make_rwkv7_sane_fwd_kernel_with_mask(chunk_size: int):
+    def _rwkv7_sane_fwd_kernel_with_mask(
+        r_ref,
+        w_ref,
+        k_ref,
+        v_ref,
+        a_ref,
+        b_ref,
+        tau_ref,
+        mask_ref,
+        h0_ref,
+        o_ref,
+        sa_ref,
+        chkp_ref,
+    ):
+        b = pl.program_id(0)
+        h = pl.program_id(1)
+        num_chunks = r_ref.shape[2] // chunk_size
 
-    与无 mask 版本相同，但按 mask 选择是否执行 SANE。
-    """
-    b = pl.program_id(0)
-    h = pl.program_id(1)
-    num_chunks = r_ref.shape[2] // CHUNK_LEN
+        state = h0_ref[b, h].astype(jnp.float32)
 
-    state = h0_ref[b, h].astype(jnp.float32)
+        def chunk_body(c, state):
+            for j in range(chunk_size):
+                t = c * chunk_size + j
+                rv = r_ref[b, h, t, :].astype(jnp.float32)
+                wv = w_ref[b, h, t, :].astype(jnp.float32)
+                kv = k_ref[b, h, t, :].astype(jnp.float32)
+                vv = v_ref[b, h, t, :].astype(jnp.float32)
+                av = a_ref[b, h, t, :].astype(jnp.float32)
+                bv = b_ref[b, h, t, :].astype(jnp.float32)
 
-    def chunk_body(c, state):
-        for j in range(CHUNK_LEN):
-            t = c * CHUNK_LEN + j
-            rv = r_ref[b, h, t, :].astype(jnp.float32)
-            wv = w_ref[b, h, t, :].astype(jnp.float32)
-            kv = k_ref[b, h, t, :].astype(jnp.float32)
-            vv = v_ref[b, h, t, :].astype(jnp.float32)
-            av = a_ref[b, h, t, :].astype(jnp.float32)
-            bv = b_ref[b, h, t, :].astype(jnp.float32)
+                w_decay = jnp.exp(-jnp.exp(wv))
+                sa_vec = jnp.sum(state * av[None, :], axis=1)
+                sa_ref[b, h, t, :] = sa_vec
 
-            w_decay = jnp.exp(-jnp.exp(wv))
-            sa_vec = jnp.sum(state * av[None, :], axis=1)
-            sa_ref[b, h, t, :] = sa_vec
+                state = (
+                    state * w_decay[None, :]
+                    + sa_vec[:, None] * bv[None, :]
+                    + vv[:, None] * kv[None, :]
+                )
 
-            state = (
-                state * w_decay[None, :]
-                + sa_vec[:, None] * bv[None, :]
-                + vv[:, None] * kv[None, :]
-            )
+                y_vec = jnp.sum(state * rv[None, :], axis=1)
+                o_ref[b, h, t, :] = y_vec.astype(o_ref.dtype)
 
-            y_vec = jnp.sum(state * rv[None, :], axis=1)
-            o_ref[b, h, t, :] = y_vec.astype(o_ref.dtype)
+            # checkpoint 保存 SANE 之前的 state 供反向使用。
+            chkp_ref[b, h, c] = state
+            tau_v = tau_ref[b, h, c].astype(jnp.float32)
+            tau_safe = jnp.maximum(tau_v, 1e-6)
+            sane_state = tau_safe * jnp.tanh(state / tau_safe)
+            m = mask_ref[b, c].astype(jnp.float32)
+            state = state * (1.0 - m) + sane_state * m
+            return state
 
-        # checkpoint 保存 SANE 之前的 state 供反向使用。
-        chkp_ref[b, h, c] = state
-        tau_v = tau_ref[b, h, c].astype(jnp.float32)
-        tau_safe = jnp.maximum(tau_v, 1e-6)
-        sane_state = tau_safe * jnp.tanh(state / tau_safe)
-        m = mask_ref[b, c].astype(jnp.float32)
-        state = state * (1.0 - m) + sane_state * m
-        return state
+        jax.lax.fori_loop(0, num_chunks, chunk_body, state)
 
-    jax.lax.fori_loop(0, num_chunks, chunk_body, state)
-
-
-def _rwkv7_sane_bwd_kernel(
-    r_ref,
-    w_ref,
-    k_ref,
-    v_ref,
-    a_ref,
-    b_ref,
-    sa_ref,
-    chkp_ref,
-    tau_ref,
-    dy_ref,
-    dht_ref,
-    dr_ref,
-    dw_ref,
-    dk_ref,
-    dv_ref,
-    da_ref,
-    db_ref,
-    dtau_ref,
-    dh0_ref,
-):
-    """无 mask 反向 Pallas kernel。"""
-    b = pl.program_id(0)
-    h = pl.program_id(1)
-    num_chunks = r_ref.shape[2] // CHUNK_LEN
-
-    dS = dht_ref[b, h].astype(jnp.float32)
-
-    def chunk_body(c_rev, dS):
-        c = num_chunks - 1 - c_rev
-        # chkp 保存的是 SANE 之前的 state。
-        S_t = chkp_ref[b, h, c].astype(jnp.float32)
-
-        # 先对下游梯度 dS 应用 SANE 导数。
-        tau_v = tau_ref[b, h, c].astype(jnp.float32)
-        tau_safe = jnp.maximum(tau_v, 1e-6)
-        u = S_t / tau_safe
-        tnh = jnp.tanh(u)
-        sech2 = 1.0 - tnh * tnh
-        dtau_local = jnp.sum(dS * (tnh - u * sech2))
-        dS = dS * sech2
-        dtau_ref[b, h, c] = dtau_local
-
-        for j in range(CHUNK_LEN - 1, -1, -1):
-            t = c * CHUNK_LEN + j
-            rv = r_ref[b, h, t, :].astype(jnp.float32)
-            wv = w_ref[b, h, t, :].astype(jnp.float32)
-            kv = k_ref[b, h, t, :].astype(jnp.float32)
-            vv = v_ref[b, h, t, :].astype(jnp.float32)
-            av = a_ref[b, h, t, :].astype(jnp.float32)
-            bv = b_ref[b, h, t, :].astype(jnp.float32)
-            dyv = dy_ref[b, h, t, :].astype(jnp.float32)
-            sav = sa_ref[b, h, t, :].astype(jnp.float32)
-
-            w_decay = jnp.exp(-jnp.exp(wv))
-            w_grad_factor = w_decay * (-jnp.exp(wv))
-
-            dr = jnp.sum(S_t * dyv[:, None], axis=0)
-            dr_ref[b, h, t, :] = dr.astype(dr_ref.dtype)
-
-            inv_w = 1.0 / (w_decay + 1e-6)
-            S_t = (
-                S_t - vv[:, None] * kv[None, :] - sav[:, None] * bv[None, :]
-            ) * inv_w[None, :]
-
-            dS = dS + dyv[:, None] * rv[None, :]
-
-            dw = jnp.sum(dS * S_t, axis=0) * w_grad_factor
-            dk = jnp.sum(dS * vv[:, None], axis=0)
-            dv = jnp.sum(dS * kv[None, :], axis=1)
-            db = jnp.sum(dS * sav[:, None], axis=0)
-            dsa = jnp.sum(dS * bv[None, :], axis=1)
-            da = jnp.sum(S_t * dsa[:, None], axis=0)
-
-            dw_ref[b, h, t, :] = dw.astype(dw_ref.dtype)
-            dk_ref[b, h, t, :] = dk.astype(dk_ref.dtype)
-            dv_ref[b, h, t, :] = dv.astype(dv_ref.dtype)
-            db_ref[b, h, t, :] = db.astype(db_ref.dtype)
-            da_ref[b, h, t, :] = da.astype(da_ref.dtype)
-
-            dS = dS * w_decay[None, :] + dsa[:, None] * av[None, :]
-        return dS
-
-    dS = jax.lax.fori_loop(0, num_chunks, chunk_body, dS)
-    dh0_ref[b, h] = dS.astype(dh0_ref.dtype)
+    return _rwkv7_sane_fwd_kernel_with_mask
 
 
-def _rwkv7_sane_bwd_kernel_with_mask(
-    r_ref,
-    w_ref,
-    k_ref,
-    v_ref,
-    a_ref,
-    b_ref,
-    sa_ref,
-    chkp_ref,
-    tau_ref,
-    mask_ref,
-    dy_ref,
-    dht_ref,
-    dr_ref,
-    dw_ref,
-    dk_ref,
-    dv_ref,
-    da_ref,
-    db_ref,
-    dtau_ref,
-    dh0_ref,
-):
-    """带 mask 反向 Pallas kernel。"""
-    b = pl.program_id(0)
-    h = pl.program_id(1)
-    num_chunks = r_ref.shape[2] // CHUNK_LEN
+def _make_rwkv7_sane_bwd_kernel(chunk_size: int):
+    def _rwkv7_sane_bwd_kernel(
+        r_ref,
+        w_ref,
+        k_ref,
+        v_ref,
+        a_ref,
+        b_ref,
+        sa_ref,
+        chkp_ref,
+        tau_ref,
+        dy_ref,
+        dht_ref,
+        dr_ref,
+        dw_ref,
+        dk_ref,
+        dv_ref,
+        da_ref,
+        db_ref,
+        dtau_ref,
+        dh0_ref,
+    ):
+        b = pl.program_id(0)
+        h = pl.program_id(1)
+        num_chunks = r_ref.shape[2] // chunk_size
 
-    dS = dht_ref[b, h].astype(jnp.float32)
+        dS = dht_ref[b, h].astype(jnp.float32)
 
-    def chunk_body(c_rev, dS):
-        c = num_chunks - 1 - c_rev
-        # chkp 保存的是 SANE 之前的 state。
-        S_t = chkp_ref[b, h, c].astype(jnp.float32)
+        def chunk_body(c_rev, dS):
+            c = num_chunks - 1 - c_rev
+            # chkp 保存的是 SANE 之前的 state。
+            S_t = chkp_ref[b, h, c].astype(jnp.float32)
 
-        # 先对下游梯度 dS 应用 SANE 导数（按 mask blend）。
-        tau_v = tau_ref[b, h, c].astype(jnp.float32)
-        tau_safe = jnp.maximum(tau_v, 1e-6)
-        m = mask_ref[b, c].astype(jnp.float32)
-        u = S_t / tau_safe
-        tnh = jnp.tanh(u)
-        sech2 = 1.0 - tnh * tnh
-        blend = (1.0 - m) + m * sech2
-        dtau_local = jnp.sum(dS * m * (tnh - u * sech2))
-        dS = dS * blend
-        dtau_ref[b, h, c] = dtau_local
+            # 先对下游梯度 dS 应用 SANE 导数。
+            tau_v = tau_ref[b, h, c].astype(jnp.float32)
+            tau_safe = jnp.maximum(tau_v, 1e-6)
+            u = S_t / tau_safe
+            tnh = jnp.tanh(u)
+            sech2 = 1.0 - tnh * tnh
+            dtau_local = jnp.sum(dS * (tnh - u * sech2))
+            dS = dS * sech2
+            dtau_ref[b, h, c] = dtau_local
 
-        for j in range(CHUNK_LEN - 1, -1, -1):
-            t = c * CHUNK_LEN + j
-            rv = r_ref[b, h, t, :].astype(jnp.float32)
-            wv = w_ref[b, h, t, :].astype(jnp.float32)
-            kv = k_ref[b, h, t, :].astype(jnp.float32)
-            vv = v_ref[b, h, t, :].astype(jnp.float32)
-            av = a_ref[b, h, t, :].astype(jnp.float32)
-            bv = b_ref[b, h, t, :].astype(jnp.float32)
-            dyv = dy_ref[b, h, t, :].astype(jnp.float32)
-            sav = sa_ref[b, h, t, :].astype(jnp.float32)
+            for j in range(chunk_size - 1, -1, -1):
+                t = c * chunk_size + j
+                rv = r_ref[b, h, t, :].astype(jnp.float32)
+                wv = w_ref[b, h, t, :].astype(jnp.float32)
+                kv = k_ref[b, h, t, :].astype(jnp.float32)
+                vv = v_ref[b, h, t, :].astype(jnp.float32)
+                av = a_ref[b, h, t, :].astype(jnp.float32)
+                bv = b_ref[b, h, t, :].astype(jnp.float32)
+                dyv = dy_ref[b, h, t, :].astype(jnp.float32)
+                sav = sa_ref[b, h, t, :].astype(jnp.float32)
 
-            w_decay = jnp.exp(-jnp.exp(wv))
-            w_grad_factor = w_decay * (-jnp.exp(wv))
+                w_decay = jnp.exp(-jnp.exp(wv))
+                w_grad_factor = w_decay * (-jnp.exp(wv))
 
-            dr = jnp.sum(S_t * dyv[:, None], axis=0)
-            dr_ref[b, h, t, :] = dr.astype(dr_ref.dtype)
+                dr = jnp.sum(S_t * dyv[:, None], axis=0)
+                dr_ref[b, h, t, :] = dr.astype(dr_ref.dtype)
 
-            inv_w = 1.0 / (w_decay + 1e-6)
-            S_t = (
-                S_t - vv[:, None] * kv[None, :] - sav[:, None] * bv[None, :]
-            ) * inv_w[None, :]
+                inv_w = 1.0 / (w_decay + 1e-6)
+                S_t = (
+                    S_t - vv[:, None] * kv[None, :] - sav[:, None] * bv[None, :]
+                ) * inv_w[None, :]
 
-            dS = dS + dyv[:, None] * rv[None, :]
+                dS = dS + dyv[:, None] * rv[None, :]
 
-            dw = jnp.sum(dS * S_t, axis=0) * w_grad_factor
-            dk = jnp.sum(dS * vv[:, None], axis=0)
-            dv = jnp.sum(dS * kv[None, :], axis=1)
-            db = jnp.sum(dS * sav[:, None], axis=0)
-            dsa = jnp.sum(dS * bv[None, :], axis=1)
-            da = jnp.sum(S_t * dsa[:, None], axis=0)
+                dw = jnp.sum(dS * S_t, axis=0) * w_grad_factor
+                dk = jnp.sum(dS * vv[:, None], axis=0)
+                dv = jnp.sum(dS * kv[None, :], axis=1)
+                db = jnp.sum(dS * sav[:, None], axis=0)
+                dsa = jnp.sum(dS * bv[None, :], axis=1)
+                da = jnp.sum(S_t * dsa[:, None], axis=0)
 
-            dw_ref[b, h, t, :] = dw.astype(dw_ref.dtype)
-            dk_ref[b, h, t, :] = dk.astype(dk_ref.dtype)
-            dv_ref[b, h, t, :] = dv.astype(dv_ref.dtype)
-            db_ref[b, h, t, :] = db.astype(db_ref.dtype)
-            da_ref[b, h, t, :] = da.astype(da_ref.dtype)
+                dw_ref[b, h, t, :] = dw.astype(dw_ref.dtype)
+                dk_ref[b, h, t, :] = dk.astype(dk_ref.dtype)
+                dv_ref[b, h, t, :] = dv.astype(dv_ref.dtype)
+                db_ref[b, h, t, :] = db.astype(db_ref.dtype)
+                da_ref[b, h, t, :] = da.astype(da_ref.dtype)
 
-            dS = dS * w_decay[None, :] + dsa[:, None] * av[None, :]
-        return dS
+                dS = dS * w_decay[None, :] + dsa[:, None] * av[None, :]
+            return dS
 
-    dS = jax.lax.fori_loop(0, num_chunks, chunk_body, dS)
-    dh0_ref[b, h] = dS.astype(dh0_ref.dtype)
+        dS = jax.lax.fori_loop(0, num_chunks, chunk_body, dS)
+        dh0_ref[b, h] = dS.astype(dh0_ref.dtype)
+
+    return _rwkv7_sane_bwd_kernel
 
 
-#  无 mask launcher
-def _fwd_out_shape(r):
+def _make_rwkv7_sane_bwd_kernel_with_mask(chunk_size: int):
+    def _rwkv7_sane_bwd_kernel_with_mask(
+        r_ref,
+        w_ref,
+        k_ref,
+        v_ref,
+        a_ref,
+        b_ref,
+        sa_ref,
+        chkp_ref,
+        tau_ref,
+        mask_ref,
+        dy_ref,
+        dht_ref,
+        dr_ref,
+        dw_ref,
+        dk_ref,
+        dv_ref,
+        da_ref,
+        db_ref,
+        dtau_ref,
+        dh0_ref,
+    ):
+        b = pl.program_id(0)
+        h = pl.program_id(1)
+        num_chunks = r_ref.shape[2] // chunk_size
+
+        dS = dht_ref[b, h].astype(jnp.float32)
+
+        def chunk_body(c_rev, dS):
+            c = num_chunks - 1 - c_rev
+            # chkp 保存的是 SANE 之前的 state。
+            S_t = chkp_ref[b, h, c].astype(jnp.float32)
+
+            # 先对下游梯度 dS 应用 SANE 导数（按 mask blend）。
+            tau_v = tau_ref[b, h, c].astype(jnp.float32)
+            tau_safe = jnp.maximum(tau_v, 1e-6)
+            m = mask_ref[b, c].astype(jnp.float32)
+            u = S_t / tau_safe
+            tnh = jnp.tanh(u)
+            sech2 = 1.0 - tnh * tnh
+            blend = (1.0 - m) + m * sech2
+            dtau_local = jnp.sum(dS * m * (tnh - u * sech2))
+            dS = dS * blend
+            dtau_ref[b, h, c] = dtau_local
+
+            for j in range(chunk_size - 1, -1, -1):
+                t = c * chunk_size + j
+                rv = r_ref[b, h, t, :].astype(jnp.float32)
+                wv = w_ref[b, h, t, :].astype(jnp.float32)
+                kv = k_ref[b, h, t, :].astype(jnp.float32)
+                vv = v_ref[b, h, t, :].astype(jnp.float32)
+                av = a_ref[b, h, t, :].astype(jnp.float32)
+                bv = b_ref[b, h, t, :].astype(jnp.float32)
+                dyv = dy_ref[b, h, t, :].astype(jnp.float32)
+                sav = sa_ref[b, h, t, :].astype(jnp.float32)
+
+                w_decay = jnp.exp(-jnp.exp(wv))
+                w_grad_factor = w_decay * (-jnp.exp(wv))
+
+                dr = jnp.sum(S_t * dyv[:, None], axis=0)
+                dr_ref[b, h, t, :] = dr.astype(dr_ref.dtype)
+
+                inv_w = 1.0 / (w_decay + 1e-6)
+                S_t = (
+                    S_t - vv[:, None] * kv[None, :] - sav[:, None] * bv[None, :]
+                ) * inv_w[None, :]
+
+                dS = dS + dyv[:, None] * rv[None, :]
+
+                dw = jnp.sum(dS * S_t, axis=0) * w_grad_factor
+                dk = jnp.sum(dS * vv[:, None], axis=0)
+                dv = jnp.sum(dS * kv[None, :], axis=1)
+                db = jnp.sum(dS * sav[:, None], axis=0)
+                dsa = jnp.sum(dS * bv[None, :], axis=1)
+                da = jnp.sum(S_t * dsa[:, None], axis=0)
+
+                dw_ref[b, h, t, :] = dw.astype(dw_ref.dtype)
+                dk_ref[b, h, t, :] = dk.astype(dk_ref.dtype)
+                dv_ref[b, h, t, :] = dv.astype(dv_ref.dtype)
+                db_ref[b, h, t, :] = db.astype(db_ref.dtype)
+                da_ref[b, h, t, :] = da.astype(da_ref.dtype)
+
+                dS = dS * w_decay[None, :] + dsa[:, None] * av[None, :]
+            return dS
+
+        dS = jax.lax.fori_loop(0, num_chunks, chunk_body, dS)
+        dh0_ref[b, h] = dS.astype(dh0_ref.dtype)
+
+    return _rwkv7_sane_bwd_kernel_with_mask
+
+
+def _fwd_out_shape(r, chunk_size: int):
     B, N, T, H = r.shape
     return [
         jax.ShapeDtypeStruct((B, N, T, H), r.dtype),  # OUT
         jax.ShapeDtypeStruct((B, N, T, H), jnp.float32),  # SA_OUT
-        jax.ShapeDtypeStruct((B, N, T // CHUNK_LEN, H, H), jnp.float32),  # STATE_CHKP
+        jax.ShapeDtypeStruct((B, N, T // chunk_size, H, H), jnp.float32),  # STATE_CHKP
     ]
 
 
-def _bwd_out_shape(r):
+def _bwd_out_shape(r, chunk_size: int):
     B, N, T, H = r.shape
     return [
         jax.ShapeDtypeStruct((B, N, T, H), r.dtype),  # DR
@@ -457,47 +454,49 @@ def _bwd_out_shape(r):
         jax.ShapeDtypeStruct((B, N, T, H), r.dtype),  # DV
         jax.ShapeDtypeStruct((B, N, T, H), r.dtype),  # DA
         jax.ShapeDtypeStruct((B, N, T, H), r.dtype),  # DB
-        jax.ShapeDtypeStruct((B, N, T // CHUNK_LEN), jnp.float32),  # DTAU
+        jax.ShapeDtypeStruct((B, N, T // chunk_size), jnp.float32),  # DTAU
         jax.ShapeDtypeStruct((B, N, H, H), jnp.float32),  # DH0
     ]
 
 
-def _wkv7_sane_fwd_pallas_call(r, w, k, v, a, b, tau, h0):
+def _wkv7_sane_fwd_pallas_call(r, w, k, v, a, b, tau, h0, chunk_size: int):
     B, N, T, H = r.shape
     return launch(
-        "wkv7_sane_fwd",
-        _rwkv7_sane_fwd_kernel,
-        _fwd_out_shape(r),
+        f"wkv7_sane_fwd_{chunk_size}",
+        _make_rwkv7_sane_fwd_kernel(chunk_size),
+        _fwd_out_shape(r, chunk_size),
         (B, N),
         (r, w, k, v, a, b, tau, h0),
     )
 
 
-def _wkv7_sane_fwd_warmup(r, w, k, v, a, b, tau, h0):
+def _wkv7_sane_fwd_warmup(r, w, k, v, a, b, tau, h0, chunk_size: int):
     B, N, T, H = r.shape
     ensure_config(
-        "wkv7_sane_fwd",
-        _rwkv7_sane_fwd_kernel,
-        _fwd_out_shape(r),
+        f"wkv7_sane_fwd_{chunk_size}",
+        _make_rwkv7_sane_fwd_kernel(chunk_size),
+        _fwd_out_shape(r, chunk_size),
         (B, N),
         (r, w, k, v, a, b, tau, h0),
     )
 
 
-def _wkv7_sane_bwd_warmup(r, w, k, v, a, b, sa, state_chkp, tau, dy, dht):
+def _wkv7_sane_bwd_warmup(
+    r, w, k, v, a, b, sa, state_chkp, tau, dy, dht, chunk_size: int
+):
     B, N, T, H = r.shape
     ensure_config(
-        "wkv7_sane_bwd",
-        _rwkv7_sane_bwd_kernel,
-        _bwd_out_shape(r),
+        f"wkv7_sane_bwd_{chunk_size}",
+        _make_rwkv7_sane_bwd_kernel(chunk_size),
+        _bwd_out_shape(r, chunk_size),
         (B, N),
         (r, w, k, v, a, b, sa, state_chkp, tau, dy, dht),
     )
 
 
 @custom_partitioning
-def _wkv7_sane_fwd_spmd(r, w, k, v, a, b, tau, h0):
-    return _wkv7_sane_fwd_pallas_call(r, w, k, v, a, b, tau, h0)
+def _wkv7_sane_fwd_spmd(r, w, k, v, a, b, tau, h0, chunk_size: int):
+    return _wkv7_sane_fwd_pallas_call(r, w, k, v, a, b, tau, h0, chunk_size)
 
 
 _wkv7_sane_fwd_spmd.def_partition(
@@ -507,20 +506,26 @@ _wkv7_sane_fwd_spmd.def_partition(
 )
 
 
-def _wkv7_sane_bwd_pallas_call(r, w, k, v, a, b, sa, state_chkp, tau, dy, dht):
+def _wkv7_sane_bwd_pallas_call(
+    r, w, k, v, a, b, sa, state_chkp, tau, dy, dht, chunk_size: int
+):
     B, N, T, H = r.shape
     return launch(
-        "wkv7_sane_bwd",
-        _rwkv7_sane_bwd_kernel,
-        _bwd_out_shape(r),
+        f"wkv7_sane_bwd_{chunk_size}",
+        _make_rwkv7_sane_bwd_kernel(chunk_size),
+        _bwd_out_shape(r, chunk_size),
         (B, N),
         (r, w, k, v, a, b, sa, state_chkp, tau, dy, dht),
     )
 
 
 @custom_partitioning
-def _wkv7_sane_bwd_spmd(r, w, k, v, a, b, sa, state_chkp, tau, dy, dht):
-    return _wkv7_sane_bwd_pallas_call(r, w, k, v, a, b, sa, state_chkp, tau, dy, dht)
+def _wkv7_sane_bwd_spmd(
+    r, w, k, v, a, b, sa, state_chkp, tau, dy, dht, chunk_size: int
+):
+    return _wkv7_sane_bwd_pallas_call(
+        r, w, k, v, a, b, sa, state_chkp, tau, dy, dht, chunk_size
+    )
 
 
 _wkv7_sane_bwd_spmd.def_partition(
@@ -531,23 +536,34 @@ _wkv7_sane_bwd_spmd.def_partition(
 
 
 @jax.custom_vjp
-def rwkv7_sane_kernel_pallas(r, w, k, v, a, b, tau, h0):
+def rwkv7_sane_kernel_pallas(r, w, k, v, a, b, tau, h0, chunk_size: int):
     """无 mask Pallas 训练 kernel 公开入口。"""
-    _wkv7_sane_fwd_warmup(r, w, k, v, a, b, tau, h0)
-    out, sa_out, state_chkp = _wkv7_sane_fwd_spmd(r, w, k, v, a, b, tau, h0)
+    _wkv7_sane_fwd_warmup(r, w, k, v, a, b, tau, h0, chunk_size)
+    out, sa_out, state_chkp = _wkv7_sane_fwd_spmd(r, w, k, v, a, b, tau, h0, chunk_size)
     final_state = _apply_sane_to_final_state(state_chkp[:, :, -1, :, :], tau)
     return out, final_state
 
 
-def _fwd(r, w, k, v, a, b, tau, h0):
-    _wkv7_sane_fwd_warmup(r, w, k, v, a, b, tau, h0)
-    out, sa_out, state_chkp = _wkv7_sane_fwd_spmd(r, w, k, v, a, b, tau, h0)
+def _fwd(r, w, k, v, a, b, tau, h0, chunk_size: int):
+    _wkv7_sane_fwd_warmup(r, w, k, v, a, b, tau, h0, chunk_size)
+    out, sa_out, state_chkp = _wkv7_sane_fwd_spmd(r, w, k, v, a, b, tau, h0, chunk_size)
     final_state = _apply_sane_to_final_state(state_chkp[:, :, -1, :, :], tau)
-    return (out, final_state), (r, w, k, v, a, b, tau, sa_out, state_chkp)
+    return (out, final_state), (
+        r,
+        w,
+        k,
+        v,
+        a,
+        b,
+        tau,
+        sa_out,
+        state_chkp,
+        chunk_size,
+    )
 
 
 def _bwd(res, grads):
-    r, w, k, v, a, b, tau, sa_out, state_chkp = res
+    r, w, k, v, a, b, tau, sa_out, state_chkp, chunk_size = res
     dy, dht = grads
     dy = jnp.asarray(dy, jnp.bfloat16)
     if dht is None:
@@ -556,9 +572,11 @@ def _bwd(res, grads):
     else:
         dht = jnp.asarray(dht, jnp.float32)
 
-    _wkv7_sane_bwd_warmup(r, w, k, v, a, b, sa_out, state_chkp, tau, dy, dht)
+    _wkv7_sane_bwd_warmup(
+        r, w, k, v, a, b, sa_out, state_chkp, tau, dy, dht, chunk_size
+    )
     dr, dw, dk, dv, da, db, dtau, dh0 = _wkv7_sane_bwd_spmd(
-        r, w, k, v, a, b, sa_out, state_chkp, tau, dy, dht
+        r, w, k, v, a, b, sa_out, state_chkp, tau, dy, dht, chunk_size
     )
     return dr, dw, dk, dv, da, db, dtau, dh0
 
@@ -567,44 +585,48 @@ rwkv7_sane_kernel_pallas.defvjp(_fwd, _bwd)
 
 
 #  带 mask launcher
-def _wkv7_sane_fwd_with_mask_pallas_call(r, w, k, v, a, b, tau, mask, h0):
+def _wkv7_sane_fwd_with_mask_pallas_call(
+    r, w, k, v, a, b, tau, mask, h0, chunk_size: int
+):
     B, N, T, H = r.shape
     return launch(
-        "wkv7_sane_fwd_mask",
-        _rwkv7_sane_fwd_kernel_with_mask,
-        _fwd_out_shape(r),
+        f"wkv7_sane_fwd_mask_{chunk_size}",
+        _make_rwkv7_sane_fwd_kernel_with_mask(chunk_size),
+        _fwd_out_shape(r, chunk_size),
         (B, N),
         (r, w, k, v, a, b, tau, mask, h0),
     )
 
 
-def _wkv7_sane_fwd_with_mask_warmup(r, w, k, v, a, b, tau, mask, h0):
+def _wkv7_sane_fwd_with_mask_warmup(r, w, k, v, a, b, tau, mask, h0, chunk_size: int):
     B, N, T, H = r.shape
     ensure_config(
-        "wkv7_sane_fwd_mask",
-        _rwkv7_sane_fwd_kernel_with_mask,
-        _fwd_out_shape(r),
+        f"wkv7_sane_fwd_mask_{chunk_size}",
+        _make_rwkv7_sane_fwd_kernel_with_mask(chunk_size),
+        _fwd_out_shape(r, chunk_size),
         (B, N),
         (r, w, k, v, a, b, tau, mask, h0),
     )
 
 
 def _wkv7_sane_bwd_with_mask_warmup(
-    r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht
+    r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht, chunk_size: int
 ):
     B, N, T, H = r.shape
     ensure_config(
-        "wkv7_sane_bwd_mask",
-        _rwkv7_sane_bwd_kernel_with_mask,
-        _bwd_out_shape(r),
+        f"wkv7_sane_bwd_mask_{chunk_size}",
+        _make_rwkv7_sane_bwd_kernel_with_mask(chunk_size),
+        _bwd_out_shape(r, chunk_size),
         (B, N),
         (r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht),
     )
 
 
 @custom_partitioning
-def _wkv7_sane_fwd_with_mask_spmd(r, w, k, v, a, b, tau, mask, h0):
-    return _wkv7_sane_fwd_with_mask_pallas_call(r, w, k, v, a, b, tau, mask, h0)
+def _wkv7_sane_fwd_with_mask_spmd(r, w, k, v, a, b, tau, mask, h0, chunk_size: int):
+    return _wkv7_sane_fwd_with_mask_pallas_call(
+        r, w, k, v, a, b, tau, mask, h0, chunk_size
+    )
 
 
 _wkv7_sane_fwd_with_mask_spmd.def_partition(
@@ -615,22 +637,24 @@ _wkv7_sane_fwd_with_mask_spmd.def_partition(
 
 
 def _wkv7_sane_bwd_with_mask_pallas_call(
-    r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht
+    r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht, chunk_size: int
 ):
     B, N, T, H = r.shape
     return launch(
-        "wkv7_sane_bwd_mask",
-        _rwkv7_sane_bwd_kernel_with_mask,
-        _bwd_out_shape(r),
+        f"wkv7_sane_bwd_mask_{chunk_size}",
+        _make_rwkv7_sane_bwd_kernel_with_mask(chunk_size),
+        _bwd_out_shape(r, chunk_size),
         (B, N),
         (r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht),
     )
 
 
 @custom_partitioning
-def _wkv7_sane_bwd_with_mask_spmd(r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht):
+def _wkv7_sane_bwd_with_mask_spmd(
+    r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht, chunk_size: int
+):
     return _wkv7_sane_bwd_with_mask_pallas_call(
-        r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht
+        r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht, chunk_size
     )
 
 
@@ -642,27 +666,41 @@ _wkv7_sane_bwd_with_mask_spmd.def_partition(
 
 
 @jax.custom_vjp
-def rwkv7_sane_kernel_with_mask_pallas(r, w, k, v, a, b, tau, mask, h0):
+def rwkv7_sane_kernel_with_mask_pallas(
+    r, w, k, v, a, b, tau, mask, h0, chunk_size: int
+):
     """带 mask Pallas 训练 kernel 公开入口。"""
-    _wkv7_sane_fwd_with_mask_warmup(r, w, k, v, a, b, tau, mask, h0)
+    _wkv7_sane_fwd_with_mask_warmup(r, w, k, v, a, b, tau, mask, h0, chunk_size)
     out, sa_out, state_chkp = _wkv7_sane_fwd_with_mask_spmd(
-        r, w, k, v, a, b, tau, mask, h0
+        r, w, k, v, a, b, tau, mask, h0, chunk_size
     )
     final_state = _apply_sane_to_final_state(state_chkp[:, :, -1, :, :], tau, mask=mask)
     return out, final_state
 
 
-def _fwd_with_mask(r, w, k, v, a, b, tau, mask, h0):
-    _wkv7_sane_fwd_with_mask_warmup(r, w, k, v, a, b, tau, mask, h0)
+def _fwd_with_mask(r, w, k, v, a, b, tau, mask, h0, chunk_size: int):
+    _wkv7_sane_fwd_with_mask_warmup(r, w, k, v, a, b, tau, mask, h0, chunk_size)
     out, sa_out, state_chkp = _wkv7_sane_fwd_with_mask_spmd(
-        r, w, k, v, a, b, tau, mask, h0
+        r, w, k, v, a, b, tau, mask, h0, chunk_size
     )
     final_state = _apply_sane_to_final_state(state_chkp[:, :, -1, :, :], tau, mask=mask)
-    return (out, final_state), (r, w, k, v, a, b, tau, mask, sa_out, state_chkp)
+    return (out, final_state), (
+        r,
+        w,
+        k,
+        v,
+        a,
+        b,
+        tau,
+        mask,
+        sa_out,
+        state_chkp,
+        chunk_size,
+    )
 
 
 def _bwd_with_mask(res, grads):
-    r, w, k, v, a, b, tau, mask, sa_out, state_chkp = res
+    r, w, k, v, a, b, tau, mask, sa_out, state_chkp, chunk_size = res
     dy, dht = grads
     dy = jnp.asarray(dy, jnp.bfloat16)
     if dht is None:
@@ -672,10 +710,10 @@ def _bwd_with_mask(res, grads):
         dht = jnp.asarray(dht, jnp.float32)
 
     _wkv7_sane_bwd_with_mask_warmup(
-        r, w, k, v, a, b, sa_out, state_chkp, tau, mask, dy, dht
+        r, w, k, v, a, b, sa_out, state_chkp, tau, mask, dy, dht, chunk_size
     )
     dr, dw, dk, dv, da, db, dtau, dh0 = _wkv7_sane_bwd_with_mask_spmd(
-        r, w, k, v, a, b, sa_out, state_chkp, tau, mask, dy, dht
+        r, w, k, v, a, b, sa_out, state_chkp, tau, mask, dy, dht, chunk_size
     )
     return dr, dw, dk, dv, da, db, dtau, None, dh0
 
@@ -696,17 +734,19 @@ def generalized_delta_rule_sane(
     initial_state: Optional[jnp.ndarray] = None,
     output_final_state: bool = True,
     head_first: bool = False,
+    chunk_size: int = 16,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
     """带 State Anomaly Neutralization 的 RWKV-7 广义 delta 规则（Pallas chunkwise 训练版）。
 
     Args:
-        r, w, k, v, a, b: [B, T, H, K], bfloat16。T 必须被 16 整除。
-        tau: [B, T//16, H], float32。阈值，必须严格 > 1。
-        mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SANE；
+        r, w, k, v, a, b: [B, T, H, K]，bfloat16。T 必须被 chunk_size 整除。
+        tau: [B, T//chunk_size, H], float32。阈值，必须严格 > 1。
+        mask: [B, T//chunk_size], float32 或 None。>0 的 chunk 边界执行 SANE；
             仅当 output_final_state=True 时生效。
         initial_state: [B, H, K, K] 或 [1, H, K, K]，float32，可选。
         output_final_state: bool，是否返回最终 state。
-        head_first: bool，输入输出是否 head 维优先 ([B, H, T, K])。
+        head_first: bool，输入输出是否 head 维优先（[B, H, T, K]）。
+        chunk_size: int，chunk 长度，必须整除序列长度。
 
     Returns:
         out: [B, T, H, K]，bfloat16。
@@ -714,7 +754,7 @@ def generalized_delta_rule_sane(
             output_final_state=False 时不返回；mask=None 时为 None。
 
     Raises:
-        ValueError: T 不被 16 整除，或 tau/mask 形状不匹配。
+        ValueError: T 不被 chunk_size 整除，或 tau/mask 形状不匹配。
     """
     dtype = r.dtype
 
@@ -728,14 +768,15 @@ def generalized_delta_rule_sane(
     tau = _transpose_tau(tau)
 
     B, N, T, H = r.shape
-    if T % CHUNK_LEN != 0:
+    if T % chunk_size != 0:
         raise ValueError(
-            f"Pallas SANE kernel requires sequence length T={T} to be divisible by {CHUNK_LEN}"
+            f"Pallas SANE kernel requires sequence length T={T} to be divisible by {chunk_size}"
         )
 
-    if tau.shape != (B, N, T // CHUNK_LEN):
+    if tau.shape != (B, N, T // chunk_size):
         raise ValueError(
-            f"tau shape {tau.shape} does not match expected (B={B}, N={N}, T//16={T // CHUNK_LEN})"
+            f"tau shape {tau.shape} does not match expected "
+            f"(B={B}, N={N}, T//chunk_size={T // chunk_size})"
         )
 
     if initial_state is None:
@@ -747,20 +788,17 @@ def generalized_delta_rule_sane(
 
     if use_mask:
         mask = jnp.asarray(mask, dtype=jnp.float32)
-        if mask.shape != (B, T // CHUNK_LEN):
+        if mask.shape != (B, T // chunk_size):
             raise ValueError(
-                f"mask shape {mask.shape} must match (B, T//16) = ({B}, {T // CHUNK_LEN})"
+                f"mask shape {mask.shape} must match (B, T//chunk_size) = ({B}, {T // chunk_size})"
             )
         out, last_state = rwkv7_sane_kernel_with_mask_pallas(
-            r, w, k, v, a, b, tau, mask, h0
+            r, w, k, v, a, b, tau, mask, h0, chunk_size
         )
-        out = jnp.transpose(out, (0, 2, 1, 3))
         out = jnp.asarray(out, dtype)
-        return (out, last_state) if output_final_state else out
+        return out, last_state
 
-    # 无 mask 路径：chunk 边界无条件执行 SANE。
-    out, _ = rwkv7_sane_kernel_pallas(r, w, k, v, a, b, tau, h0)
-    out = jnp.transpose(out, (0, 2, 1, 3))
+    out, last_state = rwkv7_sane_kernel_pallas(r, w, k, v, a, b, tau, h0, chunk_size)
     out = jnp.asarray(out, dtype)
 
     if not output_final_state:
@@ -779,35 +817,6 @@ def generalized_delta_rule_sane(
     return out, None
 
 
-def generalized_delta_rule_sane_inference(
-    r: jnp.ndarray,
-    w: jnp.ndarray,
-    k: jnp.ndarray,
-    v: jnp.ndarray,
-    a: jnp.ndarray,
-    b: jnp.ndarray,
-    tau: jnp.ndarray,
-    mask: Optional[jnp.ndarray] = None,
-    initial_state: Optional[jnp.ndarray] = None,
-    output_final_state: bool = True,
-    head_first: bool = False,
-) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
-    """Pallas 版本推理入口：直接复用训练 kernel，T 仍需被 16 整除。"""
-    return generalized_delta_rule_sane(
-        r=r,
-        w=w,
-        k=k,
-        v=v,
-        a=a,
-        b=b,
-        tau=tau,
-        mask=mask,
-        initial_state=initial_state,
-        output_final_state=output_final_state,
-        head_first=head_first,
-    )
-
-
-def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
-    """返回 Pallas 后端的 (训练算子, 推理算子)。"""
-    return [generalized_delta_rule_sane, generalized_delta_rule_sane_inference]
+def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64, chunk_size: int = 16):
+    """返回 RWKV-7-SANE Pallas 训练/推理算子对（当前两者相同）。"""
+    return generalized_delta_rule_sane, generalized_delta_rule_sane

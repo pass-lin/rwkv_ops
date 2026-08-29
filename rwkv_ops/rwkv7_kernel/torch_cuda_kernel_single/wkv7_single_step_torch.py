@@ -5,7 +5,8 @@ import torch
 from torch.utils.cpp_extension import load
 
 
-def get_torch_generalized_delta_rule_single_step(HEAD_SIZE=64):
+def get_torch_generalized_delta_rule_single_step(HEAD_SIZE=64, chunk_size: int = 16):
+    # chunk_size 仅用于签名一致，单步 kernel 内部固定 CHUNK_LEN_=1，忽略该值。
     flags = [
         "-res-usage",
         f"-D_C_={HEAD_SIZE}",
@@ -63,6 +64,7 @@ def get_torch_generalized_delta_rule_single_step(HEAD_SIZE=64):
         initial_state: torch.Tensor = None,
         output_final_state: bool = True,
         head_first: bool = False,
+        chunk_size: int = 16,
     ):
         """RWKV-7 单步广义 delta 规则（仅前向）。
 
@@ -94,6 +96,7 @@ def get_torch_generalized_delta_rule_single_step(HEAD_SIZE=64):
                 w=w,
                 initial_state=initial_state,
                 output_final_state=output_final_state,
+                chunk_size=chunk_size,
             )
         # 统一转成 (B, H, K) 以调用单步 kernel
         if head_first:  # (B, H, 1, K) -> (B, H, K)

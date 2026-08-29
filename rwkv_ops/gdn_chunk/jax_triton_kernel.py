@@ -1,5 +1,4 @@
-"""JAX 版 Gated DeltaNet chunkwise Triton kernel 封装。
-"""
+"""JAX 版 Gated DeltaNet chunkwise Triton kernel 封装。"""
 
 import jax
 import jax.numpy as jnp

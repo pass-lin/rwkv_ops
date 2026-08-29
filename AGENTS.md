@@ -50,7 +50,7 @@ MANIFEST.in                  # 源码分发清单
 | `gated_delta_net_recurrent` / `gated_delta_net_recurrent_inference` / `gated_delta_net_recurrent_single_step` | Gated DeltaNet recurrent 算子 |
 | `gated_delta_net_recurrent_sane` / `gated_delta_net_recurrent_sane_inference` / `gated_delta_net_recurrent_sane_single_step` | Gated DeltaNet recurrent SANE 算子 |
 | `mhc_pre_op` / `mhc_post_op` | mHC 预处理/后处理算子 |
-| `get_generalized_delta_rule` 等 9 个工厂函数 | 按 head_size / KERNEL_TYPE 获取算子 |
+| `get_generalized_delta_rule` 等 9 个工厂函数 | 按 head_size / KERNEL_TYPE / chunk_size 获取算子 |
 
 ---
 
@@ -89,6 +89,15 @@ MANIFEST.in                  # 源码分发清单
 
 **缺硬件静默回退**：各工厂在硬件/库不可用时不报错，直接回退 native
 （例如 torch 无 CUDA、jax 不在 GPU/TPU 上时回到纯 keras ops）。
+
+### 2.1.x chunk_size 的指定方式
+
+`chunk_size` 不是环境变量，而是算子/工厂函数的参数，默认 16。不同后端对其处理不同：
+
+- **CUDA 后端**：`chunk_size` 是编译期常量（`-D_CHUNK_LEN_`），必须通过工厂函数指定；返回的算子仍带 `chunk_size` 参数，但传入与编译值不同的 `chunk_size` 会报错。不同 `chunk_size` 会各自编译一次，互不影响。涉及算子：`generalized_delta_rule`、`generalized_delta_rule_sane`、`gated_delta_net_chunk`、`gated_delta_net_recurrent_sane`。
+- **Triton / Pallas / native 后端**：`chunk_size` 在每次调用时作为 `tl.constexpr` 或直接参数传入，无需工厂指定，可在调用时修改。
+
+`gated_delta_net_recurrent`（无 SANE）接受 `chunk_size` 但忽略，仅保持签名一致。
 
 ### 2.2 各算子的后端支持矩阵
 
@@ -290,7 +299,7 @@ y_t = state_t @ r_t
 - 状态 `state` 形状：`(B, H, K, K)`，`H` 是 head 数，`K` 是 head_size。
 - 输入默认 layout `[B, T, H, K]`；`head_first=True` 时内部转置为 `[B, H, T, K]`。
 - `mask` 为 **per-token** `[B, T]`（或 `[B, T, 1, 1]`），1 更新状态、0 冻结状态。
-- chunkwise 内核要求 `T % 16 == 0`（cuda 训练版 / triton / pallas）。
+- chunkwise 内核要求 `T % chunk_size == 0`（cuda 训练版 / triton / pallas），`chunk_size` 默认 16，可通过工厂函数或算子参数修改。
 - `get_generalized_delta_rule` 返回 `(训练算子, 推理算子)`；推理版不存 checkpoint。
 - `triton` 后端固定支持 `HEAD_SIZE == 64`；其他 head_size 用 `cuda`
   （`head_size` 经 `-D_C_` 编译进内核，按 head_size 懒编译）。
@@ -303,15 +312,16 @@ y_t = state_t @ r_t
 
 SANE（State Anomaly Neutralization）是一种在 chunk 边界对 RWKV-7 的 state 做软裁剪的数值稳定技术，详见论文 [SANE: State Anomaly Neutralization for RWKV-7](https://arxiv.org/pdf/2608.22354)。
 
-在 RWKV-7 递推之上，于 chunk 边界（每 16 tokens）做 State Anomaly Neutralization：
+在 RWKV-7 递推之上，于 chunk 边界（每 chunk_size 个 token）做 State Anomaly Neutralization：
 
 ```text
 sane_state = tau * tanh(state / tau)      # 软裁剪到 [-tau, tau]
 ```
 
+- **chunk_size 语义**：SANE chunk 长度，默认 16。CUDA 后端作为编译期常量需通过工厂函数指定；Triton/Pallas/native 后端可在算子调用时直接传入。
 - **tau 语义**：只接收预处理后的 `tau = softplus(param) + 1.0`，严格 > 1，
-  形状 `[B, T//16, H]`（per-head per-chunk）。
-- **mask 语义**：`[B, T//16]` per-chunk，所有 head 共享。mask=1 在 chunk 边界
+  形状 `[B, T//chunk_size, H]`（per-head per-chunk）。
+- **mask 语义**：`[B, T//chunk_size]` per-chunk，所有 head 共享。mask=1 在 chunk 边界
   执行 SANE；mask=0 保留原 state。不再用 `tau=0.0` 兼任 mask；全 padding chunk
   的 mask 须置 0。kernel 用 `mask * sane_state + (1 - mask) * state` 的 blend 形式，
   避免 warp 分支。
@@ -324,7 +334,7 @@ sane_state = tau * tanh(state / tau)      # 软裁剪到 [-tau, tau]
   `mask=None` 且 `output_final_state=True` 时 Python 入口发双语 UserWarning
   并把 `final_state` 置为 `None`（避免误用被 padding 污染的 state）。
 - **推理 kernel**：`generalized_delta_rule_sane_inference` 只输出 y 与最终 state，
-  显存显著低于训练版；按 chunk 读 tau，**T 不要求被 16 整除**。任意长度
+  显存显著低于训练版；按 chunk 读 tau，**T 不要求被 chunk_size 整除**。任意长度
   prefill 也可用单步 `generalized_delta_rule_sane_single_step`（每步算 SANE，
   按 per-sample `do_sane` 选择）。
 - **分片**：JAX `custom_partitioning` 的 sharding rule 支持 head 轴 TP；
@@ -371,7 +381,7 @@ sane_state = tau * tanh(state / tau)      # 软裁剪到 [-tau, tau]
   plgpu/pltriton 私有 API**，以兼容老版 jax（Triton lowering）、未来版本
   （Mosaic GPU lowering）与 TPU。
 - kernel 结构：grid=(B, N)，每个 program 处理一个 (batch, head)；外层
-  `fori_loop` 遍历 chunk、内层静态展开 16 步；数学与 `triton_kernel.py`
+  `fori_loop` 遍历 chunk、内层静态展开 `chunk_size` 步；数学与 `triton_kernel.py`
   逐行对应（MINI_BSZ=1 的角色由 grid 取代，kernel 内无需 batch mask 与
   64 位指针运算）。
 - **后端选择是确定性能力探测，不做计时择优**：按偏好顺序（默认后端 →
@@ -434,7 +444,7 @@ JAX 自动 lowering 到 Triton（旧版）或 Mosaic GPU（新版），未来也
    每个 program 只处理一个 sample/head，state 退化为 `[H, H]`。因此 Triton 里
    `axis=2` 的 reduce 在 Pallas 中变成 `axis=1`。
 3. **循环结构**：外层 chunk 循环用 `jax.lax.fori_loop`（需要把 state 作为 carry 传递），
-   内层 16 步用原生 `for` 静态展开。
+   内层 `chunk_size` 步用原生 `for` 静态展开。
 4. **数值稳定**：Triton 里常用手写 `tanh` 的 exp 稳定形式；Pallas 直接用 `jnp.tanh` 即可，
    JAX 编译器会生成稳定实现。
 5. **输出声明**：在 Pallas 中，所有输出通过 `pl.pallas_call` 的 `out_shape` 声明，
@@ -510,7 +520,13 @@ y_t = sum_K(state_t * q_t)
   的 gate 输出一致。
 - `g` 是 log-space decay gate，越负遗忘越快。
 - `gated_delta_net_chunk` 要求 `T % chunk_size == 0`，会在内部 pad 到 chunk_size
-  整数倍；`gated_delta_net_recurrent` 与 `gated_delta_net_reference` 支持任意长度。
+  整数倍，`chunk_size` 默认 16；CUDA 后端作为编译期常量需通过工厂函数指定，
+  Triton/Pallas/native 后端可在调用时传入。
+- `gated_delta_net_recurrent_sane` 的 `tau` 形状为 `[B, T//chunk_size, H]`、`mask`
+  形状为 `[B, T//chunk_size]`，`chunk_size` 同样遵循上述规则（CUDA 工厂指定，
+  其他后端调用时传入）。
+- `gated_delta_net_recurrent`（无 SANE）接受 `chunk_size` 但忽略，仅保持签名一致；
+  它与 `gated_delta_net_reference` 支持任意长度。
 - chunkwise 实现先把 g 做 cumsum 得到 chunk 内 decay 矩阵，再用 Neumann 级数
   求 `(I - lower_triangular(k_beta k^T * decay))^{-1}`，最后按 recurrent 方式
   跨 chunk 传递 state。数值上必须与 `gated_delta_net_reference` 逐位一致。
@@ -597,7 +613,7 @@ pytest tests/jax -v -m "not slow"
 - `rwkv7_inputs`：`r/k/v ~ N(0,1)`；`a`、`b` 为同一 z 的 ±单位向量（b = -a）；
   `w = -softplus(w_raw) - 0.5`；`h0 ~ N(0,1)`。
 - `rwkv7_sane_inputs`：加 `tau`，`x ~ N(7.0, 0.5)`、`tau = softplus(x) + 1.0`
-  （tau ≈ 1000，近似恒等映射），形状 `[B, T//16, H]`。
+  （tau ≈ 1000，近似恒等映射），形状 `[B, T//chunk_size, H]`；测试默认 chunk_size=16。
 - `gdn_shape = (2, 128, 4, 64, 128)`（B, T, H, K, V）。
 - `gdn_inputs`：`q/k/v ~ N(0,1)`；`g = -softplus(g_raw) - 0.5` 保证稳定衰减；
   `beta` 先过 sigmoid 使其落在 (0,1)；`h0 ~ N(0,1) * 0.1`。`q/k` 不做 L2 norm，
@@ -663,11 +679,11 @@ pytest tests/jax -v -m "not slow"
 3. 可选的 `Examples` 部分（**仅限公开 API 入口**，如
    `generalized_delta_rule`、`rwkv6_op`、`mhc_pre_op`）；
 4. `Args` 部分：**每个参数必须带形状与 dtype**，关键约束写在该参数条目内
-   （如 `tau: [B, T//16, H], float32, 必须 > 1`；`x: [B, T, n, C], C 必须
+   （如 `tau: [B, T//chunk_size, H], float32, 必须 > 1`；`x: [B, T, n, C], C 必须
    被 128 整除`）；
 5. `Returns` 部分：同样带形状与 dtype；
 6. 可选的 `Raises` 部分：**所有显式 raise 的条件必须列出**（如
-   `T % 16 != 0`、`M % 32 != 0`）。
+   `T % chunk_size != 0`、`M % 32 != 0`）。
 
 私有函数（下划线开头）允许只写一行描述。
 
@@ -679,13 +695,13 @@ def generalized_delta_rule_sane(r, w, k, v, a, b, tau, mask=None,
                               head_first=False):
     """带 State Anomaly Neutralization 的 RWKV-7 广义 delta 规则（chunkwise 训练版）。
 
-    在 chunk 边界（每 16 个 token）按 mask 对 state 执行
+    在 chunk 边界（每 chunk_size 个 token）按 mask 对 state 执行
     `state = tau * tanh(state / tau)`；输出始终基于 SANE 之前的 state。
 
     Args:
-        r, w, k, v, a, b: [B, T, H, K], bfloat16。T 必须被 16 整除。
-        tau: [B, T//16, H], float32。阈值，必须严格 > 1。
-        mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SANE；
+        r, w, k, v, a, b: [B, T, H, K], bfloat16。T 必须被 chunk_size 整除。
+        tau: [B, T//chunk_size, H], float32。阈值，必须严格 > 1。
+        mask: [B, T//chunk_size], float32 或 None。>0 的 chunk 边界执行 SANE；
             仅当 output_final_state=True 时生效。
         initial_state: [B, H, K, K] 或 [1, H, K, K], float32, 可选。
         output_final_state: bool, 是否返回最终 state。
@@ -697,7 +713,7 @@ def generalized_delta_rule_sane(r, w, k, v, a, b, tau, mask=None,
             output_final_state=False 时不返回；mask=None 时为 None。
 
     Raises:
-        ValueError: T 不被 16 整除，或 tau/mask 形状不匹配。
+        ValueError: T 不被 chunk_size 整除，或 tau/mask 形状不匹配。
 
     Examples:
         >>> y, state = generalized_delta_rule_sane(
@@ -759,11 +775,11 @@ Keras 3 只规定 Python docstring；CUDA/C++ 按同等精神执行，同为强�
 //   h0:  [B, H, K, K], float32, row-major。初始 state。
 //   out: [B, H, T, K], bfloat16, row-major。输出 y。
 //   sa:  [B, H, T, K], float32, row-major。反向所需中间量。
-//   s_:  [B, H, T//16, K, K], float32, row-major。SANE 之前的 state checkpoint。
+//   s_:  [B, H, T//chunk_size, K, K], float32, row-major。SANE 之前的 state checkpoint。
 //
 // 编译期宏:
 //   _C_: head_size，必须被 4 整除。
-//   CHUNK_LEN: chunk 长度，固定 16。
+//   CHUNK_LEN: chunk 长度，默认 16，可通过工厂函数或算子参数修改。
 //
 // 指针算术一律使用 64 位整数，防止大 tensor 时 32 位偏移溢出。
 __global__ void wkv7_forward(...)
@@ -803,7 +819,7 @@ __global__ void wkv7_forward(...)
 1. **JAX RWKV6 `cuda` 后端用 `jax.ffi`**，需要 JAX >= 0.4.31；旧版 XLA
    custom-call 代码已移除。
 2. **RWKV7 Triton 后端目前主要验证 HEAD_SIZE=64**，其他 head_size 请用 `cuda`。
-3. **chunkwise RWKV7 要求序列长度能被 16 整除**，否则可能静默出错或触发
+3. **chunkwise RWKV7 要求序列长度能被 chunk_size 整除**，否则可能静默出错或触发
    未定义行为。
 4. **RWKV6 的 `max_sequence_length` 是编译期常量**，修改后必须删除旧 build
    目录重新编译。
@@ -880,12 +896,10 @@ import jax_triton as jt
 
 from .triton_kernel import rwkv7_sane_fwd_kernel
 
-CHUNK_LEN = 16
-
-def _wkv7_sane_fwd_triton_call(r, w, k, v, a, b, tau, h0):
+def _wkv7_sane_fwd_triton_call(r, w, k, v, a, b, tau, h0, chunk_size: int):
     B, N, T, H = r.shape
     dtype = r.dtype
-    chunk_num = T // CHUNK_LEN
+    chunk_num = T // chunk_size
 
     # out_shape 列表顺序与 kernel 的输出指针 OUT / SA_OUT / STATE_CHKP 一一对应
     out_shapes = [
@@ -905,7 +919,7 @@ def _wkv7_sane_fwd_triton_call(r, w, k, v, a, b, tau, h0):
         out_shape=out_shapes,
         grid=grid,
         H_SIZE=H,                    # tl.constexpr
-        CHUNK_LEN=CHUNK_LEN,         # tl.constexpr
+        CHUNK_LEN=chunk_size,        # tl.constexpr
     )
     return out, sa_out, state_chkp
 ```
@@ -1351,8 +1365,8 @@ Triton kernel 的 grid 为 `((B + MINI_BSZ - 1) // MINI_BSZ, N)`，
 
 在 RWKV-7-SANE 中：
 
-- `tau` 形状 `[B, T//16, H]`，带 head 维，可随 head 轴 TP 切分。
-- `mask` 形状 `[B, T//16]`，所有 head 共享，无 head 维；规则中用 `b c`，
+- `tau` 形状 `[B, T//chunk_size, H]`，带 head 维，可随 head 轴 TP 切分。
+- `mask` 形状 `[B, T//chunk_size]`，所有 head 共享，无 head 维；规则中用 `b c`，
   因此 head 轴 TP 时会自动 replicate。
 
 以 SANE Pallas 规则为例：

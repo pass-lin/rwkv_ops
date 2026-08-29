@@ -14,12 +14,12 @@ def transpose_head(x, head_first):
         return x
 
 
-def get_torch_generalized_delta_rule(HEAD_SIZE=64):
-    CHUNK_LEN = 16
+def get_torch_generalized_delta_rule(HEAD_SIZE=64, chunk_size: int = 16):
     flags = [
         "-res-usage",
         f"-D_C_={HEAD_SIZE}",
-        f"-D_CHUNK_LEN_={CHUNK_LEN}",
+        f"-D_CHUNK_LEN_={chunk_size}",
+        f"-DTORCH_LIBRARY_NAME=wind_backstepping_{HEAD_SIZE}_{chunk_size}",
         "--use_fast_math",
         "-O3",
         "-Xptxas -O3",
@@ -29,8 +29,10 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
     current_file_path = os.path.abspath(__file__)
     current_dir_path = os.path.dirname(current_file_path)
 
+    lib_name = f"wind_backstepping_{HEAD_SIZE}_{chunk_size}"
+
     load(
-        name="wind_backstepping",
+        name=lib_name,
         sources=[
             os.path.join(current_dir_path, "wkv7_cuda.cu"),
             os.path.join(current_dir_path, "wkv7_op.cpp"),
@@ -39,6 +41,8 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
         verbose=True,
         extra_cuda_cflags=flags,
     )
+
+    ops = getattr(torch.ops, lib_name)
 
     # 原版无 Mask Autograd Function（内部使用）
     class WindBackstepping(torch.autograd.Function):
@@ -50,17 +54,19 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
                 cast(x, "bfloat16").contiguous() for x in [q, k, v, a, b, w]
             ]
 
-            if T % CHUNK_LEN != 0:
-                raise ValueError("RWKV inputs sequence length must be divisible by 16")
+            if T % chunk_size != 0:
+                raise ValueError(
+                    f"RWKV inputs sequence length must be divisible by {chunk_size}"
+                )
 
             y = torch.empty_like(v)
             s = torch.empty(
-                B, H, T // CHUNK_LEN, N, N, dtype=torch.float32, device=w.device
+                B, H, T // chunk_size, N, N, dtype=torch.float32, device=w.device
             )
             sa = torch.empty(B, T, H, N, dtype=torch.float32, device=w.device)
 
             # 注意原版接口：第5个参数是z(对应a)，第6个是a(对应b)
-            torch.ops.wind_backstepping.forward(w, q, k, v, a, b, y, s, sa, h0)
+            ops.forward(w, q, k, v, a, b, y, s, sa, h0)
 
             ctx.save_for_backward(w, q, k, v, a, b, s, sa)
 
@@ -79,9 +85,7 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
             dw, dq, dk, dv, da, db = [torch.empty_like(x) for x in [w, q, k, v, a, b]]
 
             # 原版接口：第5个输出是dz(对应da)，第6个是da(对应db)
-            torch.ops.wind_backstepping.backward(
-                w, q, k, v, a, b, dy, s, sa, dht, dh0, dw, dq, dk, dv, da, db
-            )
+            ops.backward(w, q, k, v, a, b, dy, s, sa, dht, dh0, dw, dq, dk, dv, da, db)
             return (
                 cast(dw, DTYPE),
                 cast(dq, DTYPE),
@@ -104,19 +108,19 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
             ]
             mask = cast(mask, "bfloat16").contiguous()
 
-            if T % CHUNK_LEN != 0:
-                raise ValueError("RWKV inputs sequence length must be divisible by 16")
+            if T % chunk_size != 0:
+                raise ValueError(
+                    f"RWKV inputs sequence length must be divisible by {chunk_size}"
+                )
 
             y = torch.empty_like(v)
             s = torch.empty(
-                B, H, T // CHUNK_LEN, N, N, dtype=torch.float32, device=w.device
+                B, H, T // chunk_size, N, N, dtype=torch.float32, device=w.device
             )
             sa = torch.empty(B, T, H, N, dtype=torch.float32, device=w.device)
 
             # Mask版本接口：参数直接对应 w,q,k,v,a,b,mask
-            torch.ops.wind_backstepping.forward_with_mask(
-                w, q, k, v, a, b, mask, y, s, sa, h0
-            )
+            ops.forward_with_mask(w, q, k, v, a, b, mask, y, s, sa, h0)
 
             ctx.save_for_backward(w, q, k, v, a, b, mask, s, sa)
 
@@ -135,7 +139,7 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
             dh0 = torch.empty(dht.shape, dtype=dht.dtype, device=dht.device)
             dw, dq, dk, dv, da, db = [torch.empty_like(x) for x in [w, q, k, v, a, b]]
 
-            torch.ops.wind_backstepping.backward_with_mask(
+            ops.backward_with_mask(
                 w, q, k, v, a, b, mask, dy, s, sa, dht, dh0, dw, dq, dk, dv, da, db
             )
             return (
@@ -149,6 +153,8 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
                 dh0,  # mask的梯度为None
             )
 
+    _compiled_chunk_size = chunk_size
+
     # 统一对外接口：Training（根据mask自动选择）
     def generalized_delta_rule(
         r,
@@ -160,6 +166,7 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
         initial_state=None,
         output_final_state: bool = True,
         head_first: bool = False,
+        chunk_size: int = _compiled_chunk_size,
         mask=None,
     ):
         """RWKV-7 chunkwise 广义 delta 规则（训练版）。
@@ -167,10 +174,11 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
         非 CUDA 设备自动回退到 native 实现。
 
         Args:
-            r, w, k, v, a, b: [B, T, H, K], bfloat16。T 必须被 16 整除。
+            r, w, k, v, a, b: [B, T, H, K], bfloat16。T 必须被 chunk_size 整除。
             initial_state: [B, H, K, K], float32, 可选。None 则零初始化。
             output_final_state: bool, 是否返回最终 state。
             head_first: bool, 输入是否 head 维优先 ([B, H, T, K])。
+            chunk_size: int, chunk 长度，必须与编译时的 chunk_size 一致。
             mask: [B, T], float32 或 None。>0 更新状态、0 冻结状态。
 
         Returns:
@@ -179,8 +187,14 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
                 output_final_state=False 时不返回。
 
         Raises:
-            ValueError: T 不被 16 整除。
+            ValueError: T 不被 chunk_size 整除，或 chunk_size 与编译值不一致。
         """
+        if chunk_size != _compiled_chunk_size:
+            raise ValueError(
+                f"CUDA kernel was compiled for chunk_size={_compiled_chunk_size}, "
+                f"got {chunk_size}"
+            )
+
         # CPU回退
         if w.device.type != "cuda":
             from ..native_keras_op import generalized_delta_rule
@@ -195,6 +209,7 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
                 mask=mask,
                 initial_state=initial_state,
                 output_final_state=output_final_state,
+                chunk_size=chunk_size,
             )
 
         # 维度转置
@@ -239,7 +254,7 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
             ]
             y = torch.empty_like(v)
             s = torch.empty(B, H, N, N, dtype=torch.float32, device=w.device)
-            torch.ops.wind_backstepping.forward_inference(w, q, k, v, a, b, y, s, h0)
+            ops.forward_inference(w, q, k, v, a, b, y, s, h0)
             return cast(y, DTYPE), s
 
         @staticmethod
@@ -259,9 +274,7 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
             mask = cast(mask, "bfloat16").contiguous()
             y = torch.empty_like(v)
             s = torch.empty(B, H, N, N, dtype=torch.float32, device=w.device)
-            torch.ops.wind_backstepping.forward_inference_with_mask(
-                w, q, k, v, a, b, mask, y, s, h0
-            )
+            ops.forward_inference_with_mask(w, q, k, v, a, b, mask, y, s, h0)
             return cast(y, DTYPE), s
 
         @staticmethod
@@ -278,6 +291,7 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
         initial_state=None,
         head_first: bool = False,
         output_final_state: bool = True,
+        chunk_size: int = _compiled_chunk_size,
         mask=None,
     ):
         """RWKV-7 chunkwise 广义 delta 规则推理入口（无梯度）。
@@ -289,6 +303,7 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
             initial_state: [B, H, K, K], float32, 可选。None 则零初始化。
             head_first: bool, 输入是否 head 维优先 ([B, H, T, K])。
             output_final_state: bool, 是否返回最终 state。
+            chunk_size: int, chunk 长度，必须与编译时的 chunk_size 一致。
             mask: [B, T], float32 或 None。>0 更新状态、0 冻结状态。
 
         Returns:
@@ -298,7 +313,14 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64):
 
         Raises:
             NotImplementedError: 非 CUDA 设备。
+            ValueError: chunk_size 与编译值不一致。
         """
+        if chunk_size != _compiled_chunk_size:
+            raise ValueError(
+                f"CUDA kernel was compiled for chunk_size={_compiled_chunk_size}, "
+                f"got {chunk_size}"
+            )
+
         if w.device.type != "cuda":
             raise NotImplementedError("Inference kernel only supports CUDA")
 

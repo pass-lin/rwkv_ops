@@ -53,6 +53,7 @@
     - [`gated_delta_net_chunk`](#gated_delta_net_chunk)
   - [Implementation Status of `gdn_chunk`](#implementation-status-of-gdn_chunk)
 - [Usage of `rwkv6op`](#usage-of-rwkv6op)
+- [Factory functions and custom parameters](#factory-functions-and-custom-parameters)
 - [Distributed Parallelism (JAX)](#distributed-parallelism)
   - [PyTorch Usage Notes](#pytorch-usage-notes)
   - [JAX Usage Notes](#jax-usage-notes)
@@ -202,26 +203,30 @@ def generalized_delta_rule(
     initial_state=None,
     output_final_state: bool = True,
     head_first: bool = False,
+    chunk_size: int = 16,
     mask=None,
 ):
     """
     Chunked Delta-Rule attention interface.
 
     Args:
-        q:  [B, T, H, K]
+        r:  [B, T, H, K]
+        w:  [B, T, H, K]
         k:  [B, T, H, K]
-        v:  [B, T, H, V]
+        v:  [B, T, H, K]
         a:  [B, T, H, K]
         b:  [B, T, H, K]
-        gk: [B, T, H, K]  # decay term in log-space!
-        mask [B,T] decide state update
-        initial_state: initial state [N, H, K, V], N = number of sequences
+        initial_state: initial state [B, H, K, K] or [1, H, K, K]
         output_final_state: whether to return the final state
         head_first: whether to use head-first layout (variable length not supported)
+        chunk_size: chunk length, default 16; cuda/triton/pallas backends require T divisible by it
+        mask: [B, T], decides whether the state is updated; 1 = update, 0 = freeze.
+              Enabling mask roughly doubles training cost. Recommended alternative:
+              `v *= mask; a *= mask; ops.where(mask, w, -1e9)`.
 
     Returns:
-        o:           output [B, T, H, V] or [B, H, T, V]
-        final_state: final state [N, H, K, V] or None
+        o:           output [B, T, H, K] or [B, H, T, K]
+        final_state: final state [B, H, K, K] or None
     """
 ```
 
@@ -230,18 +235,18 @@ The only difference between `generalized_delta_rule_inference` and `generalized_
 <a id="cuda-kernel-special-usage"></a>
 ### CUDA-kernel special usage
 
-- In the `torch-cuda` and `jax-cuda` kernels, `head_size` is also a kernel parameter; the default is 64.  
-- If `head_size != 64`, use:
+- In the `torch-cuda` and `jax-cuda` kernels, both `head_size` and `chunk_size` are compile-time constants; the defaults are 64 and 16, respectively.  
+- If you need `head_size != 64` or `chunk_size != 16`, use the factory function:
 
 ```python
 from rwkv_ops import get_generalized_delta_rule
 
-rwkv7_op, rwkv7_op_inference, USE_TRITON_KERNEL = get_generalized_delta_rule(
-    your_head_size, KERNEL_TYPE="cuda"
+rwkv7_op, rwkv7_op_inference = get_generalized_delta_rule(
+    HEAD_SIZE=your_head_size, KERNEL_TYPE="cuda", chunk_size=32
 )
 ```
 
-- `USE_TRITON_KERNEL` is a constant that indicates whether the chunkwise kernel is being used.  
+- `chunk_size` is passed into the CUDA kernel via the `-D_CHUNK_LEN_` macro, so a different `chunk_size` triggers a separate compilation and produces an independent `.so` / torch extension. Switching `chunk_size` will not accidentally reuse the old kernel.
 - The two kernels handle padding differently:
 
 ```python
@@ -344,11 +349,12 @@ def generalized_delta_rule_sane(
     v,
     a,
     b,
-    tau,                  # [B, T//16, H], float32, already softplus(param)+1, must be > 0
-    mask=None,            # [B, T//16], float32, 1 -> apply SANE, 0 -> skip; shared across heads
+    tau,                  # [B, T//chunk_size, H], float32, already softplus(param)+1, must be > 0
+    mask=None,            # [B, T//chunk_size], float32, 1 -> apply SANE, 0 -> skip; shared across heads
     initial_state=None,
     output_final_state: bool = True,
     head_first: bool = False,
+    chunk_size: int = 16,
 ):
     """
     RWKV-7 generalized delta rule with State Anomaly Neutralization (training / prefill).
@@ -365,14 +371,15 @@ def generalized_delta_rule_sane(
       explicit ``mask`` is provided.
 
     Args:
-        r, w, k, v, a, b: [B, T, H, K] or [B, H, T, K], T must be divisible by 16.
-        tau: [B, T//16, H], float32, must be > 0.
-        mask: [B, T//16], float32, 0/1 per-chunk flag for State Anomaly Neutralization;
+        r, w, k, v, a, b: [B, T, H, K] or [B, H, T, K], T must be divisible by chunk_size.
+        tau: [B, T//chunk_size, H], float32, must be > 0.
+        mask: [B, T//chunk_size], float32, 0/1 per-chunk flag for State Anomaly Neutralization;
               only effective when output_final_state=True and mask is explicitly
               provided. Set padded chunks to 0 and keep k=0, a=0, w=-inf.
         initial_state: [B, H, K, K] or [1, H, K, K].
         output_final_state: whether to return the final state.
         head_first: whether input is head-first.
+        chunk_size: chunk length, default 16. For the CUDA backend it is a compile-time constant and must be set via the factory function; for Triton/Pallas/native it can be passed at call time.
 
     Returns:
         out: [B, T, H, K]
@@ -381,7 +388,7 @@ def generalized_delta_rule_sane(
 ```
 
 `generalized_delta_rule_sane_inference` has the same interface but **does not compute gradients**, saving memory.
-Note: the inference kernel reads `tau` per chunk, so `tau` only needs to have length `T // 16`; **T is no longer required to be divisible by 16**. For arbitrary-length prefill, you can also use the single-step RNN interface below.
+Note: the inference kernel reads `tau` per chunk, so `tau` only needs to have length `T // chunk_size`; **T is no longer required to be divisible by chunk_size**. For arbitrary-length prefill, you can also use the single-step RNN interface below.
 
 <a id="rwkv7op_sane-implementation-status"></a>
 ### rwkv7op_sane implementation status
@@ -421,11 +428,11 @@ def rwkv7_op_sane_rnn(
     """
 ```
 
-Example (trigger SANE every 16 steps):
+Example (trigger SANE every chunk_size steps, default 16):
 
 ```python
 for step in range(seq_len):
-    do_sane = (step % 16 == 15)
+    do_sane = (step % chunk_size == chunk_size - 1)
     out, state = rwkv7_op_sane_rnn(
         r[step], w[step], k[step], v[step], a[step], b[step],
         tau=tau, do_sane=do_sane, initial_state=state
@@ -498,6 +505,7 @@ out, state = gated_delta_net_recurrent_single_step(
 | initial_state | (B, H, K, V) or (1, H, K, V), optional | Initial recurrent state |
 | output_final_state | bool | Whether to return the final state |
 | head_first | bool | Whether inputs/outputs use head-first layout |
+| chunk_size | int | Chunk length, default 16; ignored by the plain recurrent implementation (kept for signature consistency) |
 
 | Return value | Shape | Description |
 |---|---|---|
@@ -521,6 +529,7 @@ Same interface as `gated_delta_net_recurrent`, but **does not compute gradients*
 | initial_state | (B, H, K, V) or (1, H, K, V), optional | Current state |
 | output_final_state | bool | Whether to return the next state |
 | head_first | bool | Single-step currently only supports `head_first=True` |
+| chunk_size | int | Chunk length, default 16; ignored by the single-step implementation (kept for signature consistency) |
 
 | Return value | Shape | Description |
 |---|---|---|
@@ -592,11 +601,12 @@ out, state = gated_delta_net_recurrent_sane_single_step(
 | v | (B, T, H, V) | Value |
 | g | (B, T, H) | Log-space decay gate |
 | beta | (B, T, H) | Write strength; must have already passed through sigmoid, i.e. in (0, 1) |
-| tau | (B, T//16, H) | SANE threshold; must be > 0 |
-| mask | (B, T//16), optional | SANE is applied at chunk boundaries where mask > 0; only effective when `output_final_state=True` |
+| tau | (B, T//chunk_size, H) | SANE threshold; must be > 0 |
+| mask | (B, T//chunk_size), optional | SANE is applied at chunk boundaries where mask > 0; only effective when `output_final_state=True` |
 | initial_state | (B, H, K, V) or (1, H, K, V), optional | Initial recurrent state |
 | output_final_state | bool | Whether to return the final state |
 | head_first | bool | Whether the input/output is head-first |
+| chunk_size | int | SANE chunk length, default 16; determines the chunk dimension of `tau`/`mask` |
 
 | Return value | Shape | Description |
 |---|---|---|
@@ -622,6 +632,7 @@ Same interface as `gated_delta_net_recurrent_sane`, but **does not compute gradi
 | initial_state | (B, H, K, V) or (1, H, K, V), optional | Current state |
 | output_final_state | bool | Whether to return the next state |
 | head_first | bool | Single-step currently only supports `head_first=True` |
+| chunk_size | int | Chunk length, default 16; ignored by the single-step implementation (kept for signature consistency) |
 
 | Return value | Shape | Description |
 |---|---|---|
@@ -830,6 +841,51 @@ y, final_state = rwkv6_op(
 | OpenVINO    | ❌   | ❌     | ✅     |
 
 JAX `cuda` backend is based on `jax.ffi` and supports JAX >= 0.4.31 (including 0.6.x). The CUDA path only accelerates `bfloat16`; non-`bfloat16` inputs trigger a warning and are cast to `bfloat16`, no longer falling back to `native`.
+
+
+<a id="factory-functions-and-custom-parameters"></a>
+## Factory functions and custom parameters
+
+`from rwkv_ops import *` instantiates a set of **default operators** with `HEAD_SIZE=64`, `chunk_size=16`, and `KERNEL_TYPE` taken from the `KERNEL_TYPE` environment variable (default `cuda`).
+
+To customize `head_size`, `chunk_size`, or `KERNEL_TYPE`, use the corresponding `get_*` factory function:
+
+```python
+from rwkv_ops import (
+    get_generalized_delta_rule,           # RWKV-7
+    get_generalized_delta_rule_sane,      # RWKV-7-SANE
+    get_gated_delta_net_chunk,            # GDN chunkwise
+    get_gated_delta_net_recurrent,        # GDN recurrent (non-SANE)
+    get_gated_delta_net_recurrent_sane,   # GDN recurrent SANE
+)
+
+# RWKV-7 CUDA: HEAD_SIZE and chunk_size are compile-time constants and must be set in the factory
+rwkv7_op, rwkv7_op_inference = get_generalized_delta_rule(
+    HEAD_SIZE=64, KERNEL_TYPE="cuda", chunk_size=32
+)
+
+# RWKV-7-SANE CUDA: chunk_size must also be set in the factory
+rwkv7_op_sane, rwkv7_op_sane_inference = get_generalized_delta_rule_sane(
+    HEAD_SIZE=64, KERNEL_TYPE="cuda", chunk_size=32
+)
+
+# Gated DeltaNet chunkwise (chunk_size can be passed at call time for triton/native)
+gdn_chunk = get_gated_delta_net_chunk(KERNEL_TYPE="triton", chunk_size=32)
+
+# Gated DeltaNet recurrent (non-SANE; chunk_size is ignored, kept only for signature consistency)
+gdn_recurrent = get_gated_delta_net_recurrent(KERNEL_TYPE="triton", chunk_size=32)
+
+# Gated DeltaNet recurrent SANE (chunk_size is used for SANE boundaries)
+gdn_recurrent_sane = get_gated_delta_net_recurrent_sane(
+    KERNEL_TYPE="triton", chunk_size=32
+)
+```
+
+**Notes:**
+- **CUDA backend**: `chunk_size` is baked into the kernel via the `-D_CHUNK_LEN_` macro, so it must be specified through the factory function. The returned operator still has a `chunk_size` argument, but passing a different value at call time will raise an error. Each distinct `chunk_size` triggers a separate compilation. Affected operators: `generalized_delta_rule`, `generalized_delta_rule_sane`, `gated_delta_net_chunk`, `gated_delta_net_recurrent_sane`.
+- **Triton / Pallas / native backends**: `chunk_size` can be passed at call time; the factory only sets the default. Changing `chunk_size` does not trigger recompilation.
+- `chunk_size` defaults to 16; `gated_delta_net_recurrent` (non-SANE) accepts but ignores this parameter, keeping it only for signature consistency.
+- Factory functions return operators with the same signature as the default operators and can be called directly.
 
 
 <a id="testing"></a>

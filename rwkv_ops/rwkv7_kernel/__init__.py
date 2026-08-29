@@ -29,18 +29,22 @@ def _force_keras_native():
     return v not in ("", "0", "false")
 
 
-def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
+def get_generalized_delta_rule(
+    HEAD_SIZE=64, KERNEL_TYPE="native", chunk_size: int = 16
+):
     """按后端与 KERNEL_TYPE 返回 RWKV-7 chunkwise 训练算子对。
 
     Args:
         HEAD_SIZE: int，head 维度大小，必须被 4 整除。
         KERNEL_TYPE: str，"native" / "cuda" / "triton"。
+        chunk_size: int，chunk 长度，必须整除序列长度。
 
     Returns:
         (training_op, inference_op): 均为 Callable。
         当后端/硬件不支持所选 KERNEL_TYPE 时静默回退 native_keras_op。
     """
     assert HEAD_SIZE % 4 == 0
+    assert chunk_size > 0
     from .native_keras_op import generalized_delta_rule
 
     if keras.config.backend() == "jax":
@@ -52,16 +56,16 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
             if KERNEL_TYPE == "cuda":
                 from .jax_cuda_kernel.wkv7_jax import get_jax_generalized_delta_rule
 
-                return get_jax_generalized_delta_rule(HEAD_SIZE)
+                return get_jax_generalized_delta_rule(HEAD_SIZE, chunk_size=chunk_size)
             elif KERNEL_TYPE == "triton":
-                from .jax_triton_kernel import generalized_delta_rule as jax_kernel
+                from .jax_triton_kernel import get_jax_generalized_delta_rule
 
-                return jax_kernel, generalized_delta_rule
+                return get_jax_generalized_delta_rule(HEAD_SIZE, chunk_size=chunk_size)
 
         if _use_jax_pallas(KERNEL_TYPE):
             from .jax_pallas_kernel import get_jax_generalized_delta_rule
 
-            return get_jax_generalized_delta_rule(HEAD_SIZE)
+            return get_jax_generalized_delta_rule(HEAD_SIZE, chunk_size=chunk_size)
     elif keras.config.backend() == "torch":
         import torch
 
@@ -71,30 +75,38 @@ def get_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                     get_torch_generalized_delta_rule,
                 )
 
-                return get_torch_generalized_delta_rule(HEAD_SIZE)
+                return get_torch_generalized_delta_rule(
+                    HEAD_SIZE, chunk_size=chunk_size
+                )
             elif KERNEL_TYPE == "triton":
-                from .torch_triton_kernel import generalized_delta_rule as triton_kernel
+                from .torch_triton_kernel import get_torch_generalized_delta_rule
 
-                return triton_kernel, generalized_delta_rule
+                return get_torch_generalized_delta_rule(
+                    HEAD_SIZE, chunk_size=chunk_size
+                )
         if _use_triton(KERNEL_TYPE):
-            from .torch_triton_kernel import generalized_delta_rule as triton_kernel
+            from .torch_triton_kernel import get_torch_generalized_delta_rule
 
-            return triton_kernel, generalized_delta_rule
+            return get_torch_generalized_delta_rule(HEAD_SIZE, chunk_size=chunk_size)
 
     return generalized_delta_rule, generalized_delta_rule
 
 
-def get_rnn_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
+def get_rnn_generalized_delta_rule(
+    HEAD_SIZE=64, KERNEL_TYPE="native", chunk_size: int = 16
+):
     """按后端与 KERNEL_TYPE 返回 RWKV-7 单步（T=1）算子。
 
     Args:
         HEAD_SIZE: int，head 维度大小，必须被 4 整除。
         KERNEL_TYPE: str，目前仅 "cuda" 提供加速实现，其余回退 native。
+        chunk_size: int，chunk 长度，单步 kernel 忽略该值。
 
     Returns:
         single_step_op: Callable，输入 T 必须为 1。
     """
     assert HEAD_SIZE % 4 == 0
+    assert chunk_size > 0
     from .native_keras_op import generalized_delta_rule
 
     if KERNEL_TYPE == "cuda":
@@ -106,7 +118,9 @@ def get_rnn_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                     get_jax_generalized_delta_rule_single_step,
                 )
 
-                return get_jax_generalized_delta_rule_single_step(HEAD_SIZE)
+                return get_jax_generalized_delta_rule_single_step(
+                    HEAD_SIZE, chunk_size=chunk_size
+                )
         elif keras.config.backend() == "torch":
             import torch
 
@@ -115,5 +129,7 @@ def get_rnn_generalized_delta_rule(HEAD_SIZE=64, KERNEL_TYPE="native"):
                     get_torch_generalized_delta_rule_single_step,
                 )
 
-                return get_torch_generalized_delta_rule_single_step(HEAD_SIZE)
+                return get_torch_generalized_delta_rule_single_step(
+                    HEAD_SIZE, chunk_size=chunk_size
+                )
     return generalized_delta_rule

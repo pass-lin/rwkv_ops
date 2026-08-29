@@ -14,12 +14,12 @@ def transpose_head(x, head_first):
     return x
 
 
-def get_torch_generalized_delta_rule_sane(HEAD_SIZE=64):
-    CHUNK_LEN = 16
+def get_torch_generalized_delta_rule_sane(HEAD_SIZE=64, chunk_size: int = 16):
     flags = [
         "-res-usage",
         f"-D_C_={HEAD_SIZE}",
-        f"-D_CHUNK_LEN_={CHUNK_LEN}",
+        f"-D_CHUNK_LEN_={chunk_size}",
+        f"-DTORCH_LIBRARY_NAME=wind_backstepping_sane_{HEAD_SIZE}_{chunk_size}",
         "--use_fast_math",
         "-O3",
         "-Xptxas -O3",
@@ -27,8 +27,9 @@ def get_torch_generalized_delta_rule_sane(HEAD_SIZE=64):
     ]
 
     current_dir = os.path.dirname(os.path.abspath(__file__))
+    lib_name = f"wind_backstepping_sane_{HEAD_SIZE}_{chunk_size}"
     load(
-        name="wind_backstepping_sane",
+        name=lib_name,
         sources=[
             os.path.join(current_dir, "wkv7_sane_cuda.cu"),
             os.path.join(current_dir, "wkv7_sane_op.cpp"),
@@ -37,6 +38,8 @@ def get_torch_generalized_delta_rule_sane(HEAD_SIZE=64):
         verbose=True,
         extra_cuda_cflags=flags,
     )
+
+    ops = getattr(torch.ops, lib_name)
 
     class WindBacksteppingSANE(torch.autograd.Function):
         @staticmethod
@@ -49,20 +52,18 @@ def get_torch_generalized_delta_rule_sane(HEAD_SIZE=64):
             tau = cast(tau, "float32").contiguous()
             mask = cast(mask, "float32").contiguous()
 
-            if T % CHUNK_LEN != 0:
+            if T % chunk_size != 0:
                 raise ValueError(
                     "RWKV-SANE inputs sequence length must be divisible by 16"
                 )
 
             y = torch.empty_like(v)
             s = torch.empty(
-                B, H, T // CHUNK_LEN, N, N, dtype=torch.float32, device=w.device
+                B, H, T // chunk_size, N, N, dtype=torch.float32, device=w.device
             )
             sa = torch.empty(B, T, H, N, dtype=torch.float32, device=w.device)
 
-            torch.ops.wind_backstepping_sane.forward_sane(
-                w, q, k, v, a, b, tau, mask, y, s, sa, h0
-            )
+            ops.forward_sane(w, q, k, v, a, b, tau, mask, y, s, sa, h0)
 
             ctx.save_for_backward(w, q, k, v, a, b, tau, mask, s, sa)
 
@@ -89,7 +90,7 @@ def get_torch_generalized_delta_rule_sane(HEAD_SIZE=64):
             dtau = torch.empty(tau.shape, dtype=tau.dtype, device=tau.device)
             dw, dq, dk, dv, da, db = [torch.empty_like(x) for x in [w, q, k, v, a, b]]
 
-            torch.ops.wind_backstepping_sane.backward_sane(
+            ops.backward_sane(
                 w,
                 q,
                 k,
@@ -133,20 +134,18 @@ def get_torch_generalized_delta_rule_sane(HEAD_SIZE=64):
             ]
             tau = cast(tau, "float32").contiguous()
 
-            if T % CHUNK_LEN != 0:
+            if T % chunk_size != 0:
                 raise ValueError(
                     "RWKV-SANE inputs sequence length must be divisible by 16"
                 )
 
             y = torch.empty_like(v)
             s = torch.empty(
-                B, H, T // CHUNK_LEN, N, N, dtype=torch.float32, device=w.device
+                B, H, T // chunk_size, N, N, dtype=torch.float32, device=w.device
             )
             sa = torch.empty(B, T, H, N, dtype=torch.float32, device=w.device)
 
-            torch.ops.wind_backstepping_sane.forward_sane_no_mask(
-                w, q, k, v, a, b, tau, y, s, sa, h0
-            )
+            ops.forward_sane_no_mask(w, q, k, v, a, b, tau, y, s, sa, h0)
 
             ctx.save_for_backward(w, q, k, v, a, b, tau, s, sa)
 
@@ -171,7 +170,7 @@ def get_torch_generalized_delta_rule_sane(HEAD_SIZE=64):
             dtau = torch.empty(tau.shape, dtype=tau.dtype, device=tau.device)
             dw, dq, dk, dv, da, db = [torch.empty_like(x) for x in [w, q, k, v, a, b]]
 
-            torch.ops.wind_backstepping_sane.backward_sane_no_mask(
+            ops.backward_sane_no_mask(
                 w,
                 q,
                 k,
@@ -218,9 +217,7 @@ def get_torch_generalized_delta_rule_sane(HEAD_SIZE=64):
 
             y = torch.empty_like(v)
             s = torch.empty(B, H, N, N, dtype=torch.float32, device=w.device)
-            torch.ops.wind_backstepping_sane.forward_inference_sane(
-                w, q, k, v, a, b, tau, mask, y, s, h0
-            )
+            ops.forward_inference_sane(w, q, k, v, a, b, tau, mask, y, s, h0)
             return cast(y, DTYPE), s
 
         @staticmethod
@@ -239,14 +236,14 @@ def get_torch_generalized_delta_rule_sane(HEAD_SIZE=64):
 
             y = torch.empty_like(v)
             s = torch.empty(B, H, N, N, dtype=torch.float32, device=w.device)
-            torch.ops.wind_backstepping_sane.forward_inference_sane_no_mask(
-                w, q, k, v, a, b, tau, y, s, h0
-            )
+            ops.forward_inference_sane_no_mask(w, q, k, v, a, b, tau, y, s, h0)
             return cast(y, DTYPE), s
 
         @staticmethod
         def backward(ctx, *args):
             raise NotImplementedError("inference kernel does not support backward")
+
+    _compiled_chunk_size = chunk_size
 
     def generalized_delta_rule_sane(
         r,
@@ -260,6 +257,7 @@ def get_torch_generalized_delta_rule_sane(HEAD_SIZE=64):
         initial_state=None,
         output_final_state=True,
         head_first=False,
+        chunk_size: int = _compiled_chunk_size,
     ):
         """带 State Anomaly Neutralization 的 RWKV-7 广义 delta 规则（训练版）。
 
@@ -283,6 +281,12 @@ def get_torch_generalized_delta_rule_sane(HEAD_SIZE=64):
         Raises:
             ValueError: T 不被 16 整除，或 tau/mask 形状不匹配。
         """
+        if chunk_size != _compiled_chunk_size:
+            raise ValueError(
+                f"CUDA kernel was compiled for chunk_size={_compiled_chunk_size}, "
+                f"got {chunk_size}"
+            )
+
         if w.device.type != "cuda":
             from ..native_keras_op import generalized_delta_rule_sane
 
@@ -298,6 +302,7 @@ def get_torch_generalized_delta_rule_sane(HEAD_SIZE=64):
                 initial_state=initial_state,
                 output_final_state=output_final_state,
                 head_first=head_first,
+                chunk_size=chunk_size,
             )
 
         r = transpose_head(r, head_first)
@@ -308,17 +313,17 @@ def get_torch_generalized_delta_rule_sane(HEAD_SIZE=64):
         w = transpose_head(w, head_first)
 
         B, T, H, N = w.shape
-        if T % CHUNK_LEN != 0:
+        if T % chunk_size != 0:
             raise ValueError(
-                f"RWKV-SANE training/prefill requires T divisible by {CHUNK_LEN}, "
+                f"RWKV-SANE training/prefill requires T divisible by {chunk_size}, "
                 f"but got T={T}."
             )
 
         tau = cast(tau, "float32").contiguous()
-        if tau.shape != (B, T // CHUNK_LEN, H):
+        if tau.shape != (B, T // chunk_size, H):
             raise ValueError(
                 f"tau shape {tuple(tau.shape)} does not match expected "
-                f"(B={B}, T//16={T // CHUNK_LEN}, H={H})"
+                f"(B={B}, T//16={T // chunk_size}, H={H})"
             )
 
         if initial_state is None:
@@ -333,9 +338,9 @@ def get_torch_generalized_delta_rule_sane(HEAD_SIZE=64):
 
         if use_mask:
             mask = cast(mask, "float32").contiguous()
-            if mask.shape != (B, T // CHUNK_LEN):
+            if mask.shape != (B, T // chunk_size):
                 raise ValueError(
-                    f"mask shape {tuple(mask.shape)} must match (B, T//16) = ({B}, {T // CHUNK_LEN})"
+                    f"mask shape {tuple(mask.shape)} must match (B, T//16) = ({B}, {T // chunk_size})"
                 )
             out, state = WindBacksteppingSANE.apply(
                 w, r, k, v, a, b, tau, mask, initial_state
@@ -373,6 +378,7 @@ def get_torch_generalized_delta_rule_sane(HEAD_SIZE=64):
         initial_state=None,
         output_final_state=True,
         head_first=False,
+        chunk_size: int = _compiled_chunk_size,
     ):
         """带 State Anomaly Neutralization 的 RWKV-7 推理入口（无梯度）。
 
@@ -396,6 +402,12 @@ def get_torch_generalized_delta_rule_sane(HEAD_SIZE=64):
             NotImplementedError: 非 CUDA 设备。
             ValueError: tau/mask 形状不匹配。
         """
+        if chunk_size != _compiled_chunk_size:
+            raise ValueError(
+                f"CUDA kernel was compiled for chunk_size={_compiled_chunk_size}, "
+                f"got {chunk_size}"
+            )
+
         if w.device.type != "cuda":
             raise NotImplementedError("Inference kernel only supports CUDA")
 
@@ -409,10 +421,10 @@ def get_torch_generalized_delta_rule_sane(HEAD_SIZE=64):
         B, T, H, N = w.shape
 
         tau = cast(tau, "float32").contiguous()
-        if tau.shape != (B, T // CHUNK_LEN, H):
+        if tau.shape != (B, T // chunk_size, H):
             raise ValueError(
                 f"tau shape {tuple(tau.shape)} does not match expected "
-                f"(B={B}, T//16={T // CHUNK_LEN}, H={H})"
+                f"(B={B}, T//16={T // chunk_size}, H={H})"
             )
 
         if initial_state is None:
@@ -426,9 +438,9 @@ def get_torch_generalized_delta_rule_sane(HEAD_SIZE=64):
 
         if use_mask:
             mask = cast(mask, "float32").contiguous()
-            if mask.shape != (B, T // CHUNK_LEN):
+            if mask.shape != (B, T // chunk_size):
                 raise ValueError(
-                    f"mask shape {tuple(mask.shape)} must match (B, T//16) = ({B}, {T // CHUNK_LEN})"
+                    f"mask shape {tuple(mask.shape)} must match (B, T//16) = ({B}, {T // chunk_size})"
                 )
             out, state = Wkv7SaneInference.apply(
                 w, r, k, v, a, b, tau, mask, initial_state

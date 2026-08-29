@@ -258,7 +258,7 @@ def gated_delta_net_chunk(
         beta: [B, T, H]，写入强度门控，已在外部过 sigmoid。
         initial_state: [B, H, K, V] 或 [1, H, K, V]，float32，可选。
         output_final_state: bool，是否返回最终状态。
-        chunk_size: int，chunk 长度，默认 64。
+        chunk_size: int，chunk 长度，默认 16。
 
     Returns:
         out: [B, T, H, V]，与 v 同 dtype。

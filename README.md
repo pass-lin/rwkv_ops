@@ -200,27 +200,29 @@ def generalized_delta_rule(
     initial_state=None,
     output_final_state: bool = True,
     head_first: bool = False,
+    chunk_size: int = 16,
     mask=None,
 ):
     """
     分块 Delta Rule 注意力接口。
 
     Args:
-        q:  [B, T, H, K]
+        r:  [B, T, H, K]
+        w:  [B, T, H, K]
         k:  [B, T, H, K]
-        v:  [B, T, H, V]
+        v:  [B, T, H, K]
         a:  [B, T, H, K]
         b:  [B, T, H, K]
-        gk: [B, T, H, K]  # decay term in log space!
-        mask:[B,T] 决定这个状态是否被更新,1更新0不更新.注意开启这个你的训练速度会慢一倍。
-                   因此我更推荐v*= mask a*=mask ops.where(mask,w,-1e9)的方式来做mask
-        initial_state: 初始状态 [N, H, K, V]，N 为序列数
+        initial_state: 初始状态 [B, H, K, K] 或 [1, H, K, K]
         output_final_state: 是否返回最终状态
         head_first: 是否 head-first 格式，不支持变长
+        chunk_size: chunk 长度，默认 16；cuda/triton/pallas 后端 T 必须被其整除
+        mask: [B, T]，决定这个状态是否被更新，1 更新 0 不更新。注意开启这个你的训练速度会慢一倍。
+              因此我更推荐 v *= mask, a *= mask, ops.where(mask, w, -1e9) 的方式来做 mask
 
     Returns:
-        o:           输出 [B, T, H, V] 或 [B, H, T, V]
-        final_state: 最终状态 [N, H, K, V] 或 None
+        o:           输出 [B, T, H, K] 或 [B, H, T, K]
+        final_state: 最终状态 [B, H, K, K] 或 None
     """
 ```
 generalized_delta_rule_inference和generalized_delta_rule的区别是前者没有梯度。因为不需要存储激活值，所以可以节省一部分显存。
@@ -228,25 +230,25 @@ generalized_delta_rule_inference和generalized_delta_rule的区别是前者没�
 <a id="cuda-kernel-特殊用法"></a>
 ### cuda-kernel 特殊用法
 
-- torch-cuda和jax-cuda kernel 下 `head_size` 也是一个 kernel 参数，默认为 64。  
-- 若 `head_size ≠ 64`，请使用：
+- torch-cuda 和 jax-cuda kernel 下 `head_size` 与 `chunk_size` 都是编译期参数，默认分别为 64 和 16。  
+- 若需要 `head_size ≠ 64` 或 `chunk_size ≠ 16`，请使用工厂函数：
 
 ```python
 from rwkv_ops import get_generalized_delta_rule
 
-rwkv7_op, rwkv7_op_inference, USE_TRITON_KERNEL = get_generalized_delta_rule(
-    your_head_size, KERNEL_TYPE="cuda"
+rwkv7_op, rwkv7_op_inference = get_generalized_delta_rule(
+    HEAD_SIZE=your_head_size, KERNEL_TYPE="cuda", chunk_size=32
 )
 ```
 
-- `USE_TRITON_KERNEL` 为常量，标记是否使用 chunkwise 算子。  
-- 两者 padding 处理逻辑不同：
+- `chunk_size` 会作为 `-D_CHUNK_LEN_` 宏编译进 CUDA kernel，因此不同 `chunk_size` 会各自编译一次，生成独立的 `.so` / torch extension。切换 `chunk_size` 不会复用旧 kernel，避免结果错误。
+- 对于 padding 处理：
 
 ```python
 if padding_mask is not None:
     w += (1 - padding_mask) * -1e9
 ```
-- 对于上面的代码，基于循环的算子可以针对left pading和right pading都能成功处理。
+- 基于循环的算子可以针对 left padding 和 right padding 都能成功处理。
 - 而如果用的是chunkwise算子，建议统一left padding，如果是cuda或者原生，则都left right都能正确处理
 
 
@@ -332,11 +334,12 @@ def generalized_delta_rule_sane(
     v,
     a,
     b,
-    tau,                  # [B, T//16, H]，float32，已预处理为 softplus(param)+1，必须 > 0
-    mask=None,            # [B, T//16]，float32，1 表示执行 SANE，0 表示跳过；所有 head 共享
+    tau,                  # [B, T//chunk_size, H]，float32，已预处理为 softplus(param)+1，必须 > 0
+    mask=None,            # [B, T//chunk_size]，float32，1 表示执行 SANE，0 表示跳过；所有 head 共享
     initial_state=None,
     output_final_state: bool = True,
     head_first: bool = False,
+    chunk_size: int = 16,
 ):
     """
     带 State Anomaly Neutralization 的 RWKV-7 广义 Delta 规则（训练 / prefill 通用）。
@@ -350,14 +353,15 @@ def generalized_delta_rule_sane(
     - 只有 ``output_final_state=True`` 且显式传入 ``mask`` 时，才使用带 mask 算子。
 
     Args:
-        r, w, k, v, a, b: [B, T, H, K] 或 [B, H, T, K]，T 必须被 16 整除。
-        tau: [B, T//16, H]，float32，必须 > 0。
-        mask: [B, T//16]，float32，0/1 标记每个 chunk 是否执行 State Anomaly Neutralization；
+        r, w, k, v, a, b: [B, T, H, K] 或 [B, H, T, K]，T 必须被 chunk_size 整除。
+        tau: [B, T//chunk_size, H]，float32，必须 > 0。
+        mask: [B, T//chunk_size]，float32，0/1 标记每个 chunk 是否执行 State Anomaly Neutralization；
               只有需要返回 final_state 且显式提供时才生效。padding chunk 请置 0，
               并配合 k=0, a=0, w=-inf。
         initial_state: [B, H, K, K] 或 [1, H, K, K]。
         output_final_state: 是否返回最终 State。
         head_first: 是否 head-first。
+        chunk_size: chunk 长度，默认 16。CUDA 后端为编译期常量，需通过工厂函数指定；Triton/Pallas/native 后端可在调用时传入。
 
     Returns:
         out: [B, T, H, K]
@@ -366,8 +370,8 @@ def generalized_delta_rule_sane(
 ```
 
 `generalized_delta_rule_sane_inference` 与 `generalized_delta_rule_sane` 接口一致，但**不计算梯度**，可节省显存。
-注意：推理 kernel 按 chunk 读取 `tau`，因此 `tau` 的长度只需等于 `T // 16`，
-**T 不再强制要求被 16 整除**；若需要任意长度 prefill，也可使用下方的单步 RNN 接口。
+注意：推理 kernel 按 chunk 读取 `tau`，因此 `tau` 的长度只需等于 `T // chunk_size`，
+**T 不再强制要求被 chunk_size 整除**；若需要任意长度 prefill，也可使用下方的单步 RNN 接口。
 
 <a id="rwkv7op_sane-实现状态"></a>
 ### rwkv7op_sane 实现状态
@@ -405,11 +409,11 @@ def rwkv7_op_sane_rnn(
     """
 ```
 
-调用示例（每 16 步触发一次 SANE）：
+调用示例（每 chunk_size 步触发一次 SANE，默认 16）：
 
 ```python
 for step in range(seq_len):
-    do_sane = (step % 16 == 15)
+    do_sane = (step % chunk_size == chunk_size - 1)
     out, state = rwkv7_op_sane_rnn(
         r[step], w[step], k[step], v[step], a[step], b[step],
         tau=tau, do_sane=do_sane, initial_state=state
@@ -482,6 +486,7 @@ out, state = gated_delta_net_recurrent_single_step(
 | initial_state | (B, H, K, V) 或 (1, H, K, V)，可选 | 初始 recurrent state |
 | output_final_state | bool | 是否返回最终 state |
 | head_first | bool | 输入输出是否 head 维优先 |
+| chunk_size | int | chunk 长度，默认 16；纯 recurrent 实现忽略该参数（仅签名一致） |
 
 | 返回值 | 形状 | 说明 |
 |---|---|---|
@@ -505,6 +510,7 @@ out, state = gated_delta_net_recurrent_single_step(
 | initial_state | (B, H, K, V) 或 (1, H, K, V)，可选 | 当前 state |
 | output_final_state | bool | 是否返回下一步 state |
 | head_first | bool | 单步目前只支持 `head_first=True` |
+| chunk_size | int | chunk 长度，默认 16；单步实现忽略该参数（仅签名一致） |
 
 | 返回值 | 形状 | 说明 |
 |---|---|---|
@@ -576,11 +582,12 @@ out, state = gated_delta_net_recurrent_sane_single_step(
 | v | (B, T, H, V) | 值 |
 | g | (B, T, H) | log-space 衰减门控 |
 | beta | (B, T, H) | 写入强度，需已在外部过 sigmoid，落在 (0, 1) |
-| tau | (B, T//16, H) | SANE 阈值，必须 > 0 |
-| mask | (B, T//16)，可选 | >0 的 chunk 边界执行 SANE；仅当 `output_final_state=True` 时生效 |
+| tau | (B, T//chunk_size, H) | SANE 阈值，必须 > 0 |
+| mask | (B, T//chunk_size)，可选 | >0 的 chunk 边界执行 SANE；仅当 `output_final_state=True` 时生效 |
 | initial_state | (B, H, K, V) 或 (1, H, K, V)，可选 | 初始 recurrent state |
 | output_final_state | bool | 是否返回最终 state |
 | head_first | bool | 输入输出是否 head 维优先 |
+| chunk_size | int | SANE chunk 长度，默认 16；决定 `tau`/`mask` 的 chunk 维度 |
 
 | 返回值 | 形状 | 说明 |
 |---|---|---|
@@ -606,6 +613,7 @@ out, state = gated_delta_net_recurrent_sane_single_step(
 | initial_state | (B, H, K, V) 或 (1, H, K, V)，可选 | 当前 state |
 | output_final_state | bool | 是否返回下一步 state |
 | head_first | bool | 单步目前只支持 `head_first=True` |
+| chunk_size | int | chunk 长度，默认 16；单步实现忽略该参数（仅签名一致） |
 
 | 返回值 | 形状 | 说明 |
 |---|---|---|
@@ -805,6 +813,51 @@ y, final_state = rwkv6_op(
 | NumPy       | ❌   | ❌     | ✅     |
 
 JAX `cuda` 后端基于 `jax.ffi`，支持 JAX >= 0.4.31（含 0.6.x）。CUDA 路径仅对 `bfloat16` 加速；非 `bfloat16` 输入会发出警告并强制 cast 为 `bfloat16`，不再回退到 `native`。
+
+
+<a id="工厂函数与自定义参数"></a>
+## 工厂函数与自定义参数
+
+包入口 `from rwkv_ops import *` 会按环境变量实例化一组**默认算子**：`HEAD_SIZE=64`、`chunk_size=16`、`KERNEL_TYPE` 取自 `KERNEL_TYPE` 环境变量（默认 `cuda`）。
+
+若需要自定义 `head_size`、`chunk_size` 或 `KERNEL_TYPE`，请使用对应的 `get_*` 工厂函数：
+
+```python
+from rwkv_ops import (
+    get_generalized_delta_rule,           # RWKV-7
+    get_generalized_delta_rule_sane,      # RWKV-7-SANE
+    get_gated_delta_net_chunk,            # GDN chunkwise
+    get_gated_delta_net_recurrent,        # GDN recurrent（无 SANE）
+    get_gated_delta_net_recurrent_sane,   # GDN recurrent SANE
+)
+
+# RWKV-7 CUDA：HEAD_SIZE 与 chunk_size 均为编译期常量，必须在工厂指定
+rwkv7_op, rwkv7_op_inference = get_generalized_delta_rule(
+    HEAD_SIZE=64, KERNEL_TYPE="cuda", chunk_size=32
+)
+
+# RWKV-7-SANE CUDA：同样通过工厂指定 chunk_size
+rwkv7_op_sane, rwkv7_op_sane_inference = get_generalized_delta_rule_sane(
+    HEAD_SIZE=64, KERNEL_TYPE="cuda", chunk_size=32
+)
+
+# Gated DeltaNet chunkwise（triton/native 可在调用时传 chunk_size）
+gdn_chunk = get_gated_delta_net_chunk(KERNEL_TYPE="triton", chunk_size=32)
+
+# Gated DeltaNet recurrent（无 SANE；chunk_size 仅签名一致，可忽略）
+gdn_recurrent = get_gated_delta_net_recurrent(KERNEL_TYPE="triton", chunk_size=32)
+
+# Gated DeltaNet recurrent SANE（triton/native 可在调用时传 chunk_size）
+gdn_recurrent_sane = get_gated_delta_net_recurrent_sane(
+    KERNEL_TYPE="triton", chunk_size=32
+)
+```
+
+**注意：**
+- **CUDA 后端**：`chunk_size` 会作为 `-D_CHUNK_LEN_` 宏编译进 kernel，因此必须通过工厂函数指定；返回的算子仍带 `chunk_size` 参数，但传入与编译值不同的 `chunk_size` 会报错。不同 `chunk_size` 会各自编译一次，互不影响。涉及算子：`generalized_delta_rule`、`generalized_delta_rule_sane`、`gated_delta_net_chunk`、`gated_delta_net_recurrent_sane`。
+- **Triton / Pallas / native 后端**：`chunk_size` 可在每次调用时传入，工厂函数仅设定默认值；修改 `chunk_size` 不会触发重新编译。
+- `chunk_size` 默认 16；`gated_delta_net_recurrent`（无 SANE）接受但忽略该参数，仅保持签名一致。
+- 工厂函数返回的算子签名与默认算子一致，可直接调用。
 
 
 <a id="测试"></a>

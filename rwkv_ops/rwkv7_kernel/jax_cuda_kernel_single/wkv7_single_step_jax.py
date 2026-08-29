@@ -18,6 +18,8 @@ _CURRENT_DIR = pathlib.Path(__file__).parent.absolute()
 # 用于绕过 glibc 2.41+ 与 CUDA 13.1 的 rsqrt noexcept 冲突
 _NVCC_WRAPPER = _CURRENT_DIR.parents[1] / "cuda_tools" / "nvcc_wrap"
 
+_REGISTERED_FFI_TARGET: str | None = None
+
 
 # SPMD 切分规则 (Einsum 风格)
 # b=Batch, h=Head, k/m=HeadDim
@@ -65,7 +67,8 @@ def _create_partition(impl_fn):
     return partition
 
 
-def get_jax_generalized_delta_rule_single_step(HEAD_SIZE=64):
+def get_jax_generalized_delta_rule_single_step(HEAD_SIZE=64, chunk_size: int = 16):
+    # chunk_size 仅用于签名一致，单步 kernel 内部固定 T=1，忽略该值。
     _BUILD_DIR = _CURRENT_DIR / f"build_single_step_{HEAD_SIZE}"
     _SO_PATH = _CURRENT_DIR / f"build_single_step_{HEAD_SIZE}/wkv7_single_step.so"
 
@@ -123,12 +126,16 @@ def get_jax_generalized_delta_rule_single_step(HEAD_SIZE=64):
         return _SO_PATH
 
     # 注册 FFI 符号（仅前向）
+    global _REGISTERED_FFI_TARGET
     _lib = ctypes.CDLL(_ensure_compiled())
-    jax.ffi.register_ffi_target(
-        "wkv7_single_step_fwd",
-        jax.ffi.pycapsule(_lib.Wkv7SingleStepFwd),
-        platform="CUDA",
-    )
+    _target_name = f"wkv7_single_step_fwd_{HEAD_SIZE}"
+    if _REGISTERED_FFI_TARGET != _target_name:
+        jax.ffi.register_ffi_target(
+            _target_name,
+            jax.ffi.pycapsule(_lib.Wkv7SingleStepFwd),
+            platform="CUDA",
+        )
+        _REGISTERED_FFI_TARGET = _target_name
 
     # 工具
     def _transpose_head(x: jnp.ndarray, head_first: bool) -> jnp.ndarray:
@@ -159,7 +166,7 @@ def get_jax_generalized_delta_rule_single_step(HEAD_SIZE=64):
         s_type = jax.ShapeDtypeStruct((B, H, K, K), jnp.float32)
 
         y, s = jax.ffi.ffi_call(
-            "wkv7_single_step_fwd", (out_type, s_type), vmap_method="broadcast_all"
+            _target_name, (out_type, s_type), vmap_method="broadcast_all"
         )(w, q, k, v, a, b, h0)
 
         return y, s
@@ -199,6 +206,7 @@ def get_jax_generalized_delta_rule_single_step(HEAD_SIZE=64):
         initial_state: Optional[jnp.ndarray] = None,
         output_final_state: bool = True,
         head_first: bool = False,
+        chunk_size: int = 16,
     ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
         """RWKV-7 单步广义 delta 规则（仅前向）。
 
