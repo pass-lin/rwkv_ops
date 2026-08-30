@@ -255,7 +255,6 @@ def _make_gated_delta_net_recurrent_inference_triton_function(chunk_size):
                 V=V,
                 BK=BK,
                 BV=BV,
-                CHUNK_LEN=chunk_size,
                 USE_INITIAL_STATE=True,
                 STORE_FINAL_STATE=True,
             )

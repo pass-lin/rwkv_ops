@@ -1,5 +1,6 @@
 """RWKV-7 算子后端分发器。"""
 
+import functools
 import os
 
 import keras
@@ -58,9 +59,12 @@ def get_generalized_delta_rule(
 
                 return get_jax_generalized_delta_rule(HEAD_SIZE, chunk_size=chunk_size)
             elif KERNEL_TYPE == "triton":
-                from .jax_triton_kernel import get_jax_generalized_delta_rule
+                from .jax_triton_kernel import generalized_delta_rule as triton_op
 
-                return get_jax_generalized_delta_rule(HEAD_SIZE, chunk_size=chunk_size)
+                return (
+                    functools.partial(triton_op, chunk_size=chunk_size),
+                    functools.partial(generalized_delta_rule, chunk_size=chunk_size),
+                )
 
         if _use_jax_pallas(KERNEL_TYPE):
             from .jax_pallas_kernel import get_jax_generalized_delta_rule
@@ -79,15 +83,19 @@ def get_generalized_delta_rule(
                     HEAD_SIZE, chunk_size=chunk_size
                 )
             elif KERNEL_TYPE == "triton":
-                from .torch_triton_kernel import get_torch_generalized_delta_rule
+                from .torch_triton_kernel import generalized_delta_rule as triton_op
 
-                return get_torch_generalized_delta_rule(
-                    HEAD_SIZE, chunk_size=chunk_size
+                return (
+                    functools.partial(triton_op, chunk_size=chunk_size),
+                    functools.partial(generalized_delta_rule, chunk_size=chunk_size),
                 )
         if _use_triton(KERNEL_TYPE):
-            from .torch_triton_kernel import get_torch_generalized_delta_rule
+            from .torch_triton_kernel import generalized_delta_rule as triton_op
 
-            return get_torch_generalized_delta_rule(HEAD_SIZE, chunk_size=chunk_size)
+            return (
+                functools.partial(triton_op, chunk_size=chunk_size),
+                functools.partial(generalized_delta_rule, chunk_size=chunk_size),
+            )
 
     return generalized_delta_rule, generalized_delta_rule
 

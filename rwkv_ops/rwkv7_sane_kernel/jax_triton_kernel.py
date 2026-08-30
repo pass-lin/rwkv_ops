@@ -594,6 +594,11 @@ def generalized_delta_rule_sane_inference(
     )
 
 
-def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64):
-    """返回 JAX-Triton 后端的 (训练算子, 推理算子)。"""
-    return [generalized_delta_rule_sane, generalized_delta_rule_sane_inference]
+def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64, chunk_size: int = 16):
+    """返回绑定 chunk_size 的 JAX-Triton 后端 (训练算子, 推理算子)。"""
+    import functools
+
+    return [
+        functools.partial(generalized_delta_rule_sane, chunk_size=chunk_size),
+        functools.partial(generalized_delta_rule_sane_inference, chunk_size=chunk_size),
+    ]

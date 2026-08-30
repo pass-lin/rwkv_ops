@@ -39,6 +39,7 @@ def get_torch_generalized_delta_rule(HEAD_SIZE=64, chunk_size: int = 16):
         ],
         is_python_module=False,
         verbose=True,
+        extra_cflags=[f"-DTORCH_LIBRARY_NAME={lib_name}"],
         extra_cuda_cflags=flags,
     )
 

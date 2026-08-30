@@ -178,8 +178,8 @@ def test_gdn_triton_initial_state_broadcast(gdn_inputs, gdn_cuda_device):
 
 
 @pytest.mark.torch
-def test_gdn_triton_arbitrary_length(gdn_inputs, gdn_cuda_device):
-    """recurrent kernel 支持任意长度（不被 chunk 整除）。"""
+def test_gdn_triton_rejects_arbitrary_length(gdn_inputs, gdn_cuda_device):
+    """recurrent Triton 训练核只支持 T 被 chunk_size 整除。"""
     q = _to_cuda_tensor(gdn_inputs["q"][:, :37], gdn_cuda_device)
     k = _to_cuda_tensor(gdn_inputs["k"][:, :37], gdn_cuda_device)
     v = _to_cuda_tensor(gdn_inputs["v"][:, :37], gdn_cuda_device)
@@ -187,27 +187,10 @@ def test_gdn_triton_arbitrary_length(gdn_inputs, gdn_cuda_device):
     beta = _to_cuda_tensor(gdn_inputs["beta"][:, :37], gdn_cuda_device)
     h0 = _to_cuda_tensor(gdn_inputs["h0"], gdn_cuda_device)
 
-    out_tri, state_tri = gdn_triton_recurrent(
-        q, k, v, g, beta, initial_state=h0, output_final_state=True
-    )
-    out_ref, state_ref = gdn_native_recurrent(
-        q, k, v, g, beta, initial_state=h0, output_final_state=True
-    )
-
-    assert_allclose_with_stats(
-        out_ref,
-        out_tri,
-        "arbitrary length triton vs native output",
-        atol=1e-4,
-        rtol=1e-3,
-    )
-    assert_allclose_with_stats(
-        state_ref,
-        state_tri,
-        "arbitrary length triton vs native state",
-        atol=1e-4,
-        rtol=1e-3,
-    )
+    with pytest.raises(ValueError, match="必须被 chunk_size"):
+        gdn_triton_recurrent(
+            q, k, v, g, beta, initial_state=h0, output_final_state=True
+        )
 
 
 @pytest.mark.torch

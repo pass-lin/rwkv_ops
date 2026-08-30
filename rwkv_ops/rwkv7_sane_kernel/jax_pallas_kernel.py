@@ -818,5 +818,10 @@ def generalized_delta_rule_sane(
 
 
 def get_jax_generalized_delta_rule_sane(HEAD_SIZE=64, chunk_size: int = 16):
-    """返回 RWKV-7-SANE Pallas 训练/推理算子对（当前两者相同）。"""
-    return generalized_delta_rule_sane, generalized_delta_rule_sane
+    """返回绑定 chunk_size 的 RWKV-7-SANE Pallas 训练/推理算子对。"""
+    import functools
+
+    return (
+        functools.partial(generalized_delta_rule_sane, chunk_size=chunk_size),
+        functools.partial(generalized_delta_rule_sane, chunk_size=chunk_size),
+    )

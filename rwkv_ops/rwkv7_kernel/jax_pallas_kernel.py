@@ -665,5 +665,10 @@ def generalized_delta_rule(
 
 
 def get_jax_generalized_delta_rule(HEAD_SIZE=64, chunk_size: int = 16):
-    """返回 RWKV-7 Pallas 训练/推理算子对（当前两者相同）。"""
-    return generalized_delta_rule, generalized_delta_rule
+    """返回绑定 chunk_size 的 RWKV-7 Pallas 训练/推理算子对。"""
+    import functools
+
+    return (
+        functools.partial(generalized_delta_rule, chunk_size=chunk_size),
+        functools.partial(generalized_delta_rule, chunk_size=chunk_size),
+    )
