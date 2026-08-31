@@ -217,7 +217,7 @@ def _gdn_recurrent_sane_fwd_kernel(
     b = pl.program_id(0)
     h = pl.program_id(1)
     num_chunks = q_ref.shape[2] // CHUNK_LEN
-    scale = jnp.float32(q_ref.shape[3]) ** -0.5
+    scale = jax.lax.rsqrt(jnp.float32(q_ref.shape[3]))
     eps = jnp.float32(1e-6)
 
     state = h0_ref[b, h].astype(jnp.float32)
@@ -297,7 +297,7 @@ def _gdn_recurrent_sane_bwd_kernel(
     b = pl.program_id(0)
     h = pl.program_id(1)
     num_chunks = q_ref.shape[2] // CHUNK_LEN
-    scale = jnp.float32(q_ref.shape[3]) ** -0.5
+    scale = jax.lax.rsqrt(jnp.float32(q_ref.shape[3]))
 
     dS = dht_ref[b, h].astype(jnp.float32)
 
@@ -410,7 +410,7 @@ def _gdn_recurrent_sane_inf_kernel(
     b = pl.program_id(0)
     h = pl.program_id(1)
     T = q_ref.shape[2]
-    scale = jnp.float32(q_ref.shape[3]) ** -0.5
+    scale = jax.lax.rsqrt(jnp.float32(q_ref.shape[3]))
     eps = jnp.float32(1e-6)
     num_chunks = T // CHUNK_LEN
     rem = T - num_chunks * CHUNK_LEN
@@ -476,7 +476,7 @@ def _gdn_recurrent_sane_single_step_kernel(
     """
     b = pl.program_id(0)
     h = pl.program_id(1)
-    scale = jnp.float32(q_ref.shape[2]) ** -0.5
+    scale = jax.lax.rsqrt(jnp.float32(q_ref.shape[2]))
     eps = jnp.float32(1e-6)
 
     state = h0_ref[b, h].astype(jnp.float32)
@@ -838,6 +838,7 @@ def gated_delta_net_recurrent_sane(
     initial_state: Optional[jnp.ndarray] = None,
     output_final_state: bool = False,
     head_first: bool = False,
+    chunk_size: int = 16,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, Optional[jnp.ndarray]]]:
     """带 State Anomaly Neutralization 的 Gated DeltaNet recurrent 训练算子（JAX Pallas）。
 
@@ -855,6 +856,7 @@ def gated_delta_net_recurrent_sane(
         initial_state: [B, H, K, V] 或 [1, H, K, V]，float32，可选。
         output_final_state: bool，是否返回最终 state。
         head_first: bool，输入输出是否 head 维优先 ([B, H, T, *])。
+        chunk_size: int，chunk 长度，默认 16。当前 Pallas kernel 仅支持 16。
 
     Returns:
         out: [B, T, H, V]，与 v 同 dtype。
@@ -865,6 +867,12 @@ def gated_delta_net_recurrent_sane(
     Raises:
         ValueError: T 不被 16 整除，或 tau/mask 形状不匹配。
     """
+    if chunk_size != CHUNK_LEN:
+        raise NotImplementedError(
+            f"JAX Pallas gdn_recurrent_sane currently only supports chunk_size={CHUNK_LEN}, "
+            f"got {chunk_size}"
+        )
+
     dtype = v.dtype
     q = _transpose_head(q, head_first)
     k = _transpose_head(k, head_first)
@@ -934,6 +942,7 @@ def gated_delta_net_recurrent_sane_inference(
     initial_state: Optional[jnp.ndarray] = None,
     output_final_state: bool = True,
     head_first: bool = False,
+    chunk_size: int = 16,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, Optional[jnp.ndarray]]]:
     """带 State Anomaly Neutralization 的 Gated DeltaNet recurrent 推理算子（JAX Pallas）。
 
@@ -949,6 +958,7 @@ def gated_delta_net_recurrent_sane_inference(
         initial_state: [B, H, K, V] 或 [1, H, K, V]，float32，可选。
         output_final_state: bool，是否返回最终 state。
         head_first: bool，输入输出是否 head 维优先 ([B, H, T, *])。
+        chunk_size: int，chunk 长度，默认 16。当前 Pallas kernel 仅支持 16。
 
     Returns:
         out: [B, T, H, V]，与 v 同 dtype。
@@ -959,6 +969,12 @@ def gated_delta_net_recurrent_sane_inference(
     Raises:
         ValueError: tau/mask 形状不匹配。
     """
+    if chunk_size != CHUNK_LEN:
+        raise NotImplementedError(
+            f"JAX Pallas gdn_recurrent_sane_inference currently only supports chunk_size={CHUNK_LEN}, "
+            f"got {chunk_size}"
+        )
+
     dtype = v.dtype
     q = _transpose_head(q, head_first)
     k = _transpose_head(k, head_first)
@@ -1034,6 +1050,7 @@ def gated_delta_net_recurrent_sane_single_step(
     initial_state: Optional[jnp.ndarray] = None,
     output_final_state: bool = True,
     head_first: bool = True,
+    chunk_size: int = 16,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, Optional[jnp.ndarray]]]:
     """带 State Anomaly Neutralization 的 Gated DeltaNet recurrent 单步 RNN（JAX Pallas）。
 
@@ -1047,6 +1064,7 @@ def gated_delta_net_recurrent_sane_single_step(
         initial_state: [B, H, K, V] 或 [1, H, K, V]，float32，可选。
         output_final_state: bool，是否返回下一步 state。
         head_first: bool，输入输出是否 head 维优先。单步默认 True（[B, H, *]）。
+        chunk_size: int，chunk 长度，默认 16。单步实现忽略该参数（仅签名一致）。
 
     Returns:
         out: [B, H, V]，与 v 同 dtype。

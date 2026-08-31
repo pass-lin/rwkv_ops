@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import warnings
 from typing import Optional, Tuple, Union
 
@@ -408,7 +409,7 @@ _gdn_recurrent_sane_bwd_spmd.def_partition(
 )
 
 
-@jax.custom_vjp
+@functools.partial(jax.custom_vjp, nondiff_argnums=(8,))
 def _gdn_recurrent_sane_train(q, k, v, g, beta, tau, mask, h0, use_mask):
     out, kv_mem, state_chkp, inv_norm_q, inv_norm_k = _gdn_recurrent_sane_fwd_spmd(
         q, k, v, g, beta, tau, mask, h0, use_mask
@@ -439,11 +440,10 @@ def _gdn_train_fwd(q, k, v, g, beta, tau, mask, h0, use_mask):
         inv_norm_k,
         state_chkp,
         h0,
-        use_mask,
     )
 
 
-def _gdn_train_bwd(res, grads):
+def _gdn_train_bwd(use_mask, res, grads):
     (
         q,
         k,
@@ -457,7 +457,6 @@ def _gdn_train_bwd(res, grads):
         inv_norm_k,
         state_chkp,
         h0,
-        use_mask,
     ) = res
     dy, dht = grads
     dy = jnp.asarray(dy, q.dtype)
@@ -485,7 +484,7 @@ def _gdn_train_bwd(res, grads):
         mask,
         use_mask,
     )
-    return dq, dk, dv, dg, dbeta, dtau, None, dh0, None
+    return dq, dk, dv, dg, dbeta, dtau, None, dh0
 
 
 _gdn_recurrent_sane_train.defvjp(_gdn_train_fwd, _gdn_train_bwd)
@@ -622,6 +621,7 @@ def gated_delta_net_recurrent_sane(
     initial_state: Optional[jnp.ndarray] = None,
     output_final_state: bool = False,
     head_first: bool = False,
+    chunk_size: int = 16,
 ) -> Union[Tuple[jnp.ndarray, Optional[jnp.ndarray]], jnp.ndarray]:
     """带 State Anomaly Neutralization 的 Gated DeltaNet recurrent 训练算子（JAX Triton）。
 
@@ -639,6 +639,7 @@ def gated_delta_net_recurrent_sane(
         initial_state: [B, H, K, V] 或 [1, H, K, V], float32，可选。
         output_final_state: bool，是否返回最终 state。
         head_first: bool，输入输出是否 head 维优先（[B, H, T, *]）。
+        chunk_size: int，chunk 长度，默认 16。当前 Triton kernel 仅支持 16。
 
     Returns:
         out: [B, T, H, V]，与 v 同 dtype。
@@ -649,6 +650,12 @@ def gated_delta_net_recurrent_sane(
     Raises:
         ValueError: T 不被 16 整除，或 tau/mask 形状不匹配。
     """
+    if chunk_size != CHUNK_LEN:
+        raise NotImplementedError(
+            f"JAX Triton gdn_recurrent_sane currently only supports chunk_size={CHUNK_LEN}, "
+            f"got {chunk_size}"
+        )
+
     dtype = v.dtype
     q = _transpose_head(q, head_first)
     k = _transpose_head(k, head_first)
@@ -719,6 +726,7 @@ def gated_delta_net_recurrent_sane_inference(
     initial_state: Optional[jnp.ndarray] = None,
     output_final_state: bool = True,
     head_first: bool = False,
+    chunk_size: int = 16,
 ) -> Union[Tuple[jnp.ndarray, Optional[jnp.ndarray]], jnp.ndarray]:
     """带 State Anomaly Neutralization 的 Gated DeltaNet recurrent 推理算子（JAX Triton）。
 
@@ -734,6 +742,7 @@ def gated_delta_net_recurrent_sane_inference(
         initial_state: [B, H, K, V] 或 [1, H, K, V], float32，可选。
         output_final_state: bool，是否返回最终 state。
         head_first: bool，输入输出是否 head 维优先（[B, H, T, *]）。
+        chunk_size: int，chunk 长度，默认 16。当前 Triton kernel 仅支持 16。
 
     Returns:
         out: [B, T, H, V]，与 v 同 dtype。
@@ -744,6 +753,12 @@ def gated_delta_net_recurrent_sane_inference(
     Raises:
         ValueError: tau/mask 形状不匹配。
     """
+    if chunk_size != CHUNK_LEN:
+        raise NotImplementedError(
+            f"JAX Triton gdn_recurrent_sane_inference currently only supports chunk_size={CHUNK_LEN}, "
+            f"got {chunk_size}"
+        )
+
     dtype = v.dtype
     q = _transpose_head(q, head_first)
     k = _transpose_head(k, head_first)
@@ -820,6 +835,7 @@ def gated_delta_net_recurrent_sane_single_step(
     initial_state: Optional[jnp.ndarray] = None,
     output_final_state: bool = True,
     head_first: bool = True,
+    chunk_size: int = 16,
 ) -> Union[Tuple[jnp.ndarray, Optional[jnp.ndarray]], jnp.ndarray]:
     """带 State Anomaly Neutralization 的 Gated DeltaNet recurrent 单步 RNN（JAX Triton）。
 
@@ -833,6 +849,7 @@ def gated_delta_net_recurrent_sane_single_step(
         initial_state: [B, H, K, V] 或 [1, H, K, V], float32，可选。
         output_final_state: bool，是否返回下一步 state。
         head_first: bool，输入输出是否 head 维优先。单步默认 True（[B, H, *]）。
+        chunk_size: int，chunk 长度，默认 16。单步实现忽略该参数（仅签名一致）。
 
     Returns:
         out: [B, H, V]，与 v 同 dtype。

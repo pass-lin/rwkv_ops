@@ -5,6 +5,7 @@ import warnings
 import jax
 import jax.numpy as jnp
 import pytest
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from tests.conftest import assert_allclose_with_stats
 
@@ -378,3 +379,69 @@ def test_gdn_triton_sane_bfloat16_io(gdn_sane_inputs, gdn_sane_jax_triton_device
         atol=1e-4,
         rtol=1e-3,
     )
+
+
+@pytest.mark.jax
+def test_gdn_triton_sane_head_sharding(gdn_sane_inputs, gdn_sane_jax_triton_device):
+    """验证 head 维度可以沿 'h' 轴分片（TP）。单 GPU 下用 1-device mesh 模拟。"""
+    devices = jax.devices()
+    mesh = Mesh(devices, ("h",))
+
+    # Triton 内部为 head-first [B, N, T, K]/[B, N, T, V]。
+    q_spec = PartitionSpec(None, "h", None, None)
+    v_spec = PartitionSpec(None, "h", None, None)
+    gb_spec = PartitionSpec(None, "h", None)
+    tau_spec = PartitionSpec(None, "h", None)
+    mask_spec = PartitionSpec(None, None)
+    h0_spec = PartitionSpec(None, "h", None, None)
+
+    q = _to_jax_tensor(gdn_sane_inputs["q"], gdn_sane_jax_triton_device, jnp.bfloat16)
+    k = _to_jax_tensor(gdn_sane_inputs["k"], gdn_sane_jax_triton_device, jnp.bfloat16)
+    v = _to_jax_tensor(gdn_sane_inputs["v"], gdn_sane_jax_triton_device, jnp.bfloat16)
+    g = _to_jax_tensor(gdn_sane_inputs["g"], gdn_sane_jax_triton_device, jnp.float32)
+    beta = _to_jax_tensor(
+        gdn_sane_inputs["beta"], gdn_sane_jax_triton_device, jnp.float32
+    )
+    tau = _to_jax_tensor(
+        gdn_sane_inputs["tau"], gdn_sane_jax_triton_device, jnp.float32
+    )
+    mask = _to_jax_tensor(
+        gdn_sane_inputs["mask"], gdn_sane_jax_triton_device, jnp.float32
+    )
+    h0 = _to_jax_tensor(gdn_sane_inputs["h0"], gdn_sane_jax_triton_device, jnp.float32)
+
+    in_shardings = (
+        NamedSharding(mesh, q_spec),  # q
+        NamedSharding(mesh, q_spec),  # k
+        NamedSharding(mesh, v_spec),  # v
+        NamedSharding(mesh, gb_spec),  # g
+        NamedSharding(mesh, gb_spec),  # beta
+        NamedSharding(mesh, tau_spec),  # tau
+        NamedSharding(mesh, mask_spec),  # mask
+        NamedSharding(mesh, h0_spec),  # h0
+    )
+
+    def run(q, k, v, g, beta, tau, mask, h0):
+        return gdn_triton_recurrent(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            tau,
+            mask=mask,
+            initial_state=h0,
+            output_final_state=True,
+        )
+
+    run_sharded = jax.jit(run, in_shardings=in_shardings)
+    out_ref, state_ref = run(q, k, v, g, beta, tau, mask, h0)
+    out_s, state_s = run_sharded(q, k, v, g, beta, tau, mask, h0)
+
+    assert_allclose_with_stats(
+        out_ref, out_s, "triton sane head tp output", atol=1e-4, rtol=1e-3
+    )
+    assert_allclose_with_stats(
+        state_ref, state_s, "triton sane head tp state", atol=1e-4, rtol=1e-3
+    )
+    assert out_s.sharding.mesh.axis_names == ("h",)
