@@ -1,10 +1,15 @@
 """Gated DeltaNet recurrent SANE Triton 前向/反向数值测试。"""
 
+import numpy as np
 import pytest
 import torch
 
 pytest.importorskip("triton")
 
+from rwkv_ops import (
+    get_gated_delta_net_recurrent_sane,
+    get_gated_delta_net_recurrent_sane_inference,
+)
 from rwkv_ops.gdn_recurrent.native_keras_op import (
     gated_delta_net_recurrent as gdn_native_recurrent_no_sane,
     gated_delta_net_recurrent_single_step as gdn_native_single_step_no_sane,
@@ -50,6 +55,15 @@ def _gdn_sane_grads(fn, q, k, v, g, beta, tau, mask, h0):
     loss = (out.float() ** 2).mean() + (state.float() ** 2).mean()
     loss.backward()
     return q.grad, k.grad, v.grad, g.grad, beta.grad, tau.grad, h0.grad
+
+
+def _make_chunk_size_8_tau_mask(B, H, T, rng):
+    """为 chunk_size=8 生成与 tests/conftest.py 同分布的 tau 与 mask。"""
+    chunk_num = T // 8
+    x = rng.standard_normal((B, chunk_num, H), dtype=np.float32) * 0.5 + 7.0
+    tau = np.log1p(np.exp(x)) + 1.0
+    mask = rng.integers(0, 2, (B, chunk_num)).astype(np.float32)
+    return tau.astype(np.float32), mask
 
 
 @pytest.mark.torch
@@ -395,4 +409,381 @@ def test_gdn_sane_triton_bfloat16(gdn_sane_inputs, gdn_sane_cuda_device):
     )
     assert_allclose_with_stats(
         state_ref, state_tri, "bf16 triton vs native state", atol=1e-2, rtol=1e-2
+    )
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_gdn_sane_triton_recurrent_chunk_size_8_matches_native(
+    gdn_sane_inputs, gdn_sane_cuda_device
+):
+    """chunk_size=8 时 Triton recurrent SANE 训练算子前向与 native 参考对齐。"""
+    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device)
+    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device)
+    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device)
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
+    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
+    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
+
+    B, T, H, _ = q.shape
+    tau8, mask8 = _make_chunk_size_8_tau_mask(B, H, T, np.random.default_rng(42))
+    tau8 = _to_cuda_tensor(tau8, gdn_sane_cuda_device)
+    mask8 = _to_cuda_tensor(mask8, gdn_sane_cuda_device)
+
+    op_tri = get_gated_delta_net_recurrent_sane(KERNEL_TYPE="triton", chunk_size=8)
+
+    out_tri, state_tri = op_tri(
+        q, k, v, g, beta, tau8, mask=mask8, initial_state=h0, output_final_state=True
+    )
+    out_ref, state_ref = gdn_native_recurrent(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau8,
+        mask=mask8,
+        initial_state=h0,
+        output_final_state=True,
+        chunk_size=8,
+    )
+
+    assert_allclose_with_stats(
+        out_ref, out_tri, "chunk_size=8 triton vs native output", atol=1e-4, rtol=1e-3
+    )
+    assert_allclose_with_stats(
+        state_ref,
+        state_tri,
+        "chunk_size=8 triton vs native state",
+        atol=1e-4,
+        rtol=1e-3,
+    )
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_gdn_sane_triton_bwd_chunk_size_8_matches_native(
+    gdn_sane_inputs, gdn_sane_cuda_device
+):
+    """chunk_size=8 时 Triton recurrent SANE 反向梯度与 native Keras autograd 对齐。"""
+    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device)
+    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device)
+    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device)
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
+    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
+    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
+
+    B, T, H, _ = q.shape
+    tau8, mask8 = _make_chunk_size_8_tau_mask(B, H, T, np.random.default_rng(42))
+    tau8 = _to_cuda_tensor(tau8, gdn_sane_cuda_device)
+    mask8 = _to_cuda_tensor(mask8, gdn_sane_cuda_device)
+
+    op_tri = get_gated_delta_net_recurrent_sane(KERNEL_TYPE="triton", chunk_size=8)
+
+    def op_ref(*args, **kwargs):
+        return gdn_native_recurrent(*args, **kwargs, chunk_size=8)
+
+    grads_tri = _gdn_sane_grads(op_tri, q, k, v, g, beta, tau8, mask8, h0)
+    grads_ref = _gdn_sane_grads(op_ref, q, k, v, g, beta, tau8, mask8, h0)
+
+    names = ["q", "k", "v", "g", "beta", "tau", "h0"]
+    for name, ref, tgt in zip(names, grads_ref, grads_tri):
+        assert ref is not None, f"native {name} grad is None"
+        assert tgt is not None, f"triton {name} grad is None"
+        assert_allclose_with_stats(
+            ref,
+            tgt,
+            f"chunk_size=8 bwd {name}",
+            atol=7e-3,
+            rtol=1e-3,
+        )
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_gdn_sane_triton_inference_chunk_size_8_matches_native(
+    gdn_sane_inputs, gdn_sane_cuda_device
+):
+    """chunk_size=8 时 Triton recurrent SANE 推理算子前向与 native 参考对齐。"""
+    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device)
+    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device)
+    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device)
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
+    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
+    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
+
+    B, T, H, _ = q.shape
+    tau8, mask8 = _make_chunk_size_8_tau_mask(B, H, T, np.random.default_rng(42))
+    tau8 = _to_cuda_tensor(tau8, gdn_sane_cuda_device)
+    mask8 = _to_cuda_tensor(mask8, gdn_sane_cuda_device)
+
+    op_tri = get_gated_delta_net_recurrent_sane_inference(
+        KERNEL_TYPE="triton", chunk_size=8
+    )
+
+    out_tri, state_tri = op_tri(
+        q, k, v, g, beta, tau8, mask=mask8, initial_state=h0, output_final_state=True
+    )
+    out_ref, state_ref = gdn_native_inference(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau8,
+        mask=mask8,
+        initial_state=h0,
+        output_final_state=True,
+        chunk_size=8,
+    )
+
+    assert_allclose_with_stats(
+        out_ref,
+        out_tri,
+        "chunk_size=8 triton inference vs native output",
+        atol=1e-4,
+        rtol=1e-3,
+    )
+    assert_allclose_with_stats(
+        state_ref,
+        state_tri,
+        "chunk_size=8 triton inference vs native state",
+        atol=1e-4,
+        rtol=1e-3,
+    )
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_gdn_sane_triton_no_final_state_chunk_size_8(
+    gdn_sane_inputs, gdn_sane_cuda_device
+):
+    """chunk_size=8 时 output_final_state=False 不返回最终 state。"""
+    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device)
+    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device)
+    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device)
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
+    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
+
+    B, T, H, _ = q.shape
+    tau8, mask8 = _make_chunk_size_8_tau_mask(B, H, T, np.random.default_rng(42))
+    tau8 = _to_cuda_tensor(tau8, gdn_sane_cuda_device)
+    mask8 = _to_cuda_tensor(mask8, gdn_sane_cuda_device)
+
+    op_tri = get_gated_delta_net_recurrent_sane(KERNEL_TYPE="triton", chunk_size=8)
+
+    out_tri, state_tri = op_tri(
+        q, k, v, g, beta, tau8, mask=mask8, output_final_state=False
+    )
+    out_ref, state_ref = gdn_native_recurrent(
+        q, k, v, g, beta, tau8, mask=mask8, output_final_state=False, chunk_size=8
+    )
+
+    assert state_tri is None
+    assert state_ref is None
+    assert_allclose_with_stats(
+        out_ref,
+        out_tri,
+        "chunk_size=8 no-state triton vs native output",
+        atol=1e-4,
+        rtol=1e-3,
+    )
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_gdn_sane_triton_mask_all_ones_matches_no_mask_chunk_size_8(
+    gdn_sane_inputs, gdn_sane_cuda_device
+):
+    """chunk_size=8 时 mask=None 与 mask 全 1 输出一致，但 final_state 为 None 并报警告。"""
+    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device)
+    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device)
+    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device)
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
+    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
+    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
+
+    B, T, H, _ = q.shape
+    tau8, _ = _make_chunk_size_8_tau_mask(B, H, T, np.random.default_rng(42))
+    tau8 = _to_cuda_tensor(tau8, gdn_sane_cuda_device)
+    mask8_ones = torch.ones(B, T // 8, dtype=torch.float32, device=gdn_sane_cuda_device)
+
+    op_tri = get_gated_delta_net_recurrent_sane(KERNEL_TYPE="triton", chunk_size=8)
+
+    out_masked, state_masked = op_tri(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau8,
+        mask=mask8_ones,
+        initial_state=h0,
+        output_final_state=True,
+    )
+    with pytest.warns(UserWarning, match="mask is None"):
+        out_uncond, state_uncond = op_tri(
+            q, k, v, g, beta, tau8, mask=None, initial_state=h0, output_final_state=True
+        )
+
+    assert state_uncond is None
+    assert_allclose_with_stats(
+        out_uncond,
+        out_masked,
+        "chunk_size=8 masked(ones) vs uncond output",
+        atol=1e-4,
+        rtol=1e-3,
+    )
+    assert state_masked is not None
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_gdn_sane_triton_mask_all_zeros_matches_original_gdn_chunk_size_8(
+    gdn_sane_inputs, gdn_sane_cuda_device
+):
+    """chunk_size=8 时 mask 全 0 应跳过 SANE，输出与原 GDN recurrent 一致。"""
+    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device)
+    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device)
+    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device)
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
+    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
+    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
+
+    B, T, H, _ = q.shape
+    tau8, _ = _make_chunk_size_8_tau_mask(B, H, T, np.random.default_rng(42))
+    tau8 = _to_cuda_tensor(tau8, gdn_sane_cuda_device)
+    mask8_zeros = torch.zeros(
+        B, T // 8, dtype=torch.float32, device=gdn_sane_cuda_device
+    )
+
+    op_tri = get_gated_delta_net_recurrent_sane(KERNEL_TYPE="triton", chunk_size=8)
+
+    out_sane, state_sane = op_tri(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau8,
+        mask=mask8_zeros,
+        initial_state=h0,
+        output_final_state=True,
+    )
+    out_ref, state_ref = gdn_native_recurrent_no_sane(
+        q, k, v, g, beta, initial_state=h0, output_final_state=True
+    )
+
+    assert_allclose_with_stats(
+        out_ref,
+        out_sane,
+        "chunk_size=8 mask=0 vs original GDN output",
+        atol=1e-4,
+        rtol=1e-3,
+    )
+    assert_allclose_with_stats(
+        state_ref,
+        state_sane,
+        "chunk_size=8 mask=0 vs original GDN state",
+        atol=1e-4,
+        rtol=1e-3,
+    )
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_gdn_sane_triton_rejects_arbitrary_length_chunk_size_8(
+    gdn_sane_inputs, gdn_sane_cuda_device
+):
+    """chunk_size=8 时 recurrent SANE Triton 训练核只支持 T 被 chunk_size 整除。"""
+    q = _to_cuda_tensor(gdn_sane_inputs["q"][:, :37], gdn_sane_cuda_device)
+    k = _to_cuda_tensor(gdn_sane_inputs["k"][:, :37], gdn_sane_cuda_device)
+    v = _to_cuda_tensor(gdn_sane_inputs["v"][:, :37], gdn_sane_cuda_device)
+    g = _to_cuda_tensor(gdn_sane_inputs["g"][:, :37], gdn_sane_cuda_device)
+    beta = _to_cuda_tensor(gdn_sane_inputs["beta"][:, :37], gdn_sane_cuda_device)
+    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
+
+    B, _, H, _ = q.shape
+    tau8 = _to_cuda_tensor(
+        np.random.default_rng(42).standard_normal((B, 37 // 8, H), dtype=np.float32)
+        * 0.5
+        + 7.0,
+        gdn_sane_cuda_device,
+    )
+    mask8 = _to_cuda_tensor(
+        np.random.default_rng(42).integers(0, 2, (B, 37 // 8)).astype(np.float32),
+        gdn_sane_cuda_device,
+    )
+
+    op_tri = get_gated_delta_net_recurrent_sane(KERNEL_TYPE="triton", chunk_size=8)
+
+    with pytest.raises(ValueError, match="必须被 chunk_size"):
+        op_tri(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            tau8,
+            mask=mask8,
+            initial_state=h0,
+            output_final_state=True,
+        )
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_gdn_sane_triton_bfloat16_chunk_size_8(gdn_sane_inputs, gdn_sane_cuda_device):
+    """chunk_size=8 时 bfloat16 I/O 下 Triton 结果仍与 native float32 参考一致。"""
+    pytest.importorskip("torch").bfloat16  # noqa: B015
+
+    q = _to_cuda_tensor(
+        gdn_sane_inputs["q"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    k = _to_cuda_tensor(
+        gdn_sane_inputs["k"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    v = _to_cuda_tensor(
+        gdn_sane_inputs["v"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
+    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
+    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
+
+    B, T, H, _ = q.shape
+    tau8, mask8 = _make_chunk_size_8_tau_mask(B, H, T, np.random.default_rng(42))
+    tau8 = _to_cuda_tensor(tau8, gdn_sane_cuda_device)
+    mask8 = _to_cuda_tensor(mask8, gdn_sane_cuda_device)
+
+    op_tri = get_gated_delta_net_recurrent_sane(KERNEL_TYPE="triton", chunk_size=8)
+
+    out_tri, state_tri = op_tri(
+        q, k, v, g, beta, tau8, mask=mask8, initial_state=h0, output_final_state=True
+    )
+    out_ref, state_ref = gdn_native_recurrent(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau8,
+        mask=mask8,
+        initial_state=h0,
+        output_final_state=True,
+        chunk_size=8,
+    )
+
+    assert_allclose_with_stats(
+        out_ref,
+        out_tri,
+        "chunk_size=8 bf16 triton vs native output",
+        atol=1e-2,
+        rtol=1e-2,
+    )
+    assert_allclose_with_stats(
+        state_ref,
+        state_tri,
+        "chunk_size=8 bf16 triton vs native state",
+        atol=1e-2,
+        rtol=1e-2,
     )

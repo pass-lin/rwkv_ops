@@ -31,7 +31,7 @@ def _to_cuda_tensor(arr, device, dtype=torch.float32):
     return torch.from_numpy(arr).to(device=device, dtype=dtype)
 
 
-def _gdn_grads(fn, q, k, v, g, beta, h0):
+def _gdn_grads(fn, q, k, v, g, beta, h0, chunk_size=16):
     """计算 GDN recurrent 算子各输入梯度。"""
     q = q.clone().detach().requires_grad_(True)
     k = k.clone().detach().requires_grad_(True)
@@ -39,7 +39,16 @@ def _gdn_grads(fn, q, k, v, g, beta, h0):
     g = g.clone().detach().requires_grad_(True)
     beta = beta.clone().detach().requires_grad_(True)
     h0 = h0.clone().detach().requires_grad_(True)
-    out, state = fn(q, k, v, g, beta, initial_state=h0, output_final_state=True)
+    out, state = fn(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        initial_state=h0,
+        output_final_state=True,
+        chunk_size=chunk_size,
+    )
     loss = (out.float() ** 2).mean() + (state.float() ** 2).mean()
     loss.backward()
     return q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
@@ -278,3 +287,143 @@ def test_gdn_triton_recurrent_backward_various_v(V, gdn_cuda_device):
             atol=7e-3,
             rtol=1e-2,
         )
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_gdn_triton_recurrent_chunk_size_8(gdn_inputs, gdn_cuda_device):
+    """Triton recurrent 训练算子在 chunk_size=8 时前向与 native 对齐。"""
+    q = _to_cuda_tensor(gdn_inputs["q"], gdn_cuda_device)
+    k = _to_cuda_tensor(gdn_inputs["k"], gdn_cuda_device)
+    v = _to_cuda_tensor(gdn_inputs["v"], gdn_cuda_device)
+    g = _to_cuda_tensor(gdn_inputs["g"], gdn_cuda_device)
+    beta = _to_cuda_tensor(gdn_inputs["beta"], gdn_cuda_device)
+    h0 = _to_cuda_tensor(gdn_inputs["h0"], gdn_cuda_device)
+
+    out_tri, state_tri = gdn_triton_recurrent(
+        q, k, v, g, beta, initial_state=h0, output_final_state=True, chunk_size=8
+    )
+    out_ref, state_ref = gdn_native_recurrent(
+        q, k, v, g, beta, initial_state=h0, output_final_state=True, chunk_size=8
+    )
+
+    assert_allclose_with_stats(
+        out_ref,
+        out_tri,
+        "chunk_size=8 triton recurrent vs native output",
+        atol=1e-4,
+        rtol=1e-3,
+    )
+    assert_allclose_with_stats(
+        state_ref,
+        state_tri,
+        "chunk_size=8 triton recurrent vs native state",
+        atol=1e-4,
+        rtol=1e-3,
+    )
+
+
+@pytest.mark.torch
+def test_gdn_triton_inference_chunk_size_8(gdn_inputs, gdn_cuda_device):
+    """Triton recurrent 推理算子在 chunk_size=8 时前向与 native 对齐。"""
+    q = _to_cuda_tensor(gdn_inputs["q"], gdn_cuda_device)
+    k = _to_cuda_tensor(gdn_inputs["k"], gdn_cuda_device)
+    v = _to_cuda_tensor(gdn_inputs["v"], gdn_cuda_device)
+    g = _to_cuda_tensor(gdn_inputs["g"], gdn_cuda_device)
+    beta = _to_cuda_tensor(gdn_inputs["beta"], gdn_cuda_device)
+    h0 = _to_cuda_tensor(gdn_inputs["h0"], gdn_cuda_device)
+
+    out_tri, state_tri = gdn_triton_inference(
+        q, k, v, g, beta, initial_state=h0, output_final_state=True, chunk_size=8
+    )
+    out_ref, state_ref = gdn_native_inference(
+        q, k, v, g, beta, initial_state=h0, output_final_state=True, chunk_size=8
+    )
+
+    assert_allclose_with_stats(
+        out_ref,
+        out_tri,
+        "chunk_size=8 triton inference vs native output",
+        atol=1e-4,
+        rtol=1e-3,
+    )
+    assert_allclose_with_stats(
+        state_ref,
+        state_tri,
+        "chunk_size=8 triton inference vs native state",
+        atol=1e-4,
+        rtol=1e-3,
+    )
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_gdn_triton_recurrent_backward_chunk_size_8(gdn_inputs, gdn_cuda_device):
+    """Triton recurrent 训练算子在 chunk_size=8 时反向梯度与 native 对齐。"""
+    q = _to_cuda_tensor(gdn_inputs["q"], gdn_cuda_device)
+    k = _to_cuda_tensor(gdn_inputs["k"], gdn_cuda_device)
+    v = _to_cuda_tensor(gdn_inputs["v"], gdn_cuda_device)
+    g = _to_cuda_tensor(gdn_inputs["g"], gdn_cuda_device)
+    beta = _to_cuda_tensor(gdn_inputs["beta"], gdn_cuda_device)
+    h0 = _to_cuda_tensor(gdn_inputs["h0"], gdn_cuda_device)
+
+    g_ref = _gdn_grads(gdn_native_recurrent, q, k, v, g, beta, h0, chunk_size=8)
+    g_tri = _gdn_grads(gdn_triton_recurrent, q, k, v, g, beta, h0, chunk_size=8)
+    names = ["q", "k", "v", "g", "beta", "h0"]
+    for name, gr, gt in zip(names, g_ref, g_tri):
+        assert_allclose_with_stats(
+            gr,
+            gt,
+            f"chunk_size=8 grad_{name} triton vs native",
+            atol=7e-3,
+            rtol=1e-2,
+        )
+
+
+@pytest.mark.torch
+def test_gdn_triton_bfloat16_chunk_size_8(gdn_inputs, gdn_cuda_device):
+    """bfloat16 I/O 下 Triton 在 chunk_size=8 时仍与 native float32 参考一致。"""
+    pytest.importorskip("torch").bfloat16  # noqa: B015
+
+    q = _to_cuda_tensor(gdn_inputs["q"], gdn_cuda_device, dtype=torch.bfloat16)
+    k = _to_cuda_tensor(gdn_inputs["k"], gdn_cuda_device, dtype=torch.bfloat16)
+    v = _to_cuda_tensor(gdn_inputs["v"], gdn_cuda_device, dtype=torch.bfloat16)
+    g = _to_cuda_tensor(gdn_inputs["g"], gdn_cuda_device, dtype=torch.bfloat16)
+    beta = _to_cuda_tensor(gdn_inputs["beta"], gdn_cuda_device, dtype=torch.bfloat16)
+    h0 = _to_cuda_tensor(gdn_inputs["h0"], gdn_cuda_device, dtype=torch.float32)
+
+    out_tri, state_tri = gdn_triton_recurrent(
+        q, k, v, g, beta, initial_state=h0, output_final_state=True, chunk_size=8
+    )
+
+    q_ref = _to_cuda_tensor(gdn_inputs["q"], gdn_cuda_device, dtype=torch.float32)
+    k_ref = _to_cuda_tensor(gdn_inputs["k"], gdn_cuda_device, dtype=torch.float32)
+    v_ref = _to_cuda_tensor(gdn_inputs["v"], gdn_cuda_device, dtype=torch.float32)
+    g_ref = _to_cuda_tensor(gdn_inputs["g"], gdn_cuda_device, dtype=torch.float32)
+    beta_ref = _to_cuda_tensor(gdn_inputs["beta"], gdn_cuda_device, dtype=torch.float32)
+
+    out_ref, state_ref = gdn_native_recurrent(
+        q_ref,
+        k_ref,
+        v_ref,
+        g_ref,
+        beta_ref,
+        initial_state=h0,
+        output_final_state=True,
+        chunk_size=8,
+    )
+
+    assert_allclose_with_stats(
+        out_ref,
+        out_tri,
+        "chunk_size=8 bf16 triton vs native output",
+        atol=1e-2,
+        rtol=1e-2,
+    )
+    assert_allclose_with_stats(
+        state_ref,
+        state_tri,
+        "chunk_size=8 bf16 triton vs native state",
+        atol=1e-2,
+        rtol=1e-2,
+    )

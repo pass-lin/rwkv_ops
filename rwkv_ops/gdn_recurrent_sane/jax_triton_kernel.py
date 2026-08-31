@@ -22,8 +22,6 @@ from .triton_kernel import (
     gated_delta_net_recurrent_sane_single_step_fwd_kernel,
 )
 
-CHUNK_LEN = 16
-
 # SPMD 切分规则（Einsum 风格）
 # b=Batch, n=Head, t=Time, k=HeadK, v=HeadV, c=Chunk
 FWD_RULE = (
@@ -174,7 +172,7 @@ def _transpose_head(x: jnp.ndarray, head_first: bool) -> jnp.ndarray:
 
 
 def _transpose_tau(tau: jnp.ndarray) -> jnp.ndarray:
-    """tau 公共接口始终为 [B, T//16, N]；需要转成 head-first [B, N, T//16]。"""
+    """tau 公共接口始终为 [B, T//chunk_size, N]；需要转成 head-first [B, N, T//chunk_size]。"""
     tau = jnp.asarray(tau, dtype=jnp.float32)
     return jnp.transpose(tau, (0, 2, 1))
 
@@ -228,11 +226,13 @@ def _compute_grid(B, H, V):
 # 训练前向
 
 
-def _gdn_recurrent_sane_fwd_triton_call(q, k, v, g, beta, tau, mask, h0, use_mask):
+def _gdn_recurrent_sane_fwd_triton_call(
+    q, k, v, g, beta, tau, mask, h0, use_mask, chunk_size
+):
     B, N, T, K = q.shape
     V = v.shape[-1]
     dtype = v.dtype
-    chunk_num = T // CHUNK_LEN
+    chunk_num = T // chunk_size
     BV = _compute_bv(V)
     scale = K**-0.5
 
@@ -267,7 +267,7 @@ def _gdn_recurrent_sane_fwd_triton_call(q, k, v, g, beta, tau, mask, h0, use_mas
         V=V,
         BK=triton.next_power_of_2(K),
         BV=BV,
-        CHUNK_LEN=CHUNK_LEN,
+        CHUNK_LEN=chunk_size,
         USE_INITIAL_STATE=True,
         STORE_FINAL_STATE=False,
         USE_MASK=use_mask,
@@ -275,14 +275,16 @@ def _gdn_recurrent_sane_fwd_triton_call(q, k, v, g, beta, tau, mask, h0, use_mas
     return out, kv_mem, state_chkp, inv_norm_q, inv_norm_k
 
 
-def _gdn_recurrent_sane_fwd_spmd_impl(q, k, v, g, beta, tau, mask, h0, use_mask):
+def _gdn_recurrent_sane_fwd_spmd_impl(
+    q, k, v, g, beta, tau, mask, h0, use_mask, chunk_size
+):
     return _gdn_recurrent_sane_fwd_triton_call(
-        q, k, v, g, beta, tau, mask, h0, use_mask
+        q, k, v, g, beta, tau, mask, h0, use_mask, chunk_size
     )
 
 
 _gdn_recurrent_sane_fwd_spmd = custom_partitioning(
-    _gdn_recurrent_sane_fwd_spmd_impl, static_argnums=(8,)
+    _gdn_recurrent_sane_fwd_spmd_impl, static_argnums=(8, 9)
 )
 _gdn_recurrent_sane_fwd_spmd.def_partition(
     infer_sharding_from_operands=_fwd_infer_sharding,
@@ -310,6 +312,7 @@ def _gdn_recurrent_sane_bwd_triton_call(
     tau,
     mask,
     use_mask,
+    chunk_size,
 ):
     B, N, T, K = q.shape
     V = v.shape[-1]
@@ -324,7 +327,7 @@ def _gdn_recurrent_sane_bwd_triton_call(
         jax.ShapeDtypeStruct((B, N, T, V), jnp.float32),
         jax.ShapeDtypeStruct((B, N, T), jnp.float32),
         jax.ShapeDtypeStruct((B, N, T), jnp.float32),
-        jax.ShapeDtypeStruct((B, N, T // CHUNK_LEN), jnp.float32),
+        jax.ShapeDtypeStruct((B, N, T // chunk_size), jnp.float32),
         jax.ShapeDtypeStruct((B, N, K, V), jnp.float32),
     ]
 
@@ -357,7 +360,7 @@ def _gdn_recurrent_sane_bwd_triton_call(
         V=V,
         BK=triton.next_power_of_2(K),
         BV=BV,
-        CHUNK_LEN=CHUNK_LEN,
+        CHUNK_LEN=chunk_size,
         USE_FINAL_STATE_GRADIENT=use_final_state_gradient,
         USE_MASK=use_mask,
     )
@@ -379,6 +382,7 @@ def _gdn_recurrent_sane_bwd_spmd_impl(
     tau,
     mask,
     use_mask,
+    chunk_size,
 ):
     return _gdn_recurrent_sane_bwd_triton_call(
         q,
@@ -396,11 +400,12 @@ def _gdn_recurrent_sane_bwd_spmd_impl(
         tau,
         mask,
         use_mask,
+        chunk_size,
     )
 
 
 _gdn_recurrent_sane_bwd_spmd = custom_partitioning(
-    _gdn_recurrent_sane_bwd_spmd_impl, static_argnums=(14,)
+    _gdn_recurrent_sane_bwd_spmd_impl, static_argnums=(14, 15)
 )
 _gdn_recurrent_sane_bwd_spmd.def_partition(
     infer_sharding_from_operands=_bwd_infer_sharding,
@@ -409,10 +414,10 @@ _gdn_recurrent_sane_bwd_spmd.def_partition(
 )
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(8,))
-def _gdn_recurrent_sane_train(q, k, v, g, beta, tau, mask, h0, use_mask):
+@functools.partial(jax.custom_vjp, nondiff_argnums=(8, 9))
+def _gdn_recurrent_sane_train(q, k, v, g, beta, tau, mask, h0, use_mask, chunk_size):
     out, kv_mem, state_chkp, inv_norm_q, inv_norm_k = _gdn_recurrent_sane_fwd_spmd(
-        q, k, v, g, beta, tau, mask, h0, use_mask
+        q, k, v, g, beta, tau, mask, h0, use_mask, chunk_size
     )
     final_state = _apply_sane_to_final_state(
         state_chkp[:, :, -1, :, :], tau, mask=mask if use_mask else None
@@ -420,9 +425,9 @@ def _gdn_recurrent_sane_train(q, k, v, g, beta, tau, mask, h0, use_mask):
     return out, final_state
 
 
-def _gdn_train_fwd(q, k, v, g, beta, tau, mask, h0, use_mask):
+def _gdn_train_fwd(q, k, v, g, beta, tau, mask, h0, use_mask, chunk_size):
     out, kv_mem, state_chkp, inv_norm_q, inv_norm_k = _gdn_recurrent_sane_fwd_spmd(
-        q, k, v, g, beta, tau, mask, h0, use_mask
+        q, k, v, g, beta, tau, mask, h0, use_mask, chunk_size
     )
     final_state = _apply_sane_to_final_state(
         state_chkp[:, :, -1, :, :], tau, mask=mask if use_mask else None
@@ -443,7 +448,7 @@ def _gdn_train_fwd(q, k, v, g, beta, tau, mask, h0, use_mask):
     )
 
 
-def _gdn_train_bwd(use_mask, res, grads):
+def _gdn_train_bwd(use_mask, chunk_size, res, grads):
     (
         q,
         k,
@@ -483,6 +488,7 @@ def _gdn_train_bwd(use_mask, res, grads):
         tau,
         mask,
         use_mask,
+        chunk_size,
     )
     return dq, dk, dv, dg, dbeta, dtau, None, dh0
 
@@ -493,7 +499,9 @@ _gdn_recurrent_sane_train.defvjp(_gdn_train_fwd, _gdn_train_bwd)
 # 推理前向
 
 
-def _gdn_recurrent_sane_inf_triton_call(q, k, v, g, beta, tau, mask, h0, use_mask):
+def _gdn_recurrent_sane_inf_triton_call(
+    q, k, v, g, beta, tau, mask, h0, use_mask, chunk_size
+):
     B, N, T, K = q.shape
     V = v.shape[-1]
     dtype = v.dtype
@@ -530,18 +538,20 @@ def _gdn_recurrent_sane_inf_triton_call(q, k, v, g, beta, tau, mask, h0, use_mas
         USE_INITIAL_STATE=True,
         STORE_FINAL_STATE=True,
         USE_MASK=use_mask,
-        CHUNK_LEN=CHUNK_LEN,
+        CHUNK_LEN=chunk_size,
     )
 
 
-def _gdn_recurrent_sane_inf_spmd_impl(q, k, v, g, beta, tau, mask, h0, use_mask):
+def _gdn_recurrent_sane_inf_spmd_impl(
+    q, k, v, g, beta, tau, mask, h0, use_mask, chunk_size
+):
     return _gdn_recurrent_sane_inf_triton_call(
-        q, k, v, g, beta, tau, mask, h0, use_mask
+        q, k, v, g, beta, tau, mask, h0, use_mask, chunk_size
     )
 
 
 _gdn_recurrent_sane_inf_spmd = custom_partitioning(
-    _gdn_recurrent_sane_inf_spmd_impl, static_argnums=(8,)
+    _gdn_recurrent_sane_inf_spmd_impl, static_argnums=(8, 9)
 )
 _gdn_recurrent_sane_inf_spmd.def_partition(
     infer_sharding_from_operands=_inf_infer_sharding,
@@ -625,7 +635,7 @@ def gated_delta_net_recurrent_sane(
 ) -> Union[Tuple[jnp.ndarray, Optional[jnp.ndarray]], jnp.ndarray]:
     """带 State Anomaly Neutralization 的 Gated DeltaNet recurrent 训练算子（JAX Triton）。
 
-    在 chunk 边界（每 16 个 token）按 mask 对 state 执行
+    在 chunk 边界（每 chunk_size 个 token）按 mask 对 state 执行
     `state = tau * tanh(state / tau)`；输出始终基于 SANE 之前的 state。
 
     Args:
@@ -633,13 +643,13 @@ def gated_delta_net_recurrent_sane(
         v: [B, T, H, V]，值。
         g: [B, T, H]，log-space decay。
         beta: [B, T, H]，写入强度，必须已在外部过 sigmoid。
-        tau: [B, T//16, H], float32。阈值，必须 > 0。
-        mask: [B, T//16], float32 或 None。>0 的 chunk 边界执行 SANE；
+        tau: [B, T//chunk_size, H], float32。阈值，必须 > 0。
+        mask: [B, T//chunk_size], float32 或 None。>0 的 chunk 边界执行 SANE；
             仅当 output_final_state=True 时生效。
         initial_state: [B, H, K, V] 或 [1, H, K, V], float32，可选。
         output_final_state: bool，是否返回最终 state。
         head_first: bool，输入输出是否 head 维优先（[B, H, T, *]）。
-        chunk_size: int，chunk 长度，默认 16。当前 Triton kernel 仅支持 16。
+        chunk_size: int，chunk 长度，默认 16。
 
     Returns:
         out: [B, T, H, V]，与 v 同 dtype。
@@ -648,14 +658,8 @@ def gated_delta_net_recurrent_sane(
             output_final_state=True 且 mask=None 时也为 None 并发出 UserWarning。
 
     Raises:
-        ValueError: T 不被 16 整除，或 tau/mask 形状不匹配。
+        ValueError: T 不被 chunk_size 整除，或 tau/mask 形状不匹配。
     """
-    if chunk_size != CHUNK_LEN:
-        raise NotImplementedError(
-            f"JAX Triton gdn_recurrent_sane currently only supports chunk_size={CHUNK_LEN}, "
-            f"got {chunk_size}"
-        )
-
     dtype = v.dtype
     q = _transpose_head(q, head_first)
     k = _transpose_head(k, head_first)
@@ -666,15 +670,15 @@ def gated_delta_net_recurrent_sane(
 
     B, N, T, K = q.shape
     V = v.shape[-1]
-    if T % CHUNK_LEN != 0:
+    if T % chunk_size != 0:
         raise ValueError(
-            f"Triton SANE kernel requires sequence length T={T} to be divisible by {CHUNK_LEN}"
+            f"Triton SANE kernel requires sequence length T={T} to be divisible by chunk_size={chunk_size}"
         )
 
-    C = T // CHUNK_LEN
+    C = T // chunk_size
     if tau.shape != (B, N, C):
         raise ValueError(
-            f"tau shape {tau.shape} does not match expected (B={B}, N={N}, T//16={C})"
+            f"tau shape {tau.shape} does not match expected (B={B}, N={N}, T//chunk_size={C})"
         )
 
     use_mask = output_final_state and mask is not None
@@ -682,7 +686,7 @@ def gated_delta_net_recurrent_sane(
         mask_arr = jnp.asarray(mask, dtype=jnp.float32)
         if mask_arr.shape != (B, C):
             raise ValueError(
-                f"mask shape {mask_arr.shape} must match (B, T//16) = ({B}, {C})"
+                f"mask shape {mask_arr.shape} must match (B, T//chunk_size) = ({B}, {C})"
             )
     else:
         mask_arr = jnp.ones((B, C), dtype=jnp.float32)
@@ -690,7 +694,7 @@ def gated_delta_net_recurrent_sane(
     h0 = _prepare_h0(initial_state, B, N, K, V)
 
     out, final_state = _gdn_recurrent_sane_train(
-        q, k, v, g, beta, tau, mask_arr, h0, use_mask
+        q, k, v, g, beta, tau, mask_arr, h0, use_mask, chunk_size
     )
 
     out = jnp.transpose(out, (0, 2, 1, 3))
@@ -730,19 +734,19 @@ def gated_delta_net_recurrent_sane_inference(
 ) -> Union[Tuple[jnp.ndarray, Optional[jnp.ndarray]], jnp.ndarray]:
     """带 State Anomaly Neutralization 的 Gated DeltaNet recurrent 推理算子（JAX Triton）。
 
-    与训练版数学一致但不保存反向中间量；T 不必被 16 整除。
+    与训练版数学一致但不保存反向中间量；T 不必被 chunk_size 整除。
 
     Args:
         q, k: [B, T, H, K]，查询与键。
         v: [B, T, H, V]，值。
         g: [B, T, H]，log-space decay。
         beta: [B, T, H]，写入强度，必须已在外部过 sigmoid。
-        tau: [B, T//16, H], float32。
-        mask: [B, T//16], float32 或 None。
+        tau: [B, T//chunk_size, H], float32。
+        mask: [B, T//chunk_size], float32 或 None。
         initial_state: [B, H, K, V] 或 [1, H, K, V], float32，可选。
         output_final_state: bool，是否返回最终 state。
         head_first: bool，输入输出是否 head 维优先（[B, H, T, *]）。
-        chunk_size: int，chunk 长度，默认 16。当前 Triton kernel 仅支持 16。
+        chunk_size: int，chunk 长度，默认 16。
 
     Returns:
         out: [B, T, H, V]，与 v 同 dtype。
@@ -753,12 +757,6 @@ def gated_delta_net_recurrent_sane_inference(
     Raises:
         ValueError: tau/mask 形状不匹配。
     """
-    if chunk_size != CHUNK_LEN:
-        raise NotImplementedError(
-            f"JAX Triton gdn_recurrent_sane_inference currently only supports chunk_size={CHUNK_LEN}, "
-            f"got {chunk_size}"
-        )
-
     dtype = v.dtype
     q = _transpose_head(q, head_first)
     k = _transpose_head(k, head_first)
@@ -769,7 +767,7 @@ def gated_delta_net_recurrent_sane_inference(
 
     B, N, T, K = q.shape
     V = v.shape[-1]
-    C = max(T // CHUNK_LEN, 1)
+    C = max(T // chunk_size, 1)
 
     if tau.shape[-1] < C:
         tau = jnp.pad(
@@ -777,7 +775,7 @@ def gated_delta_net_recurrent_sane_inference(
         )
     if tau.shape != (B, N, C):
         raise ValueError(
-            f"tau shape {tau.shape} does not match expected (B={B}, N={N}, T//16={C})"
+            f"tau shape {tau.shape} does not match expected (B={B}, N={N}, T//chunk_size={C})"
         )
 
     use_mask = output_final_state and mask is not None
@@ -791,7 +789,7 @@ def gated_delta_net_recurrent_sane_inference(
             )
         if mask_arr.shape != (B, C):
             raise ValueError(
-                f"mask shape {mask_arr.shape} must match (B, T//16) = ({B}, {C})"
+                f"mask shape {mask_arr.shape} must match (B, T//chunk_size) = ({B}, {C})"
             )
     else:
         mask_arr = jnp.ones((B, C), dtype=jnp.float32)
@@ -799,7 +797,7 @@ def gated_delta_net_recurrent_sane_inference(
     h0 = _prepare_h0(initial_state, B, N, K, V)
 
     out, final_state = _gdn_recurrent_sane_inf_spmd(
-        q, k, v, g, beta, tau, mask_arr, h0, use_mask
+        q, k, v, g, beta, tau, mask_arr, h0, use_mask, chunk_size
     )
 
     out = jnp.transpose(out, (0, 2, 1, 3))

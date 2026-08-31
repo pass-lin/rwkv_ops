@@ -23,18 +23,22 @@ def _make_inputs(rwkv7_inputs, device, dtype="bfloat16", grad=False):
     return tensors
 
 
-def _call_op(op, tensors, output_final_state=True, mask=None):
-    return op(
-        r=tensors["r"],
-        k=tensors["k"],
-        v=tensors["v"],
-        a=tensors["a"],
-        b=tensors["b"],
-        w=tensors["w"],
-        initial_state=tensors["h0"],
-        output_final_state=output_final_state,
-        mask=mask,
-    )
+def _call_op(op, tensors, output_final_state=True, mask=None, chunk_size=None):
+    kwargs = {
+        "r": tensors["r"],
+        "k": tensors["k"],
+        "v": tensors["v"],
+        "a": tensors["a"],
+        "b": tensors["b"],
+        "w": tensors["w"],
+        "initial_state": tensors["h0"],
+        "output_final_state": output_final_state,
+    }
+    if mask is not None:
+        kwargs["mask"] = mask
+    if chunk_size is not None:
+        kwargs["chunk_size"] = chunk_size
+    return op(**kwargs)
 
 
 @pytest.mark.torch
@@ -180,3 +184,151 @@ def test_rwkv7_mask_all_one_equivalent(rwkv7_op, rwkv7_inputs, device):
     state_diff = (s_all_one - s_no_mask).abs().max().item()
     assert pred_diff < 1e-5, f"全 1 Mask 输出不一致 (max_diff={pred_diff:.3e})"
     assert state_diff < 1e-5, f"全 1 Mask 状态不一致 (max_diff={state_diff:.3e})"
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_rwkv7_chunk_size_8_forward_state(
+    rwkv7_shape, rwkv7_native_op, rwkv7_inputs, device
+):
+    """RWKV-7 CUDA kernel 在 chunk_size=8 时前向输出与最终 state 与 native 参考对齐。"""
+    from rwkv_ops import get_generalized_delta_rule
+
+    _, _, _, K = rwkv7_shape
+    op, _ = get_generalized_delta_rule(HEAD_SIZE=K, KERNEL_TYPE="cuda", chunk_size=8)
+
+    ref = _make_inputs(rwkv7_inputs, device, "bfloat16")
+    tgt = _make_inputs(rwkv7_inputs, device, "bfloat16")
+
+    y_ref, s_ref = _call_op(rwkv7_native_op, ref, output_final_state=True, chunk_size=8)
+    y_tgt, s_tgt = _call_op(op, tgt, output_final_state=True, chunk_size=8)
+
+    assert_allclose_with_stats(y_ref, y_tgt, "y_chunk8", atol=1e-5, rtol=1e-2)
+    assert_allclose_with_stats(s_ref, s_tgt, "final_state_chunk8", atol=1e-5, rtol=1e-3)
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_rwkv7_chunk_size_8_backward(
+    rwkv7_shape, rwkv7_native_op, rwkv7_inputs, device
+):
+    """RWKV-7 CUDA kernel 在 chunk_size=8 时反向梯度与 native 参考对齐。"""
+    from rwkv_ops import get_generalized_delta_rule
+
+    _, _, _, K = rwkv7_shape
+    op, _ = get_generalized_delta_rule(HEAD_SIZE=K, KERNEL_TYPE="cuda", chunk_size=8)
+
+    def grads(op, tensors, chunk_size):
+        t = {k: v.clone().requires_grad_(True) for k, v in tensors.items()}
+        y, s = _call_op(op, t, output_final_state=True, chunk_size=chunk_size)
+        loss = (y.float() ** 2).mean() - (s.float() ** 2).mean()
+        loss = loss.abs()
+        loss.backward()
+        return {k: t[k].grad for k in t}
+
+    ref = _make_inputs(rwkv7_inputs, device, "bfloat16")
+    tgt = _make_inputs(rwkv7_inputs, device, "bfloat16")
+
+    g_ref = grads(rwkv7_native_op, ref, chunk_size=8)
+    g_tgt = grads(op, tgt, chunk_size=8)
+
+    grad_thresholds = {
+        "r": (7e-3, 7e-3),
+        "k": (7e-3, 7e-3),
+        "v": (7e-3, 7e-3),
+        "a": (7e-3, 7e-3),
+        "b": (1e-2, 1e-2),
+        "w": (7e-3, 7e-3),
+        "h0": (7e-3, 7e-3),
+    }
+    for name in grad_thresholds:
+        atol, rtol = grad_thresholds[name]
+        assert_allclose_with_stats(
+            g_ref[name], g_tgt[name], f"grad_{name}_chunk8", atol=atol, rtol=rtol
+        )
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_rwkv7_chunk_size_8_forward_state_masked(
+    rwkv7_shape, rwkv7_native_op, rwkv7_inputs, device, rng
+):
+    """RWKV-7 CUDA kernel 在 chunk_size=8 且带随机 mask 时与 native 参考对齐。"""
+    from rwkv_ops import get_generalized_delta_rule
+
+    _, _, _, K = rwkv7_shape
+    op, _ = get_generalized_delta_rule(HEAD_SIZE=K, KERNEL_TYPE="cuda", chunk_size=8)
+
+    B, T = rwkv7_inputs["r"].shape[:2]
+    mask_np = np.ones((B, T), dtype=np.float32)
+    freeze = rng.random((B, T)) < 0.3
+    mask_np[freeze] = 0.0
+    mask_np[:, -5:] = 0.0
+    mask = torch.tensor(mask_np, dtype=torch.float32, device=device)
+
+    ref = _make_inputs(rwkv7_inputs, device, "bfloat16")
+    tgt = _make_inputs(rwkv7_inputs, device, "bfloat16")
+
+    y_ref, s_ref = _call_op(
+        rwkv7_native_op, ref, output_final_state=True, mask=mask, chunk_size=8
+    )
+    y_tgt, s_tgt = _call_op(op, tgt, output_final_state=True, mask=mask, chunk_size=8)
+
+    assert_allclose_with_stats(y_ref, y_tgt, "y_mask_chunk8", atol=1e-5, rtol=1e-2)
+    assert_allclose_with_stats(
+        s_ref, s_tgt, "final_state_mask_chunk8", atol=1e-5, rtol=1e-3
+    )
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_rwkv7_chunk_size_8_backward_masked(
+    rwkv7_shape, rwkv7_native_op, rwkv7_inputs, device, rng
+):
+    """RWKV-7 CUDA kernel 在 chunk_size=8 且带随机 mask 时反向梯度与 native 参考对齐。"""
+    from rwkv_ops import get_generalized_delta_rule
+
+    _, _, _, K = rwkv7_shape
+    op, _ = get_generalized_delta_rule(HEAD_SIZE=K, KERNEL_TYPE="cuda", chunk_size=8)
+
+    B, T = rwkv7_inputs["r"].shape[:2]
+    mask_np = np.ones((B, T), dtype=np.float32)
+    freeze = rng.random((B, T)) < 0.3
+    mask_np[freeze] = 0.0
+    mask_np[:, -5:] = 0.0
+    mask = torch.tensor(mask_np, dtype=torch.float32, device=device)
+
+    def grads(op, tensors, mask, chunk_size):
+        t = {k: v.clone().requires_grad_(True) for k, v in tensors.items()}
+        y, s = _call_op(
+            op, t, output_final_state=True, mask=mask, chunk_size=chunk_size
+        )
+        loss = (y.float() ** 2).mean() - (s.float() ** 2).mean()
+        loss = loss.abs()
+        loss.backward()
+        return {k: t[k].grad for k in t}
+
+    ref = _make_inputs(rwkv7_inputs, device, "bfloat16")
+    tgt = _make_inputs(rwkv7_inputs, device, "bfloat16")
+
+    g_ref = grads(rwkv7_native_op, ref, mask, chunk_size=8)
+    g_tgt = grads(op, tgt, mask, chunk_size=8)
+
+    grad_thresholds = {
+        "r": (7e-3, 7e-3),
+        "k": (7e-3, 7e-3),
+        "v": (7e-3, 7e-3),
+        "a": (7e-3, 7e-3),
+        "b": (1e-2, 1e-2),
+        "w": (7e-3, 7e-3),
+        "h0": (7e-3, 7e-3),
+    }
+    for name in grad_thresholds:
+        atol, rtol = grad_thresholds[name]
+        assert_allclose_with_stats(
+            g_ref[name],
+            g_tgt[name],
+            f"grad_{name}_mask_chunk8",
+            atol=atol,
+            rtol=rtol,
+        )

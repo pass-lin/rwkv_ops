@@ -81,6 +81,52 @@ def _prepare_inputs(rwkv7_inputs, head_first, dtype="bfloat16"):
     return r, k, v, a, b, w, h0
 
 
+def _make_triton_op(K, chunk_size):
+    """构造指定 chunk_size 的 RWKV-7 JAX Triton 训练算子。
+
+    Args:
+        K: int, head 维度大小。
+        chunk_size: int, chunk 长度。
+
+    Returns:
+        Callable: HEAD_SIZE=K 的 RWKV-7 Triton 训练 kernel。
+    """
+    from rwkv_ops import get_generalized_delta_rule
+
+    op, _ = get_generalized_delta_rule(
+        HEAD_SIZE=K, KERNEL_TYPE="triton", chunk_size=chunk_size
+    )
+    return op
+
+
+def _loss_fn(op, params, head_first):
+    """计算 RWKV-7 训练算子的测试损失。
+
+    Args:
+        op: Callable, 待测算子。
+        params: tuple, (w, r, k, v, a, b, h0)。
+        head_first: bool, 输入/输出 layout 标志。
+
+    Returns:
+        jax.Array: 标量损失。
+    """
+    w, r, k, v, a, b, h0 = params
+    y, state = op(
+        r=r,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        w=w,
+        initial_state=h0,
+        output_final_state=True,
+        head_first=head_first,
+    )
+    return jnp.mean(jnp.asarray(y, jnp.float32) ** 2) + jnp.mean(
+        jnp.asarray(state, jnp.float32) ** 2
+    )
+
+
 @pytest.mark.jax
 @pytest.mark.slow
 @pytest.mark.parametrize("head_first", [False, True])
@@ -156,6 +202,74 @@ def test_rwkv7_triton_backward(triton_op, native_op, rwkv7_inputs, head_first):
             g_ref,
             g_c,
             f"grad_{name}_head_first={head_first}",
+            atol=7e-3,
+            rtol=1e-3,
+        )
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+@pytest.mark.parametrize("head_first", [False, True])
+def test_rwkv7_triton_forward_state_chunk_size_8(native_op, rwkv7_inputs, head_first):
+    """对比 Triton chunk_size=8 与 native 前向输出和最终 state。"""
+    r, k, v, a, b, w, h0 = _prepare_inputs(rwkv7_inputs, head_first, "bfloat16")
+    K = int(r.shape[-1])
+    triton_op = _make_triton_op(K, chunk_size=8)
+
+    y_ref, s_ref = native_op(
+        r=r,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        w=w,
+        initial_state=h0,
+        output_final_state=True,
+        head_first=head_first,
+        chunk_size=8,
+    )
+    y_c, s_c = triton_op(
+        r=r,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        w=w,
+        initial_state=h0,
+        output_final_state=True,
+        head_first=head_first,
+    )
+
+    assert_allclose_with_stats(
+        y_ref, y_c, f"y_chunk8_head_first={head_first}", atol=1e-5, rtol=1e-2
+    )
+    assert_allclose_with_stats(
+        s_ref, s_c, f"final_state_chunk8_head_first={head_first}", atol=1e-5, rtol=1e-3
+    )
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+@pytest.mark.parametrize("head_first", [False, True])
+def test_rwkv7_triton_backward_chunk_size_8(native_op, rwkv7_inputs, head_first):
+    """Triton chunk_size=8 custom_vjp 反向梯度与 native Keras 实现对比。"""
+    r, k, v, a, b, w, h0 = _prepare_inputs(rwkv7_inputs, head_first, "bfloat16")
+    K = int(r.shape[-1])
+    triton_op = _make_triton_op(K, chunk_size=8)
+
+    ref_grads = jax.grad(
+        lambda *p: _loss_fn(native_op, p, head_first), argnums=range(7)
+    )(w, r, k, v, a, b, h0)
+    triton_grads = jax.grad(
+        lambda *p: _loss_fn(triton_op, p, head_first), argnums=range(7)
+    )(w, r, k, v, a, b, h0)
+
+    names = ["w", "r", "k", "v", "a", "b", "h0"]
+    for name, g_ref, g_c in zip(names, ref_grads, triton_grads):
+        assert_allclose_with_stats(
+            g_ref,
+            g_c,
+            f"grad_chunk8_{name}_head_first={head_first}",
             atol=7e-3,
             rtol=1e-3,
         )

@@ -4,6 +4,7 @@ import warnings
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
@@ -61,7 +62,9 @@ def _prepare_sane_inputs(gdn_sane_inputs, device, dtype="float32"):
     return q, k, v, g, beta, tau, mask, h0
 
 
-def _sane_loss_fn(op, q, k, v, g, beta, tau, mask, h0, output_final_state=True):
+def _sane_loss_fn(
+    op, q, k, v, g, beta, tau, mask, h0, output_final_state=True, chunk_size=16
+):
     """统一的 SANE 损失函数，用于反向梯度测试。"""
     out, state = op(
         q,
@@ -73,6 +76,7 @@ def _sane_loss_fn(op, q, k, v, g, beta, tau, mask, h0, output_final_state=True):
         mask=mask,
         initial_state=h0,
         output_final_state=output_final_state,
+        chunk_size=chunk_size,
     )
     loss = jnp.mean(jnp.asarray(out, jnp.float32) ** 2)
     if state is not None:
@@ -547,3 +551,159 @@ def test_gdn_pallas_sane_head_sharding(gdn_sane_inputs, gdn_sane_jax_device):
         state_ref, state_s, "pallas sane head tp state", atol=1e-4, rtol=1e-3
     )
     assert out_s.sharding.mesh.axis_names == ("h",)
+
+
+def _make_tau_mask_for_chunk_size(gdn_sane_inputs, chunk_size, device):
+    """为指定 chunk_size 重新生成 tau 与 mask。"""
+    B, T, H, _ = gdn_sane_inputs["q"].shape
+    C = T // chunk_size
+    rng = np.random.default_rng(42 + chunk_size)
+    x = rng.standard_normal((B, max(C, 1), H), dtype=np.float32) * 0.5 + 7.0
+    tau = np.log1p(np.exp(x)) + 1.0
+    mask = rng.integers(0, 2, (B, max(C, 1))).astype(np.float32)
+    return (
+        _to_jax_tensor(tau.astype(np.float32), device),
+        _to_jax_tensor(mask, device),
+    )
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+def test_gdn_pallas_sane_forward_chunk_size(gdn_sane_inputs, gdn_sane_jax_device):
+    """JAX Pallas SANE 训练算子非默认 chunk_size 前向/最终 state 与 native 对齐。"""
+    chunk_size = 8
+    q, k, v, g, beta, _, _, h0 = _prepare_sane_inputs(
+        gdn_sane_inputs, gdn_sane_jax_device, dtype="bfloat16"
+    )
+    tau, mask = _make_tau_mask_for_chunk_size(
+        gdn_sane_inputs, chunk_size, gdn_sane_jax_device
+    )
+
+    out_ref, state_ref = gdn_native_sane(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau,
+        mask=mask,
+        initial_state=h0,
+        output_final_state=True,
+        chunk_size=chunk_size,
+    )
+    out_pallas, state_pallas = gdn_pallas_recurrent(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau,
+        mask=mask,
+        initial_state=h0,
+        output_final_state=True,
+        chunk_size=chunk_size,
+    )
+
+    assert_allclose_with_stats(
+        out_ref,
+        out_pallas,
+        "pallas sane chunk_size=8 vs native output",
+        atol=1e-4,
+        rtol=1e-3,
+    )
+    assert_allclose_with_stats(
+        state_ref,
+        state_pallas,
+        "pallas sane chunk_size=8 vs native state",
+        atol=1e-4,
+        rtol=1e-3,
+    )
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+def test_gdn_pallas_sane_backward_chunk_size(gdn_sane_inputs, gdn_sane_jax_device):
+    """JAX Pallas SANE 训练算子非默认 chunk_size 反向梯度（含 dtau）与 native 对齐。"""
+    chunk_size = 8
+    q, k, v, g, beta, _, _, h0 = _prepare_sane_inputs(
+        gdn_sane_inputs, gdn_sane_jax_device, dtype="bfloat16"
+    )
+    tau, mask = _make_tau_mask_for_chunk_size(
+        gdn_sane_inputs, chunk_size, gdn_sane_jax_device
+    )
+
+    ref_grads = jax.grad(
+        lambda q, k, v, g, beta, tau, h0: _sane_loss_fn(
+            gdn_native_sane, q, k, v, g, beta, tau, mask, h0, chunk_size=chunk_size
+        ),
+        argnums=(0, 1, 2, 3, 4, 5, 6),
+    )(q, k, v, g, beta, tau, h0)
+
+    pallas_grads = jax.grad(
+        lambda q, k, v, g, beta, tau, h0: _sane_loss_fn(
+            gdn_pallas_recurrent, q, k, v, g, beta, tau, mask, h0, chunk_size=chunk_size
+        ),
+        argnums=(0, 1, 2, 3, 4, 5, 6),
+    )(q, k, v, g, beta, tau, h0)
+
+    names = ["q", "k", "v", "g", "beta", "tau", "h0"]
+    for name, gr, gp in zip(names, ref_grads, pallas_grads):
+        assert_allclose_with_stats(
+            gr,
+            gp,
+            f"grad_{name} pallas sane chunk_size=8 vs native",
+            atol=7e-3,
+            rtol=1e-3,
+        )
+
+
+@pytest.mark.jax
+def test_gdn_pallas_sane_inference_chunk_size(gdn_sane_inputs, gdn_sane_jax_device):
+    """JAX Pallas SANE 推理算子非默认 chunk_size 与 native 对齐。"""
+    chunk_size = 8
+    q, k, v, g, beta, _, _, h0 = _prepare_sane_inputs(
+        gdn_sane_inputs, gdn_sane_jax_device, dtype="bfloat16"
+    )
+    tau, mask = _make_tau_mask_for_chunk_size(
+        gdn_sane_inputs, chunk_size, gdn_sane_jax_device
+    )
+
+    out_ref, state_ref = gdn_native_sane_inference(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau,
+        mask=mask,
+        initial_state=h0,
+        output_final_state=True,
+        chunk_size=chunk_size,
+    )
+    out_pallas, state_pallas = gdn_pallas_inference(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau,
+        mask=mask,
+        initial_state=h0,
+        output_final_state=True,
+        chunk_size=chunk_size,
+    )
+
+    assert_allclose_with_stats(
+        out_ref,
+        out_pallas,
+        "pallas sane inference chunk_size=8 vs native output",
+        atol=1e-4,
+        rtol=1e-3,
+    )
+    assert_allclose_with_stats(
+        state_ref,
+        state_pallas,
+        "pallas sane inference chunk_size=8 vs native state",
+        atol=1e-4,
+        rtol=1e-3,
+    )

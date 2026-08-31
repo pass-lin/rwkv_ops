@@ -182,3 +182,147 @@ def test_chunk_triton_bwd_vs_native(
             atol=7e-3,
             rtol=1e-3,
         )
+
+
+@pytest.mark.jax
+def test_chunk_triton_fwd_vs_native_chunk_size_8(gdn_inputs):
+    """JAX-Triton chunkwise 前向在 chunk_size=8 下与 native 参考实现对拍。"""
+    pytest.importorskip("triton")
+    from rwkv_ops import get_gated_delta_net_chunk
+
+    q, k, v = gdn_inputs["q"], gdn_inputs["k"], gdn_inputs["v"]
+    g, beta, h0 = gdn_inputs["g"], gdn_inputs["beta"], gdn_inputs["h0"]
+
+    q_j = jnp.asarray(q, dtype=jnp.bfloat16)
+    k_j = jnp.asarray(k, dtype=jnp.bfloat16)
+    v_j = jnp.asarray(v, dtype=jnp.bfloat16)
+    g_j = jnp.asarray(g)
+    beta_j = jnp.asarray(beta)
+    h0_j = jnp.asarray(h0)
+
+    native_op = get_gated_delta_net_chunk(KERNEL_TYPE="native", chunk_size=8)
+    triton_op = get_gated_delta_net_chunk(KERNEL_TYPE="triton", chunk_size=8)
+
+    out_native, state_native = native_op(
+        q_j,
+        k_j,
+        v_j,
+        g_j,
+        beta_j,
+        initial_state=h0_j,
+        output_final_state=True,
+    )
+    out_triton, state_triton = triton_op(
+        q_j,
+        k_j,
+        v_j,
+        g_j,
+        beta_j,
+        initial_state=h0_j,
+        output_final_state=True,
+    )
+
+    assert_allclose_with_stats(
+        out_native,
+        out_triton,
+        "chunk_size=8 triton vs native output",
+        atol=1e-2,
+        rtol=1e-2,
+    )
+    assert_allclose_with_stats(
+        state_native,
+        state_triton,
+        "chunk_size=8 triton vs native state",
+        atol=1e-2,
+        rtol=1e-2,
+    )
+
+
+@pytest.mark.jax
+def test_chunk_triton_no_final_state_chunk_size_8(gdn_inputs):
+    """output_final_state=False 且 chunk_size=8 时不返回 state。"""
+    pytest.importorskip("triton")
+    from rwkv_ops import get_gated_delta_net_chunk
+
+    q, k, v = gdn_inputs["q"], gdn_inputs["k"], gdn_inputs["v"]
+    g, beta = gdn_inputs["g"], gdn_inputs["beta"]
+
+    q_j = jnp.asarray(q, dtype=jnp.bfloat16)
+    k_j = jnp.asarray(k, dtype=jnp.bfloat16)
+    v_j = jnp.asarray(v, dtype=jnp.bfloat16)
+    g_j = jnp.asarray(g)
+    beta_j = jnp.asarray(beta)
+
+    native_op = get_gated_delta_net_chunk(KERNEL_TYPE="native", chunk_size=8)
+    triton_op = get_gated_delta_net_chunk(KERNEL_TYPE="triton", chunk_size=8)
+
+    out_native, state_native = native_op(
+        q_j, k_j, v_j, g_j, beta_j, output_final_state=False
+    )
+    out_triton, state_triton = triton_op(
+        q_j, k_j, v_j, g_j, beta_j, output_final_state=False
+    )
+
+    assert state_native is None
+    assert state_triton is None
+    assert_allclose_with_stats(
+        out_native,
+        out_triton,
+        "chunk_size=8 no-state chunk output",
+        atol=1e-2,
+        rtol=1e-2,
+    )
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+def test_chunk_triton_bwd_vs_native_chunk_size_8(gdn_inputs):
+    """JAX-Triton chunkwise 反向在 chunk_size=8 下与 native Keras autograd 对拍。"""
+    pytest.importorskip("triton")
+    from rwkv_ops import get_gated_delta_net_chunk
+
+    q, k, v = gdn_inputs["q"], gdn_inputs["k"], gdn_inputs["v"]
+    g, beta, h0 = gdn_inputs["g"], gdn_inputs["beta"], gdn_inputs["h0"]
+
+    def _run_and_grad(op):
+        q_j = jnp.asarray(q)
+        k_j = jnp.asarray(k)
+        v_j = jnp.asarray(v)
+        g_j = jnp.asarray(g)
+        beta_j = jnp.asarray(beta)
+        h0_j = jnp.asarray(h0)
+
+        def loss_fn(q_, k_, v_, g_, beta_, h0_):
+            out, state = op(
+                q_,
+                k_,
+                v_,
+                g_,
+                beta_,
+                initial_state=h0_,
+                output_final_state=True,
+            )
+            return jnp.mean(out**2) + jnp.mean(state**2)
+
+        grads = jax.grad(loss_fn, argnums=(0, 1, 2, 3, 4, 5))(
+            q_j, k_j, v_j, g_j, beta_j, h0_j
+        )
+        return grads
+
+    native_op = get_gated_delta_net_chunk(KERNEL_TYPE="native", chunk_size=8)
+    triton_op = get_gated_delta_net_chunk(KERNEL_TYPE="triton", chunk_size=8)
+
+    grads_native = _run_and_grad(native_op)
+    grads_triton = _run_and_grad(triton_op)
+
+    names = ["q", "k", "v", "g", "beta", "h0"]
+    for name, ref, tgt in zip(names, grads_native, grads_triton):
+        assert ref is not None, f"native {name} grad is None"
+        assert tgt is not None, f"triton {name} grad is None"
+        assert_allclose_with_stats(
+            ref,
+            tgt,
+            f"chunk_size=8 bwd {name}",
+            atol=7e-3,
+            rtol=1e-3,
+        )

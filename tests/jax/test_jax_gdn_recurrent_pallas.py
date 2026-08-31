@@ -155,3 +155,104 @@ def test_gdn_pallas_recurrent_backward(gdn_inputs, gdn_jax_device):
             atol=7e-3,
             rtol=1e-2,
         )
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+def test_gdn_pallas_recurrent_chunk_size_matches_native(gdn_inputs, gdn_jax_device):
+    """JAX Pallas recurrent 训练算子非默认 chunk_size 与 native 参考对齐。"""
+    chunk_size = 8
+    q = _to_jax_tensor(gdn_inputs["q"], gdn_jax_device)
+    k = _to_jax_tensor(gdn_inputs["k"], gdn_jax_device)
+    v = _to_jax_tensor(gdn_inputs["v"], gdn_jax_device)
+    g = _to_jax_tensor(gdn_inputs["g"], gdn_jax_device)
+    beta = _to_jax_tensor(gdn_inputs["beta"], gdn_jax_device)
+    h0 = _to_jax_tensor(gdn_inputs["h0"], gdn_jax_device)
+
+    out_pallas, state_pallas = gdn_pallas_recurrent(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        initial_state=h0,
+        output_final_state=True,
+        chunk_size=chunk_size,
+    )
+    out_ref, state_ref = gdn_native_recurrent(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        initial_state=h0,
+        output_final_state=True,
+        chunk_size=chunk_size,
+    )
+
+    assert_allclose_with_stats(
+        out_ref,
+        out_pallas,
+        "pallas recurrent chunk_size=8 vs native output",
+        atol=1e-4,
+        rtol=1e-3,
+    )
+    assert_allclose_with_stats(
+        state_ref,
+        state_pallas,
+        "pallas recurrent chunk_size=8 vs native state",
+        atol=1e-4,
+        rtol=1e-3,
+    )
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+def test_gdn_pallas_recurrent_backward_chunk_size(gdn_inputs, gdn_jax_device):
+    """JAX Pallas recurrent 训练算子非默认 chunk_size 反向梯度与 native 参考对齐。"""
+    chunk_size = 8
+    q = _to_jax_tensor(gdn_inputs["q"], gdn_jax_device)
+    k = _to_jax_tensor(gdn_inputs["k"], gdn_jax_device)
+    v = _to_jax_tensor(gdn_inputs["v"], gdn_jax_device)
+    g = _to_jax_tensor(gdn_inputs["g"], gdn_jax_device)
+    beta = _to_jax_tensor(gdn_inputs["beta"], gdn_jax_device)
+    h0 = _to_jax_tensor(gdn_inputs["h0"], gdn_jax_device)
+
+    def loss_fn(q, k, v, g, beta, h0):
+        out, state = gdn_pallas_recurrent(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state=h0,
+            output_final_state=True,
+            chunk_size=chunk_size,
+        )
+        return jnp.mean(out.astype(jnp.float32) ** 2) + jnp.mean(state**2)
+
+    def ref_loss_fn(q, k, v, g, beta, h0):
+        out, state = gdn_native_recurrent(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state=h0,
+            output_final_state=True,
+            chunk_size=chunk_size,
+        )
+        return jnp.mean(out.astype(jnp.float32) ** 2) + jnp.mean(state**2)
+
+    grads_pallas = jax.grad(loss_fn, argnums=(0, 1, 2, 3, 4, 5))(q, k, v, g, beta, h0)
+    grads_ref = jax.grad(ref_loss_fn, argnums=(0, 1, 2, 3, 4, 5))(q, k, v, g, beta, h0)
+
+    names = ["q", "k", "v", "g", "beta", "h0"]
+    for name, gr, gp in zip(names, grads_ref, grads_pallas):
+        assert_allclose_with_stats(
+            gr,
+            gp,
+            f"grad_{name} pallas chunk_size=8 vs native",
+            atol=7e-3,
+            rtol=1e-2,
+        )

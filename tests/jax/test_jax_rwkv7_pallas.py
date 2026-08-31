@@ -52,6 +52,29 @@ def _prepare_inputs(rwkv7_inputs, head_first, dtype="bfloat16"):
     return r, k, v, a, b, w, h0
 
 
+def _get_rwkv7_pallas_op_chunk_size_8(rwkv7_shape):
+    """构造 chunk_size=8 的 RWKV-7 JAX Pallas 训练算子。
+
+    非 GPU/TPU 环境下会 pytest.skip。
+
+    Args:
+        rwkv7_shape: tuple, (B, T, H, K)。
+
+    Returns:
+        Callable: chunk_size=8 的 RWKV-7 Pallas 训练 kernel。
+    """
+    pytest.importorskip("jax.experimental.pallas")
+    import jax
+
+    if jax.devices()[0].platform not in ("gpu", "tpu"):
+        pytest.skip("pallas 后端仅用于 GPU/TPU")
+    from rwkv_ops import get_generalized_delta_rule
+
+    _, _, _, K = rwkv7_shape
+    op, _ = get_generalized_delta_rule(HEAD_SIZE=K, KERNEL_TYPE="pallas", chunk_size=8)
+    return op
+
+
 @pytest.mark.jax
 @pytest.mark.slow
 @pytest.mark.parametrize("head_first", [False, True])
@@ -210,6 +233,188 @@ def test_rwkv7_pallas_mask_forward_backward(
             g_ref,
             g_c,
             f"grad_mask_{name}_head_first={head_first}",
+            atol=7e-3,
+            rtol=1e-3,
+        )
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+@pytest.mark.parametrize("head_first", [False, True])
+def test_rwkv7_pallas_forward_state_chunk_size_8(
+    rwkv7_native_op, rwkv7_inputs, rwkv7_shape, head_first
+):
+    """对比 chunk_size=8 时 Pallas 与 native 前向输出和最终 state。"""
+    pallas_op = _get_rwkv7_pallas_op_chunk_size_8(rwkv7_shape)
+    r, k, v, a, b, w, h0 = _prepare_inputs(rwkv7_inputs, head_first, "bfloat16")
+
+    y_ref, s_ref = rwkv7_native_op(
+        r=r,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        w=w,
+        initial_state=h0,
+        output_final_state=True,
+        head_first=head_first,
+        chunk_size=8,
+    )
+    y_c, s_c = pallas_op(
+        r=r,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        w=w,
+        initial_state=h0,
+        output_final_state=True,
+        head_first=head_first,
+        chunk_size=8,
+    )
+
+    assert_allclose_with_stats(
+        y_ref, y_c, f"y_chunk_size=8_head_first={head_first}", atol=1e-5, rtol=1e-2
+    )
+    assert_allclose_with_stats(
+        s_ref,
+        s_c,
+        f"final_state_chunk_size=8_head_first={head_first}",
+        atol=1e-5,
+        rtol=1e-3,
+    )
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+@pytest.mark.parametrize("head_first", [False, True])
+def test_rwkv7_pallas_backward_chunk_size_8(
+    rwkv7_native_op, rwkv7_inputs, rwkv7_shape, head_first
+):
+    """chunk_size=8 时 Pallas custom_vjp 反向梯度与 native Keras 实现对比。"""
+    pallas_op = _get_rwkv7_pallas_op_chunk_size_8(rwkv7_shape)
+    r, k, v, a, b, w, h0 = _prepare_inputs(rwkv7_inputs, head_first, "bfloat16")
+
+    def loss(op, params):
+        w, r, k, v, a, b, h0 = params
+        y, state = op(
+            r=r,
+            k=k,
+            v=v,
+            a=a,
+            b=b,
+            w=w,
+            initial_state=h0,
+            output_final_state=True,
+            head_first=head_first,
+            chunk_size=8,
+        )
+        return jnp.mean(jnp.asarray(y, jnp.float32) ** 2) + jnp.mean(
+            jnp.asarray(state, jnp.float32) ** 2
+        )
+
+    ref_grads = jax.grad(lambda *p: loss(rwkv7_native_op, p), argnums=range(7))(
+        w, r, k, v, a, b, h0
+    )
+    pallas_grads = jax.grad(lambda *p: loss(pallas_op, p), argnums=range(7))(
+        w, r, k, v, a, b, h0
+    )
+
+    names = ["w", "r", "k", "v", "a", "b", "h0"]
+    for name, g_ref, g_c in zip(names, ref_grads, pallas_grads):
+        assert_allclose_with_stats(
+            g_ref,
+            g_c,
+            f"grad_chunk_size=8_{name}_head_first={head_first}",
+            atol=7e-3,
+            rtol=1e-3,
+        )
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+@pytest.mark.parametrize("head_first", [False, True])
+def test_rwkv7_pallas_mask_forward_backward_chunk_size_8(
+    rwkv7_native_op, rwkv7_inputs, rwkv7_shape, head_first
+):
+    """chunk_size=8 时带 mask 路径的前向与反向对比（后半序列 padding）。"""
+    pallas_op = _get_rwkv7_pallas_op_chunk_size_8(rwkv7_shape)
+    r, k, v, a, b, w, h0 = _prepare_inputs(rwkv7_inputs, head_first, "bfloat16")
+    B, T = rwkv7_inputs["r"].shape[0], rwkv7_inputs["r"].shape[1]
+    mask = np.ones((B, T), dtype=np.float32)
+    mask[:, T // 2 :] = 0.0
+    mask = _to_jax(mask, "float32")
+
+    def loss(op, params):
+        w, r, k, v, a, b, h0 = params
+        y, state = op(
+            r=r,
+            k=k,
+            v=v,
+            a=a,
+            b=b,
+            w=w,
+            initial_state=h0,
+            output_final_state=True,
+            head_first=head_first,
+            mask=mask,
+            chunk_size=8,
+        )
+        return jnp.mean(jnp.asarray(y, jnp.float32) ** 2) + jnp.mean(
+            jnp.asarray(state, jnp.float32) ** 2
+        )
+
+    params = (w, r, k, v, a, b, h0)
+    y_ref, s_ref = rwkv7_native_op(
+        r=r,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        w=w,
+        initial_state=h0,
+        output_final_state=True,
+        head_first=head_first,
+        mask=mask,
+        chunk_size=8,
+    )
+    y_c, s_c = pallas_op(
+        r=r,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        w=w,
+        initial_state=h0,
+        output_final_state=True,
+        head_first=head_first,
+        mask=mask,
+        chunk_size=8,
+    )
+    assert_allclose_with_stats(
+        y_ref,
+        y_c,
+        f"y_mask_chunk_size=8_head_first={head_first}",
+        atol=1e-5,
+        rtol=1e-2,
+    )
+    assert_allclose_with_stats(
+        s_ref,
+        s_c,
+        f"final_state_mask_chunk_size=8_head_first={head_first}",
+        atol=1e-5,
+        rtol=1e-3,
+    )
+
+    ref_grads = jax.grad(lambda *p: loss(rwkv7_native_op, p), argnums=range(7))(*params)
+    pallas_grads = jax.grad(lambda *p: loss(pallas_op, p), argnums=range(7))(*params)
+
+    names = ["w", "r", "k", "v", "a", "b", "h0"]
+    for name, g_ref, g_c in zip(names, ref_grads, pallas_grads):
+        assert_allclose_with_stats(
+            g_ref,
+            g_c,
+            f"grad_mask_chunk_size=8_{name}_head_first={head_first}",
             atol=7e-3,
             rtol=1e-3,
         )

@@ -1,6 +1,8 @@
 """JAX 版 Gated DeltaNet recurrent Triton kernel 封装。"""
 
 from __future__ import annotations
+
+import functools
 from typing import Optional, Tuple, Union
 
 import jax
@@ -18,8 +20,6 @@ from .triton_kernel import (
     gated_delta_net_recurrent_inference_fwd_kernel,
     gated_delta_net_recurrent_single_step_fwd_kernel,
 )
-
-CHUNK_LEN = 16
 
 # SPMD 切分规则（Einsum 风格）
 # b=Batch, n=Head, t=Time, k=HeadK, v=HeadV, c=Chunk
@@ -163,11 +163,11 @@ def _compute_grid(B, H, V):
 # 无 Mask 训练前向
 
 
-def _gdn_recurrent_fwd_triton_call(q, k, v, g, beta, h0):
+def _gdn_recurrent_fwd_triton_call(q, k, v, g, beta, h0, chunk_size: int):
     B, N, T, K = q.shape
     V = v.shape[-1]
     dtype = q.dtype
-    chunk_num = T // CHUNK_LEN
+    chunk_num = T // chunk_size
     BV = _compute_bv(V)
 
     out_shapes = [
@@ -200,16 +200,16 @@ def _gdn_recurrent_fwd_triton_call(q, k, v, g, beta, h0):
         V=V,
         BK=triton.next_power_of_2(K),
         BV=BV,
-        CHUNK_LEN=CHUNK_LEN,
+        CHUNK_LEN=chunk_size,
         USE_INITIAL_STATE=True,
         STORE_FINAL_STATE=True,
     )
     return out, kv_mem, state_chkp, inv_norm_q, inv_norm_k, ht
 
 
-@custom_partitioning
-def _gdn_recurrent_fwd_spmd(q, k, v, g, beta, h0):
-    return _gdn_recurrent_fwd_triton_call(q, k, v, g, beta, h0)
+@functools.partial(custom_partitioning, static_argnums=(6,))
+def _gdn_recurrent_fwd_spmd(q, k, v, g, beta, h0, chunk_size: int):
+    return _gdn_recurrent_fwd_triton_call(q, k, v, g, beta, h0, chunk_size)
 
 
 _gdn_recurrent_fwd_spmd.def_partition(
@@ -223,7 +223,19 @@ _gdn_recurrent_fwd_spmd.def_partition(
 
 
 def _gdn_recurrent_bwd_triton_call(
-    q, k, v, g, beta, dy, dht, kv_mem, inv_norm_q, inv_norm_k, h0, state_chkp
+    q,
+    k,
+    v,
+    g,
+    beta,
+    dy,
+    dht,
+    kv_mem,
+    inv_norm_q,
+    inv_norm_k,
+    h0,
+    state_chkp,
+    chunk_size: int,
 ):
     B, N, T, K = q.shape
     V = v.shape[-1]
@@ -267,17 +279,41 @@ def _gdn_recurrent_bwd_triton_call(
         V=V,
         BK=triton.next_power_of_2(K),
         BV=BV,
-        CHUNK_LEN=CHUNK_LEN,
+        CHUNK_LEN=chunk_size,
         USE_FINAL_STATE_GRADIENT=True,
     )
 
 
-@custom_partitioning
+@functools.partial(custom_partitioning, static_argnums=(12,))
 def _gdn_recurrent_bwd_spmd(
-    q, k, v, g, beta, dy, dht, kv_mem, inv_norm_q, inv_norm_k, h0, state_chkp
+    q,
+    k,
+    v,
+    g,
+    beta,
+    dy,
+    dht,
+    kv_mem,
+    inv_norm_q,
+    inv_norm_k,
+    h0,
+    state_chkp,
+    chunk_size: int,
 ):
     return _gdn_recurrent_bwd_triton_call(
-        q, k, v, g, beta, dy, dht, kv_mem, inv_norm_q, inv_norm_k, h0, state_chkp
+        q,
+        k,
+        v,
+        g,
+        beta,
+        dy,
+        dht,
+        kv_mem,
+        inv_norm_q,
+        inv_norm_k,
+        h0,
+        state_chkp,
+        chunk_size,
     )
 
 
@@ -288,17 +324,17 @@ _gdn_recurrent_bwd_spmd.def_partition(
 )
 
 
-@jax.custom_vjp
-def _gdn_recurrent_train(q, k, v, g, beta, h0):
+@functools.partial(jax.custom_vjp, nondiff_argnums=(6,))
+def _gdn_recurrent_train(q, k, v, g, beta, h0, chunk_size: int):
     out, kv_mem, state_chkp, inv_norm_q, inv_norm_k, final_state = (
-        _gdn_recurrent_fwd_spmd(q, k, v, g, beta, h0)
+        _gdn_recurrent_fwd_spmd(q, k, v, g, beta, h0, chunk_size)
     )
     return out, final_state
 
 
-def _gdn_train_fwd(q, k, v, g, beta, h0):
+def _gdn_train_fwd(q, k, v, g, beta, h0, chunk_size: int):
     out, kv_mem, state_chkp, inv_norm_q, inv_norm_k, final_state = (
-        _gdn_recurrent_fwd_spmd(q, k, v, g, beta, h0)
+        _gdn_recurrent_fwd_spmd(q, k, v, g, beta, h0, chunk_size)
     )
     return (out, final_state), (
         q,
@@ -314,7 +350,7 @@ def _gdn_train_fwd(q, k, v, g, beta, h0):
     )
 
 
-def _gdn_train_bwd(res, grads):
+def _gdn_train_bwd(chunk_size: int, res, grads):
     q, k, v, g, beta, kv_mem, inv_norm_q, inv_norm_k, h0, state_chkp = res
     dy, dht = grads
     dy = jnp.asarray(dy, q.dtype)
@@ -326,7 +362,19 @@ def _gdn_train_bwd(res, grads):
         dht = jnp.asarray(dht, jnp.float32)
 
     dq, dk, dv, dg, dbeta, dh0 = _gdn_recurrent_bwd_spmd(
-        q, k, v, g, beta, dy, dht, kv_mem, inv_norm_q, inv_norm_k, h0, state_chkp
+        q,
+        k,
+        v,
+        g,
+        beta,
+        dy,
+        dht,
+        kv_mem,
+        inv_norm_q,
+        inv_norm_k,
+        h0,
+        state_chkp,
+        chunk_size,
     )
     return dq, dk, dv, dg, dbeta, dh0
 
@@ -437,6 +485,7 @@ def gated_delta_net_recurrent(
     initial_state: Optional[jnp.ndarray] = None,
     output_final_state: bool = True,
     head_first: bool = False,
+    chunk_size: int = 16,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
     """Gated DeltaNet recurrent 训练算子（JAX Triton 实现）。
 
@@ -448,13 +497,14 @@ def gated_delta_net_recurrent(
         initial_state: [B, H, K, V] 或 [1, H, K, V]，float32，可选。
         output_final_state: bool，是否返回最终 state。
         head_first: bool，输入输出是否 head 维优先（[B, H, T, *]）。
+        chunk_size: int，chunk 长度，默认 16。
 
     Returns:
         out: [B, T, H, V]，与 v 同 dtype。
         final_state: [B, H, K, V]，float32；仅当 output_final_state=True 时返回。
 
     Raises:
-        ValueError: T 不被 CHUNK_LEN 整除。
+        ValueError: T 不被 chunk_size 整除。
     """
     dtype = v.dtype
     q = _transpose_head(q, head_first)
@@ -465,13 +515,13 @@ def gated_delta_net_recurrent(
 
     B, N, T, K = q.shape
     V = v.shape[-1]
-    if T % CHUNK_LEN != 0:
+    if T % chunk_size != 0:
         raise ValueError(
-            f"Triton kernel requires sequence length T={T} to be divisible by {CHUNK_LEN}"
+            f"Triton kernel requires sequence length T={T} to be divisible by chunk_size={chunk_size}"
         )
 
     h0 = _prepare_h0(initial_state, B, N, K, V)
-    out, final_state = _gdn_recurrent_train(q, k, v, g, beta, h0)
+    out, final_state = _gdn_recurrent_train(q, k, v, g, beta, h0, chunk_size)
 
     out = jnp.transpose(out, (0, 2, 1, 3))
     out = jnp.asarray(out, dtype)
@@ -490,8 +540,15 @@ def gated_delta_net_recurrent_inference(
     initial_state: Optional[jnp.ndarray] = None,
     output_final_state: bool = True,
     head_first: bool = False,
+    chunk_size: int = 16,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
-    """Gated DeltaNet recurrent 推理算子（JAX Triton 实现，无梯度）。"""
+    """Gated DeltaNet recurrent 推理算子（JAX Triton 实现，无梯度）。
+
+    Args:
+        chunk_size: int，chunk 长度，默认 16。recurrent 推理内核不依赖 chunk_size，
+            保留参数仅为了与训练算子签名一致。
+    """
+    _ = chunk_size
     dtype = v.dtype
     q = _transpose_head(q, head_first)
     k = _transpose_head(k, head_first)
@@ -522,8 +579,14 @@ def gated_delta_net_recurrent_single_step(
     initial_state: Optional[jnp.ndarray] = None,
     output_final_state: bool = True,
     head_first: bool = True,
+    chunk_size: int = 16,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
-    """Gated DeltaNet recurrent 单步 RNN 算子（JAX Triton 实现）。"""
+    """Gated DeltaNet recurrent 单步 RNN 算子（JAX Triton 实现）。
+
+    Args:
+        chunk_size: int，chunk 长度，默认 16。单步 RNN 忽略该参数，仅签名一致。
+    """
+    _ = chunk_size
     if not head_first:
         raise NotImplementedError(
             "gated_delta_net_recurrent_single_step currently only supports head_first=True."

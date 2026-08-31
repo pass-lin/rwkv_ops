@@ -15,14 +15,35 @@ def _to_torch(arr, dtype, device):
     return torch.tensor(arr, dtype=getattr(torch, dtype), device=device)
 
 
-def _make_inputs(rwkv7_sane_inputs, device, dtype="bfloat16", grad=False):
+def _make_tau(B, T, H, chunk_size, rng):
+    x = rng.standard_normal((B, T // chunk_size, H), dtype=np.float32) * 0.5 + 7.0
+    return (np.log1p(np.exp(x)) + 1.0).astype(np.float32)
+
+
+def _make_inputs(
+    rwkv7_sane_inputs,
+    device,
+    dtype="bfloat16",
+    grad=False,
+    chunk_size=16,
+    tau=None,
+    mask=None,
+):
     B, T, H, K = rwkv7_sane_inputs["r"].shape
     tensors = {
         name: _to_torch(rwkv7_sane_inputs[name], dtype, device)
         for name in ["r", "k", "v", "a", "b", "w"]
     }
-    tensors["tau"] = _to_torch(rwkv7_sane_inputs["tau"], "float32", device)
-    tensors["mask"] = torch.ones(B, T // 16, dtype=torch.float32, device=device)
+    if tau is None:
+        tensors["tau"] = _to_torch(rwkv7_sane_inputs["tau"], "float32", device)
+    else:
+        tensors["tau"] = _to_torch(tau, "float32", device)
+    if mask is None:
+        tensors["mask"] = torch.ones(
+            B, T // chunk_size, dtype=torch.float32, device=device
+        )
+    else:
+        tensors["mask"] = _to_torch(mask, "float32", device)
     tensors["h0"] = _to_torch(rwkv7_sane_inputs["h0"], "float32", device)
     if grad:
         for name in ["r", "k", "v", "a", "b", "w", "tau", "h0"]:
@@ -33,7 +54,7 @@ def _make_inputs(rwkv7_sane_inputs, device, dtype="bfloat16", grad=False):
 _UNSET = object()
 
 
-def _call_op(op, tensors, output_final_state=True, mask=_UNSET):
+def _call_op(op, tensors, output_final_state=True, mask=_UNSET, chunk_size=16):
     if mask is _UNSET:
         mask = tensors["mask"]
     return op(
@@ -47,6 +68,7 @@ def _call_op(op, tensors, output_final_state=True, mask=_UNSET):
         mask=mask,
         initial_state=tensors["h0"],
         output_final_state=output_final_state,
+        chunk_size=chunk_size,
     )
 
 
@@ -271,3 +293,249 @@ def test_rwkv7_sane_triton_no_mask_backward(
     for name in thresholds:
         atol, rtol = thresholds[name]
         _test_is_close(f"grad_no_mask_{name}", g_ref[name], g_tgt[name], atol, rtol)
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_rwkv7_sane_triton_forward_state_chunk_size(
+    rwkv7_sane_triton_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
+):
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
+    chunk_size = 8
+    tau = _make_tau(B, T, H, chunk_size, rng)
+    ref = _make_inputs(
+        rwkv7_sane_inputs, device, "bfloat16", chunk_size=chunk_size, tau=tau
+    )
+    tgt = _make_inputs(
+        rwkv7_sane_inputs, device, "bfloat16", chunk_size=chunk_size, tau=tau
+    )
+
+    y_ref, s_ref = _call_op(
+        rwkv7_sane_native_op, ref, output_final_state=True, chunk_size=chunk_size
+    )
+    y_tgt, s_tgt = _call_op(
+        rwkv7_sane_triton_op, tgt, output_final_state=True, chunk_size=chunk_size
+    )
+
+    _test_is_close("y_chunk_size_8", y_ref, y_tgt, atol=1e-4, rtol=1e-2)
+    _test_is_close("final_state_chunk_size_8", s_ref, s_tgt, atol=1e-5, rtol=1e-3)
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_rwkv7_sane_triton_backward_chunk_size(
+    rwkv7_sane_triton_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
+):
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
+    chunk_size = 8
+    tau = _make_tau(B, T, H, chunk_size, rng)
+
+    def grads(op, tensors):
+        t = {
+            k: v.clone().detach().requires_grad_(True)
+            for k, v in tensors.items()
+            if k != "mask"
+        }
+        t["mask"] = tensors["mask"]
+        y, s = _call_op(op, t, output_final_state=True, chunk_size=chunk_size)
+        loss = (y.float() ** 2).mean() + (s.float() ** 2).mean()
+        loss.backward()
+        return {k: t[k].grad for k in ["r", "k", "v", "a", "b", "w", "tau", "h0"]}
+
+    ref = _make_inputs(
+        rwkv7_sane_inputs, device, "bfloat16", grad=True, chunk_size=chunk_size, tau=tau
+    )
+    tgt = _make_inputs(
+        rwkv7_sane_inputs, device, "bfloat16", grad=True, chunk_size=chunk_size, tau=tau
+    )
+
+    g_ref = grads(rwkv7_sane_native_op, ref)
+    g_tgt = grads(rwkv7_sane_triton_op, tgt)
+
+    thresholds = {
+        "r": (1e-4, 1e-2),
+        "k": (7e-3, 1e-2),
+        "v": (7e-3, 1e-2),
+        "a": (7e-3, 1e-2),
+        "b": (7e-3, 1e-2),
+        "w": (7e-3, 1e-2),
+        "tau": (7e-3, 1e-2),
+        "h0": (1e-5, 1e-3),
+    }
+    for name in thresholds:
+        atol, rtol = thresholds[name]
+        _test_is_close(
+            f"grad_{name}_chunk_size_8", g_ref[name], g_tgt[name], atol, rtol
+        )
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_rwkv7_sane_triton_forward_state_masked_chunk_size(
+    rwkv7_sane_triton_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
+):
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
+    chunk_size = 8
+    n_chunks = T // chunk_size
+    mask_np = np.ones((B, n_chunks), dtype=np.float32)
+    freeze = rng.random((B, n_chunks)) < 0.3
+    mask_np[freeze] = 0.0
+    mask_np[:, -1] = 0.0
+    mask = torch.tensor(mask_np, dtype=torch.float32, device=device)
+
+    tau = _make_tau(B, T, H, chunk_size, rng)
+    ref = _make_inputs(
+        rwkv7_sane_inputs, device, "bfloat16", chunk_size=chunk_size, tau=tau
+    )
+    tgt = _make_inputs(
+        rwkv7_sane_inputs, device, "bfloat16", chunk_size=chunk_size, tau=tau
+    )
+
+    y_ref, s_ref = _call_op(
+        rwkv7_sane_native_op,
+        ref,
+        output_final_state=True,
+        mask=mask,
+        chunk_size=chunk_size,
+    )
+    y_tgt, s_tgt = _call_op(
+        rwkv7_sane_triton_op,
+        tgt,
+        output_final_state=True,
+        mask=mask,
+        chunk_size=chunk_size,
+    )
+
+    _test_is_close("y_mask_chunk_size_8", y_ref, y_tgt, atol=1e-4, rtol=1e-2)
+    _test_is_close("final_state_mask_chunk_size_8", s_ref, s_tgt, atol=1e-5, rtol=1e-3)
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_rwkv7_sane_triton_backward_masked_chunk_size(
+    rwkv7_sane_triton_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
+):
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
+    chunk_size = 8
+    n_chunks = T // chunk_size
+    mask_np = np.ones((B, n_chunks), dtype=np.float32)
+    freeze = rng.random((B, n_chunks)) < 0.3
+    mask_np[freeze] = 0.0
+    mask_np[:, -1] = 0.0
+    mask = torch.tensor(mask_np, dtype=torch.float32, device=device)
+
+    tau = _make_tau(B, T, H, chunk_size, rng)
+
+    def grads(op, tensors, mask):
+        t = {
+            k: v.clone().detach().requires_grad_(True)
+            for k, v in tensors.items()
+            if k != "mask"
+        }
+        t["mask"] = tensors["mask"]
+        y, s = _call_op(
+            op, t, output_final_state=True, mask=mask, chunk_size=chunk_size
+        )
+        loss = (y.float() ** 2).mean() + (s.float() ** 2).mean()
+        loss.backward()
+        return {k: t[k].grad for k in ["r", "k", "v", "a", "b", "w", "tau", "h0"]}
+
+    ref = _make_inputs(
+        rwkv7_sane_inputs, device, "bfloat16", grad=True, chunk_size=chunk_size, tau=tau
+    )
+    tgt = _make_inputs(
+        rwkv7_sane_inputs, device, "bfloat16", grad=True, chunk_size=chunk_size, tau=tau
+    )
+
+    g_ref = grads(rwkv7_sane_native_op, ref, mask)
+    g_tgt = grads(rwkv7_sane_triton_op, tgt, mask)
+
+    thresholds = {
+        "r": (1e-4, 1e-2),
+        "k": (7e-3, 1e-2),
+        "v": (7e-3, 1e-2),
+        "a": (7e-3, 1e-2),
+        "b": (1e-2, 1e-2),
+        "w": (7e-3, 1e-2),
+        "tau": (7e-3, 1e-2),
+        "h0": (1e-5, 1e-3),
+    }
+    for name in thresholds:
+        atol, rtol = thresholds[name]
+        _test_is_close(
+            f"grad_{name}_mask_chunk_size_8", g_ref[name], g_tgt[name], atol, rtol
+        )
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_rwkv7_sane_triton_no_mask_forward_chunk_size(
+    rwkv7_sane_triton_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
+):
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
+    chunk_size = 8
+    tau = _make_tau(B, T, H, chunk_size, rng)
+    ref = _make_inputs(
+        rwkv7_sane_inputs, device, "bfloat16", chunk_size=chunk_size, tau=tau
+    )
+    tgt = _make_inputs(
+        rwkv7_sane_inputs, device, "bfloat16", chunk_size=chunk_size, tau=tau
+    )
+
+    with torch.no_grad():
+        y_ref = _call_op(
+            rwkv7_sane_native_op, ref, output_final_state=False, chunk_size=chunk_size
+        )
+        y_tgt = _call_op(
+            rwkv7_sane_triton_op, tgt, output_final_state=False, chunk_size=chunk_size
+        )
+
+    _test_is_close("y_no_mask_chunk_size_8", y_ref, y_tgt, atol=1e-4, rtol=1e-2)
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_rwkv7_sane_triton_no_mask_backward_chunk_size(
+    rwkv7_sane_triton_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
+):
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
+    chunk_size = 8
+    tau = _make_tau(B, T, H, chunk_size, rng)
+
+    def grads(op, tensors):
+        t = {
+            k: v.clone().detach().requires_grad_(True)
+            for k, v in tensors.items()
+            if k != "mask"
+        }
+        t["mask"] = tensors["mask"]
+        y = _call_op(op, t, output_final_state=False, chunk_size=chunk_size)
+        loss = (y.float() ** 2).mean()
+        loss.backward()
+        return {k: t[k].grad for k in ["r", "k", "v", "a", "b", "w", "tau", "h0"]}
+
+    ref = _make_inputs(
+        rwkv7_sane_inputs, device, "bfloat16", grad=True, chunk_size=chunk_size, tau=tau
+    )
+    tgt = _make_inputs(
+        rwkv7_sane_inputs, device, "bfloat16", grad=True, chunk_size=chunk_size, tau=tau
+    )
+
+    g_ref = grads(rwkv7_sane_native_op, ref)
+    g_tgt = grads(rwkv7_sane_triton_op, tgt)
+
+    thresholds = {
+        "r": (1e-4, 1e-2),
+        "k": (7e-3, 1e-2),
+        "v": (7e-3, 1e-2),
+        "a": (7e-3, 1e-2),
+        "b": (7e-3, 1e-2),
+        "w": (7e-3, 1e-2),
+        "tau": (7e-3, 1e-2),
+        "h0": (1e-5, 1e-3),
+    }
+    for name in thresholds:
+        atol, rtol = thresholds[name]
+        _test_is_close(
+            f"grad_no_mask_{name}_chunk_size_8", g_ref[name], g_tgt[name], atol, rtol
+        )

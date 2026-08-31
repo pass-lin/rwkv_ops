@@ -364,3 +364,274 @@ def test_rwkv7_sane_triton_head_sharding(rwkv7_sane_jax_triton_op, rwkv7_sane_in
     _test_is_close("final_state_head_tp", s_ref, s_s, atol=1e-5, rtol=1e-3)
 
     assert y_s.sharding.mesh.axis_names == ("h",)
+
+
+def _make_tau_mask(B, T, H, chunk_size, rng):
+    """按 fixture 分布生成指定 chunk_size 的 tau 与随机 mask。
+
+    Args:
+        B: int, batch size。
+        T: int, 序列长度。
+        H: int, head 数。
+        chunk_size: int, chunk 长度。
+        rng: np.random.Generator，随机数生成器。
+
+    Returns:
+        tuple: (tau, mask)。tau 为 [B, T//chunk_size, H] float32 numpy 数组；
+            mask 为 [B, T//chunk_size] float32 随机 0/1 数组。
+    """
+    x = rng.standard_normal((B, T // chunk_size, H), dtype=np.float32) * 0.5 + 7.0
+    tau = np.log1p(np.exp(x)) + 1.0
+    mask = rng.integers(0, 2, (B, T // chunk_size)).astype(np.float32)
+    return tau.astype(np.float32), mask
+
+
+def _get_sane_triton_op(K, chunk_size):
+    """创建指定 chunk_size 的 RWKV-7-SANE JAX Triton 训练算子。
+
+    Args:
+        K: int, head size。
+        chunk_size: int, chunk 长度。
+
+    Returns:
+        Callable: chunkwise 训练算子。
+    """
+    from rwkv_ops import get_generalized_delta_rule_sane
+
+    op, _ = get_generalized_delta_rule_sane(
+        HEAD_SIZE=K, KERNEL_TYPE="triton", chunk_size=chunk_size
+    )
+    return op
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+@pytest.mark.parametrize("head_first", [False, True])
+def test_rwkv7_sane_triton_forward_state_chunk_size_8(
+    rwkv7_sane_native_op, rwkv7_sane_inputs, rwkv7_shape, rng, head_first
+):
+    """对比 Triton chunk_size=8 与 native 前向输出和最终 state（带 mask）。"""
+    B, T, H, K = rwkv7_shape
+    chunk_size = 8
+    op = _get_sane_triton_op(K, chunk_size)
+
+    r_ref, k_ref, v_ref, a_ref, b_ref, w_ref, _, _, h0_ref = _prepare_inputs(
+        rwkv7_sane_inputs, head_first, "bfloat16"
+    )
+    r_c, k_c, v_c, a_c, b_c, w_c, _, _, h0_c = _prepare_inputs(
+        rwkv7_sane_inputs, head_first, "bfloat16"
+    )
+
+    tau, mask = _make_tau_mask(B, T, H, chunk_size, rng)
+    tau_ref = _to_jax(tau, "float32")
+    tau_c = _to_jax(tau, "float32")
+    mask_ref = _to_jax(mask, "float32")
+    mask_c = _to_jax(mask, "float32")
+
+    y_ref, s_ref = rwkv7_sane_native_op(
+        r=r_ref,
+        w=w_ref,
+        k=k_ref,
+        v=v_ref,
+        a=a_ref,
+        b=b_ref,
+        tau=tau_ref,
+        mask=mask_ref,
+        initial_state=h0_ref,
+        output_final_state=True,
+        head_first=head_first,
+        chunk_size=chunk_size,
+    )
+    y_c, s_c = op(
+        r=r_c,
+        w=w_c,
+        k=k_c,
+        v=v_c,
+        a=a_c,
+        b=b_c,
+        tau=tau_c,
+        mask=mask_c,
+        initial_state=h0_c,
+        output_final_state=True,
+        head_first=head_first,
+        chunk_size=chunk_size,
+    )
+
+    _test_is_close(
+        f"y_chunk_size_8_head_first={head_first}", y_ref, y_c, atol=1e-4, rtol=1e-2
+    )
+    _test_is_close(
+        f"final_state_chunk_size_8_head_first={head_first}",
+        s_ref,
+        s_c,
+        atol=1e-5,
+        rtol=1e-3,
+    )
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+@pytest.mark.parametrize("head_first", [False, True])
+def test_rwkv7_sane_triton_backward_chunk_size_8(
+    rwkv7_sane_native_op, rwkv7_sane_inputs, rwkv7_shape, rng, head_first
+):
+    """对比 Triton chunk_size=8 与 native 反向梯度（含 tau/mask）。"""
+    B, T, H, K = rwkv7_shape
+    chunk_size = 8
+    op = _get_sane_triton_op(K, chunk_size)
+
+    r, k, v, a, b, w, _, _, h0 = _prepare_inputs(
+        rwkv7_sane_inputs, head_first, "bfloat16"
+    )
+
+    tau, mask = _make_tau_mask(B, T, H, chunk_size, rng)
+    tau = _to_jax(tau, "float32")
+    mask = _to_jax(mask, "float32")
+
+    def loss(op, params):
+        w, r, k, v, a, b, tau, mask, h0 = params
+        y, state = op(
+            r=r,
+            w=w,
+            k=k,
+            v=v,
+            a=a,
+            b=b,
+            tau=tau,
+            mask=mask,
+            initial_state=h0,
+            output_final_state=True,
+            head_first=head_first,
+            chunk_size=chunk_size,
+        )
+        return jnp.mean(jnp.asarray(y, jnp.float32) ** 2) + jnp.mean(
+            jnp.asarray(state, jnp.float32) ** 2
+        )
+
+    ref_grads = jax.grad(lambda *p: loss(rwkv7_sane_native_op, p), argnums=range(9))(
+        w, r, k, v, a, b, tau, mask, h0
+    )
+    triton_grads = jax.grad(lambda *p: loss(op, p), argnums=range(9))(
+        w, r, k, v, a, b, tau, mask, h0
+    )
+
+    names = ["w", "r", "k", "v", "a", "b", "tau", "mask", "h0"]
+    for name, g_ref, g_c in zip(names, ref_grads, triton_grads):
+        assert_allclose_with_stats(
+            g_ref,
+            g_c,
+            f"grad_chunk_size_8_{name}_head_first={head_first}",
+            atol=7e-3,
+            rtol=1e-3,
+        )
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+@pytest.mark.parametrize("head_first", [False, True])
+def test_rwkv7_sane_triton_no_mask_forward_state_chunk_size_8(
+    rwkv7_sane_native_op, rwkv7_sane_inputs, rwkv7_shape, rng, head_first
+):
+    """无 mask 路径 chunk_size=8 前向输出与 native 对比。"""
+    B, T, H, K = rwkv7_shape
+    chunk_size = 8
+    op = _get_sane_triton_op(K, chunk_size)
+
+    r_ref, k_ref, v_ref, a_ref, b_ref, w_ref, _, _, h0_ref = _prepare_inputs(
+        rwkv7_sane_inputs, head_first, "bfloat16"
+    )
+    r_c, k_c, v_c, a_c, b_c, w_c, _, _, h0_c = _prepare_inputs(
+        rwkv7_sane_inputs, head_first, "bfloat16"
+    )
+
+    tau, _ = _make_tau_mask(B, T, H, chunk_size, rng)
+    tau_ref = _to_jax(tau, "float32")
+    tau_c = _to_jax(tau, "float32")
+
+    y_ref = rwkv7_sane_native_op(
+        r=r_ref,
+        w=w_ref,
+        k=k_ref,
+        v=v_ref,
+        a=a_ref,
+        b=b_ref,
+        tau=tau_ref,
+        initial_state=h0_ref,
+        output_final_state=False,
+        head_first=head_first,
+        chunk_size=chunk_size,
+    )
+    y_c = op(
+        r=r_c,
+        w=w_c,
+        k=k_c,
+        v=v_c,
+        a=a_c,
+        b=b_c,
+        tau=tau_c,
+        initial_state=h0_c,
+        output_final_state=False,
+        head_first=head_first,
+        chunk_size=chunk_size,
+    )
+
+    _test_is_close(
+        f"y_no_mask_chunk_size_8_head_first={head_first}",
+        y_ref,
+        y_c,
+        atol=1e-4,
+        rtol=1e-2,
+    )
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+@pytest.mark.parametrize("head_first", [False, True])
+def test_rwkv7_sane_triton_no_mask_backward_chunk_size_8(
+    rwkv7_sane_native_op, rwkv7_sane_inputs, rwkv7_shape, rng, head_first
+):
+    """无 mask 路径 chunk_size=8 反向梯度与 native 对比。"""
+    B, T, H, K = rwkv7_shape
+    chunk_size = 8
+    op = _get_sane_triton_op(K, chunk_size)
+
+    r, k, v, a, b, w, _, _, h0 = _prepare_inputs(
+        rwkv7_sane_inputs, head_first, "bfloat16"
+    )
+
+    tau, _ = _make_tau_mask(B, T, H, chunk_size, rng)
+    tau = _to_jax(tau, "float32")
+
+    def loss(op, params):
+        w, r, k, v, a, b, tau, h0 = params
+        y = op(
+            r=r,
+            w=w,
+            k=k,
+            v=v,
+            a=a,
+            b=b,
+            tau=tau,
+            initial_state=h0,
+            output_final_state=False,
+            head_first=head_first,
+            chunk_size=chunk_size,
+        )
+        return jnp.mean(jnp.asarray(y, jnp.float32) ** 2)
+
+    ref_grads = jax.grad(lambda *p: loss(rwkv7_sane_native_op, p), argnums=range(8))(
+        w, r, k, v, a, b, tau, h0
+    )
+    triton_grads = jax.grad(lambda *p: loss(op, p), argnums=range(8))(
+        w, r, k, v, a, b, tau, h0
+    )
+
+    names = ["w", "r", "k", "v", "a", "b", "tau", "h0"]
+    for name, g_ref, g_c in zip(names, ref_grads, triton_grads):
+        assert_allclose_with_stats(
+            g_ref,
+            g_c,
+            f"grad_no_mask_chunk_size_8_{name}_head_first={head_first}",
+            atol=7e-3,
+            rtol=1e-3,
+        )
