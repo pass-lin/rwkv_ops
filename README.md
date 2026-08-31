@@ -54,6 +54,10 @@
   - [函数接口说明](#函数接口说明-3)
     - [`gated_delta_net_chunk`](#gated_delta_net_chunk)
   - [gdn_chunk 实现状态](#gdn_chunk-实现状态)
+- [gdn_chunk_sane 使用方法](#gdn_chunk_sane-使用方法)
+  - [函数接口说明](#函数接口说明-4)
+    - [`gated_delta_net_chunk_sane`](#gated_delta_net_chunk_sane)
+  - [gdn_chunk_sane 实现状态](#gdn_chunk_sane-实现状态)
 - [rwkv6op 使用方法](#rwkv6op-使用方法)
 - [分布式并行（JAX）](#分布式并行)
   - [PyTorch 使用注意事项](#pytorch-使用注意事项)
@@ -686,6 +690,62 @@ out, final_state = gated_delta_net_chunk(
 
 > 训练入口支持反向传播。JAX 侧 `triton` 需显式 `KERNEL_TYPE="triton"` 并安装 `jax-triton`。
 
+---
+
+<a id="gdn_chunk_sane-使用方法"></a>
+## gdn_chunk_sane 使用方法
+
+`gdn_chunk_sane` 在 `gdn_chunk` 基础上加入 **State Anomaly Neutralization（SANE）**：在每个 chunk 边界对跨 chunk 传递的 state 执行 `state = tau * tanh(state / tau)`，并按 `mask` 选择是否生效。其余行为与 `gdn_chunk` 一致。
+
+```python
+from rwkv_ops import gated_delta_net_chunk_sane
+
+out, final_state = gated_delta_net_chunk_sane(
+    q, k, v, g, beta, tau,
+    mask=mask,                 # [B, T//chunk_size]，可选
+    initial_state=h0,
+    output_final_state=True,
+    chunk_size=16,
+)
+```
+
+<a id="函数接口说明-4"></a>
+### 函数接口说明
+
+<a id="gated_delta_net_chunk_sane"></a>
+#### `gated_delta_net_chunk_sane`
+
+| 参数 | 形状 | 说明 |
+|---|---|---|
+| q, k | (B, T, H, K) | 查询与键，内部先做 L2 归一化 |
+| v | (B, T, H, V) | 值 |
+| g | (B, T, H) | log-space 衰减门控 |
+| beta | (B, T, H) | 写入强度，需已在外部过 sigmoid，落在 (0, 1) |
+| tau | (B, T//chunk_size, H) | SANE 阈值，必须 > 1 |
+| mask | (B, T//chunk_size)，可选 | >0 的 chunk 边界执行 SANE；为 None 时无条件 SANE |
+| initial_state | (B, H, K, V) 或 (1, H, K, V)，可选 | 初始 recurrent state |
+| output_final_state | bool | 是否返回最终 state；mask=None 时强制为 None 并发出警告 |
+| chunk_size | int | chunk 长度，必须整除 T |
+
+| 返回值 | 形状 | 说明 |
+|---|---|---|
+| out | (B, T, H, V) | 与 `v` 同 dtype |
+| final_state | (B, H, K, V) 或 None | 最终 state；mask=None 时为 None |
+
+<a id="gdn_chunk_sane-实现状态"></a>
+### gdn_chunk_sane 实现状态
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ❌   | ✅     | ✅     |
+| JAX         | ❌   | ✅     | ✅     |
+| TensorFlow  | ❌   | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
+
+> 训练入口支持反向传播（含 `tau` 梯度）。JAX 侧 `triton` 需显式 `KERNEL_TYPE="triton"` 并安装 `jax-triton`。
+> `mask=None` 时输出仍使用无条件 SANE，但 `output_final_state=True` 会发出 `UserWarning` 并将 `final_state` 置为 `None`。
+
 <a id="分布式并行"></a>
 ## 分布式并行（JAX）
 
@@ -701,6 +761,7 @@ JAX 侧所有加速算子都通过 `custom_partitioning` + einsum 风格 `shardi
 | gdn_recurrent triton / pallas | ✅ | ✅ |
 | gdn_recurrent_sane triton / pallas | ✅ | ✅ |
 | gdn_chunk triton | ✅ | ✅ |
+| gdn_chunk_sane triton | ✅ | ✅ |
 | rwkv6 cuda | ✅ | ❌ |
 
 > rwkv6 的 channel 维（C = H × N）在分片规则中是一个整体，head 维未暴露，
@@ -827,6 +888,7 @@ from rwkv_ops import (
     get_generalized_delta_rule,           # RWKV-7
     get_generalized_delta_rule_sane,      # RWKV-7-SANE
     get_gated_delta_net_chunk,            # GDN chunkwise
+    get_gated_delta_net_chunk_sane,       # GDN chunkwise SANE
     get_gated_delta_net_recurrent,        # GDN recurrent（无 SANE）
     get_gated_delta_net_recurrent_sane,   # GDN recurrent SANE
 )
@@ -844,6 +906,11 @@ rwkv7_op_sane, rwkv7_op_sane_inference = get_generalized_delta_rule_sane(
 # Gated DeltaNet chunkwise（triton/native 可在调用时传 chunk_size）
 gdn_chunk = get_gated_delta_net_chunk(KERNEL_TYPE="triton", chunk_size=32)
 
+# Gated DeltaNet chunkwise SANE（triton/native 可在调用时传 chunk_size）
+gdn_chunk_sane = get_gated_delta_net_chunk_sane(
+    KERNEL_TYPE="triton", chunk_size=32
+)
+
 # Gated DeltaNet recurrent（无 SANE；chunk_size 仅签名一致，可忽略）
 gdn_recurrent = get_gated_delta_net_recurrent(KERNEL_TYPE="triton", chunk_size=32)
 
@@ -854,7 +921,7 @@ gdn_recurrent_sane = get_gated_delta_net_recurrent_sane(
 ```
 
 **注意：**
-- **CUDA 后端**：`chunk_size` 会作为 `-D_CHUNK_LEN_` 宏编译进 kernel，因此必须通过工厂函数指定；返回的算子仍带 `chunk_size` 参数，但传入与编译值不同的 `chunk_size` 会报错。不同 `chunk_size` 会各自编译一次，互不影响。涉及算子：`generalized_delta_rule`、`generalized_delta_rule_sane`、`gated_delta_net_chunk`、`gated_delta_net_recurrent_sane`。
+- **CUDA 后端**：`chunk_size` 会作为 `-D_CHUNK_LEN_` 宏编译进 kernel，因此必须通过工厂函数指定；返回的算子仍带 `chunk_size` 参数，但传入与编译值不同的 `chunk_size` 会报错。不同 `chunk_size` 会各自编译一次，互不影响。涉及算子：`generalized_delta_rule`、`generalized_delta_rule_sane`、`gated_delta_net_chunk`、`gated_delta_net_chunk_sane`、`gated_delta_net_recurrent_sane`。
 - **Triton / Pallas / native 后端**：`chunk_size` 可在每次调用时传入，工厂函数仅设定默认值；修改 `chunk_size` 不会触发重新编译。
 - `chunk_size` 默认 16；`gated_delta_net_recurrent`（无 SANE）接受但忽略该参数，仅保持签名一致。
 - 工厂函数返回的算子签名与默认算子一致，可直接调用。

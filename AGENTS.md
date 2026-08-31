@@ -49,8 +49,10 @@ MANIFEST.in                  # 源码分发清单
 | `rwkv6_op` / `RWKV6_OP` | RWKV-6 函数式算子（`RWKV6_OP` 为兼容别名） |
 | `gated_delta_net_recurrent` / `gated_delta_net_recurrent_inference` / `gated_delta_net_recurrent_single_step` | Gated DeltaNet recurrent 算子 |
 | `gated_delta_net_recurrent_sane` / `gated_delta_net_recurrent_sane_inference` / `gated_delta_net_recurrent_sane_single_step` | Gated DeltaNet recurrent SANE 算子 |
+| `gated_delta_net_chunk` | Gated DeltaNet chunkwise 算子 |
+| `gated_delta_net_chunk_sane` | Gated DeltaNet chunkwise SANE 算子 |
 | `mhc_pre_op` / `mhc_post_op` | mHC 预处理/后处理算子 |
-| `get_generalized_delta_rule` 等 9 个工厂函数 | 按 head_size / KERNEL_TYPE / chunk_size 获取算子 |
+| `get_generalized_delta_rule` 等 10 个工厂函数 | 按 head_size / KERNEL_TYPE / chunk_size 获取算子 |
 
 ---
 
@@ -85,7 +87,7 @@ MANIFEST.in                  # 源码分发清单
   - 设 `RWKV_OPS_KERAS_NATIVE=1` 可强制 jax/torch 的 native 都用纯 keras ops
     （无 kernel 的调试/数值对照）。
 - `cuda`：手写 CUDA kernel（Torch C++ 扩展 / JAX FFI）。
-- `triton`：Triton 实现（rwkv7 / rwkv7_sane / mhc）。
+- `triton`：Triton 实现（rwkv7 / rwkv7_sane / gdn_chunk / gdn_chunk_sane / gdn_recurrent / gdn_recurrent_sane / mhc）。
 
 **缺硬件静默回退**：各工厂在硬件/库不可用时不报错，直接回退 native
 （例如 torch 无 CUDA、jax 不在 GPU/TPU 上时回到纯 keras ops）。
@@ -94,7 +96,7 @@ MANIFEST.in                  # 源码分发清单
 
 `chunk_size` 不是环境变量，而是算子/工厂函数的参数，默认 16。不同后端对其处理不同：
 
-- **CUDA 后端**：`chunk_size` 是编译期常量（`-D_CHUNK_LEN_`），必须通过工厂函数指定；返回的算子仍带 `chunk_size` 参数，但传入与编译值不同的 `chunk_size` 会报错。不同 `chunk_size` 会各自编译一次，互不影响。涉及算子：`generalized_delta_rule`、`generalized_delta_rule_sane`、`gated_delta_net_chunk`、`gated_delta_net_recurrent_sane`。
+- **CUDA 后端**：`chunk_size` 是编译期常量（`-D_CHUNK_LEN_`），必须通过工厂函数指定；返回的算子仍带 `chunk_size` 参数，但传入与编译值不同的 `chunk_size` 会报错。不同 `chunk_size` 会各自编译一次，互不影响。涉及算子：`generalized_delta_rule`、`generalized_delta_rule_sane`、`gated_delta_net_chunk`、`gated_delta_net_chunk_sane`、`gated_delta_net_recurrent_sane`。
 - **Triton / Pallas / native 后端**：`chunk_size` 在每次调用时作为 `tl.constexpr` 或直接参数传入，无需工厂指定，可在调用时修改。
 
 `gated_delta_net_recurrent`（无 SANE）接受 `chunk_size` 但忽略，仅保持签名一致。
@@ -169,6 +171,21 @@ MANIFEST.in                  # 源码分发清单
 > PyTorch / JAX 后端的 `triton` 已实现 chunkwise 训练 kernel（前向 + 反向）。
 > JAX 侧需显式 `KERNEL_TYPE="triton"` 且安装 `jax-triton`。
 
+#### Gated DeltaNet chunkwise SANE `gated_delta_net_chunk_sane`
+
+| Framework | cuda | triton | native |
+|-----------|------|--------|--------|
+| PyTorch   | ❌   | ✅     | ✅     |
+| JAX       | ❌   | ✅     | ✅     |
+| TensorFlow| ❌   | ❌     | ✅     |
+| NumPy     | ❌   | ❌     | ✅     |
+| OpenVINO  | ❌   | ❌     | ✅     |
+
+> PyTorch / JAX 后端的 `triton` 已实现 chunkwise SANE 训练 kernel（前向 + 反向，
+> 含 `tau` 梯度）。JAX 侧需显式 `KERNEL_TYPE="triton"` 且安装 `jax-triton`。
+> `mask=None` 时仍执行无条件 SANE，但 `output_final_state=True` 会发出 `UserWarning`
+> 并将 `final_state` 置为 `None`。
+
 #### Gated DeltaNet recurrent `gated_delta_net_recurrent` / `gated_delta_net_recurrent_inference` / `gated_delta_net_recurrent_single_step`
 
 | Framework | cuda | triton | native |
@@ -216,6 +233,7 @@ jax 侧所有加速算子都用 `custom_partitioning` + einsum 风格 `sharding_
 | rwkv7 / rwkv7_sane 单步 cuda | ✅ | ✅ |
 | gdn_recurrent triton / pallas | ✅ | ✅ |
 | gdn_recurrent_sane triton / pallas | ✅ | ✅ |
+| gdn_chunk_sane triton | ✅ | ✅ |
 | rwkv6 cuda | ✅ | ❌（channel 融合为 `c`，head 维未暴露） |
 
 - 规则字母：`b`=batch、`n`/`h`=head、`t`=time、`k`/`m`/`n`=head_size、
@@ -1467,6 +1485,9 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
 | `rwkv_ops/rwkv7_sane_kernel/` | SANE 版，结构与 rwkv7_kernel 完全平行 |
 | `rwkv_ops/mhc_kernel/jax_triton_op/` | mHC JAX-Triton 桥接 |
 | `rwkv_ops/gdn_chunk/native_keras_op.py` | GDN chunkwise 原生参考实现 |
+| `rwkv_ops/gdn_chunk_sane/native_keras_op.py` | GDN chunkwise SANE 原生参考实现 |
+| `rwkv_ops/gdn_chunk_sane/triton/chunk_h.py` | GDN chunkwise SANE 状态前向 Triton kernel |
+| `rwkv_ops/gdn_chunk_sane/triton/chunk_bwd_dhu.py` | GDN chunkwise SANE 状态反向 Triton kernel |
 | `rwkv_ops/gdn_recurrent/native_keras_op.py` | GDN recurrent 原生参考实现 |
 | `rwkv_ops/gdn_recurrent/triton_kernel.py` | GDN recurrent 共享 Triton 内核 |
 | `rwkv_ops/gdn_recurrent/torch_triton_kernel.py` | GDN recurrent PyTorch Triton 桥接 |

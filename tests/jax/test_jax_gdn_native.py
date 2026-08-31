@@ -32,10 +32,18 @@ _gdn_chunk_mod = _load_native_module(
 _gdn_recurrent_mod = _load_native_module(
     "gdn_recurrent_native", "rwkv_ops/gdn_recurrent/native_keras_op.py"
 )
+_gdn_chunk_sane_mod = _load_native_module(
+    "gdn_chunk_sane_native", "rwkv_ops/gdn_chunk_sane/native_keras_op.py"
+)
+_gdn_recurrent_sane_mod = _load_native_module(
+    "gdn_recurrent_sane_native", "rwkv_ops/gdn_recurrent_sane/native_keras_op.py"
+)
 
 gated_delta_net_chunk = _gdn_chunk_mod.gated_delta_net_chunk
 gated_delta_net_recurrent = _gdn_recurrent_mod.gated_delta_net_recurrent
 gated_delta_net_reference = _gdn_recurrent_mod.gated_delta_net_reference
+gated_delta_net_chunk_sane = _gdn_chunk_sane_mod.gated_delta_net_chunk_sane
+gated_delta_net_recurrent_sane = _gdn_recurrent_sane_mod.gated_delta_net_recurrent_sane
 
 
 @pytest.mark.jax
@@ -164,4 +172,89 @@ def test_gdn_arbitrary_length(gdn_inputs):
     )
     assert_allclose_with_stats(
         state_ref, state_rec, "arbitrary length state", atol=1e-5, rtol=1e-3
+    )
+
+
+@pytest.mark.jax
+def test_gdn_chunk_sane_matches_recurrent_sane(gdn_sane_inputs):
+    """chunkwise SANE 与 recurrent SANE 两种 native 实现应等价。"""
+    q, k, v = gdn_sane_inputs["q"], gdn_sane_inputs["k"], gdn_sane_inputs["v"]
+    g, beta, h0 = gdn_sane_inputs["g"], gdn_sane_inputs["beta"], gdn_sane_inputs["h0"]
+    tau, mask = gdn_sane_inputs["tau"], gdn_sane_inputs["mask"]
+
+    out_chunk, state_chunk = gated_delta_net_chunk_sane(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau,
+        mask=mask,
+        initial_state=h0,
+        output_final_state=True,
+        chunk_size=64,
+    )
+    out_rec, state_rec = gated_delta_net_recurrent_sane(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau,
+        mask=mask,
+        initial_state=h0,
+        output_final_state=True,
+        chunk_size=64,
+    )
+
+    assert_allclose_with_stats(
+        out_rec, out_chunk, "chunk sane vs recurrent sane output", atol=2e-4, rtol=1e-3
+    )
+    assert_allclose_with_stats(
+        state_rec,
+        state_chunk,
+        "chunk sane vs recurrent sane state",
+        atol=2e-4,
+        rtol=1e-3,
+    )
+
+
+@pytest.mark.jax
+def test_gdn_chunk_sane_matches_recurrent_sane_no_mask(gdn_sane_inputs):
+    """无 mask 时 chunkwise SANE 与 recurrent SANE 仍等价。"""
+    q, k, v = gdn_sane_inputs["q"], gdn_sane_inputs["k"], gdn_sane_inputs["v"]
+    g, beta, h0 = gdn_sane_inputs["g"], gdn_sane_inputs["beta"], gdn_sane_inputs["h0"]
+    tau = gdn_sane_inputs["tau"]
+
+    out_chunk, _ = gated_delta_net_chunk_sane(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau,
+        mask=None,
+        initial_state=h0,
+        output_final_state=True,
+        chunk_size=64,
+    )
+    out_rec, _ = gated_delta_net_recurrent_sane(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau,
+        mask=None,
+        initial_state=h0,
+        output_final_state=True,
+        chunk_size=64,
+    )
+
+    assert_allclose_with_stats(
+        out_rec,
+        out_chunk,
+        "chunk sane vs recurrent sane no-mask output",
+        atol=2e-4,
+        rtol=1e-3,
     )

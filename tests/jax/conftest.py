@@ -343,3 +343,28 @@ def gdn_chunk_jax_triton_op():
     from rwkv_ops.gdn_chunk.jax_triton_kernel import gated_delta_net_chunk
 
     return gated_delta_net_chunk
+
+
+@pytest.fixture(scope="session")
+def gdn_chunk_sane_jax_native_op():
+    """Gated DeltaNet chunkwise SANE native Keras 参考算子。
+
+    Returns:
+        Callable: `gdn_chunk_sane.native_keras_op.gated_delta_net_chunk_sane`。
+    """
+    from rwkv_ops.gdn_chunk_sane.native_keras_op import gated_delta_net_chunk_sane
+
+    return gated_delta_net_chunk_sane
+
+
+@pytest.fixture(scope="session")
+def gdn_chunk_sane_jax_triton_op():
+    """Gated DeltaNet chunkwise SANE JAX-Triton 训练算子。
+
+    Returns:
+        Callable: `gdn_chunk_sane.jax_triton_kernel.gated_delta_net_chunk_sane`。
+    """
+    pytest.importorskip("triton")
+    from rwkv_ops.gdn_chunk_sane.jax_triton_kernel import gated_delta_net_chunk_sane
+
+    return gated_delta_net_chunk_sane

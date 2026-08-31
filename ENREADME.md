@@ -52,6 +52,10 @@
   - [API Reference](#api-reference-3)
     - [`gated_delta_net_chunk`](#gated_delta_net_chunk)
   - [Implementation Status of `gdn_chunk`](#implementation-status-of-gdn_chunk)
+- [Usage of `gdn_chunk_sane`](#usage-of-gdn_chunk_sane)
+  - [API Reference](#api-reference-4)
+    - [`gated_delta_net_chunk_sane`](#gated_delta_net_chunk_sane)
+  - [Implementation Status of `gdn_chunk_sane`](#implementation-status-of-gdn_chunk_sane)
 - [Usage of `rwkv6op`](#usage-of-rwkv6op)
 - [Factory functions and custom parameters](#factory-functions-and-custom-parameters)
 - [Distributed Parallelism (JAX)](#distributed-parallelism)
@@ -707,6 +711,62 @@ out, final_state = gated_delta_net_chunk(
 
 ---
 
+<a id="usage-of-gdn_chunk_sane"></a>
+## Usage of `gdn_chunk_sane`
+
+`gdn_chunk_sane` extends `gdn_chunk` with **State Anomaly Neutralization (SANE)**: at every chunk boundary the cross-chunk state is transformed by `state = tau * tanh(state / tau)`, gated by `mask`. Other behaviors match `gdn_chunk`.
+
+```python
+from rwkv_ops import gated_delta_net_chunk_sane
+
+out, final_state = gated_delta_net_chunk_sane(
+    q, k, v, g, beta, tau,
+    mask=mask,                 # [B, T//chunk_size], optional
+    initial_state=h0,
+    output_final_state=True,
+    chunk_size=16,
+)
+```
+
+<a id="api-reference-4"></a>
+### API Reference
+
+<a id="gated_delta_net_chunk_sane"></a>
+#### `gated_delta_net_chunk_sane`
+
+| Argument | Shape | Description |
+|---|---|---|
+| q, k | (B, T, H, K) | Query and key; L2-normalized inside the operator |
+| v | (B, T, H, V) | Value |
+| g | (B, T, H) | Log-space decay gate |
+| beta | (B, T, H) | Write strength; must have already passed through sigmoid, i.e. in (0, 1) |
+| tau | (B, T//chunk_size, H) | SANE threshold; must be > 1 |
+| mask | (B, T//chunk_size), optional | SANE is applied where > 0; unconditional SANE when None |
+| initial_state | (B, H, K, V) or (1, H, K, V), optional | Initial recurrent state |
+| output_final_state | bool | Whether to return the final state; when mask is None final_state is forced to None with a UserWarning |
+| chunk_size | int | Chunk length; must divide T |
+
+| Return | Shape | Description |
+|---|---|---|
+| out | (B, T, H, V) | Same dtype as `v` |
+| final_state | (B, H, K, V) or None | Final state; None when mask is None |
+
+<a id="implementation-status-of-gdn_chunk_sane"></a>
+### Implementation Status of `gdn_chunk_sane`
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ❌   | ✅     | ✅     |
+| JAX         | ❌   | ✅     | ✅     |
+| TensorFlow  | ❌   | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
+
+> The training entry point supports back-propagation (including gradients for `tau`). On the JAX side, `triton` requires explicit `KERNEL_TYPE="triton"` and the `jax-triton` package.
+> When `mask=None` the output still uses unconditional SANE, but `output_final_state=True` emits a `UserWarning` and sets `final_state` to `None`.
+
+---
+
 <a id="distributed-parallelism"></a>
 ## Distributed Parallelism (JAX)
 
@@ -723,6 +783,7 @@ over batch)** and **TP (tensor parallel over heads)**:
 | gdn_recurrent triton / pallas | ✅ | ✅ |
 | gdn_recurrent_sane triton / pallas | ✅ | ✅ |
 | gdn_chunk triton | ✅ | ✅ |
+| gdn_chunk_sane triton | ✅ | ✅ |
 | rwkv6 cuda | ✅ | ❌ |
 
 > rwkv6 fuses the channel dim (C = H × N) into a single rule dimension, so the
@@ -855,6 +916,7 @@ from rwkv_ops import (
     get_generalized_delta_rule,           # RWKV-7
     get_generalized_delta_rule_sane,      # RWKV-7-SANE
     get_gated_delta_net_chunk,            # GDN chunkwise
+    get_gated_delta_net_chunk_sane,       # GDN chunkwise SANE
     get_gated_delta_net_recurrent,        # GDN recurrent (non-SANE)
     get_gated_delta_net_recurrent_sane,   # GDN recurrent SANE
 )
@@ -872,6 +934,11 @@ rwkv7_op_sane, rwkv7_op_sane_inference = get_generalized_delta_rule_sane(
 # Gated DeltaNet chunkwise (chunk_size can be passed at call time for triton/native)
 gdn_chunk = get_gated_delta_net_chunk(KERNEL_TYPE="triton", chunk_size=32)
 
+# Gated DeltaNet chunkwise SANE (chunk_size can be passed at call time for triton/native)
+gdn_chunk_sane = get_gated_delta_net_chunk_sane(
+    KERNEL_TYPE="triton", chunk_size=32
+)
+
 # Gated DeltaNet recurrent (non-SANE; chunk_size is ignored, kept only for signature consistency)
 gdn_recurrent = get_gated_delta_net_recurrent(KERNEL_TYPE="triton", chunk_size=32)
 
@@ -882,7 +949,7 @@ gdn_recurrent_sane = get_gated_delta_net_recurrent_sane(
 ```
 
 **Notes:**
-- **CUDA backend**: `chunk_size` is baked into the kernel via the `-D_CHUNK_LEN_` macro, so it must be specified through the factory function. The returned operator still has a `chunk_size` argument, but passing a different value at call time will raise an error. Each distinct `chunk_size` triggers a separate compilation. Affected operators: `generalized_delta_rule`, `generalized_delta_rule_sane`, `gated_delta_net_chunk`, `gated_delta_net_recurrent_sane`.
+- **CUDA backend**: `chunk_size` is baked into the kernel via the `-D_CHUNK_LEN_` macro, so it must be specified through the factory function. The returned operator still has a `chunk_size` argument, but passing a different value at call time will raise an error. Each distinct `chunk_size` triggers a separate compilation. Affected operators: `generalized_delta_rule`, `generalized_delta_rule_sane`, `gated_delta_net_chunk`, `gated_delta_net_chunk_sane`, `gated_delta_net_recurrent_sane`.
 - **Triton / Pallas / native backends**: `chunk_size` can be passed at call time; the factory only sets the default. Changing `chunk_size` does not trigger recompilation.
 - `chunk_size` defaults to 16; `gated_delta_net_recurrent` (non-SANE) accepts but ignores this parameter, keeping it only for signature consistency.
 - Factory functions return operators with the same signature as the default operators and can be called directly.

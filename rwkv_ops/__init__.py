@@ -33,6 +33,7 @@ from .rwkv6_kernel import get_rwkv6_kernel  # noqa: E402
 from .mhc_kernel import get_mhc_kernel  # noqa: E402
 from .gdn_recurrent import get_gated_delta_net_recurrent  # noqa: E402
 from .gdn_chunk import get_gated_delta_net_chunk  # noqa: E402
+from .gdn_chunk_sane import get_gated_delta_net_chunk_sane  # noqa: E402
 from .gdn_recurrent_sane import (  # noqa: E402
     get_gated_delta_net_recurrent_sane,
     get_gated_delta_net_recurrent_sane_inference,
@@ -55,6 +56,8 @@ gated_delta_net_recurrent_sane_inference = get_gated_delta_net_recurrent_sane_in
 gated_delta_net_recurrent_sane_single_step = (
     get_gated_delta_net_recurrent_sane_single_step(KERNEL_TYPE=KERNEL_TYPE)
 )
+
+gated_delta_net_chunk_sane = get_gated_delta_net_chunk_sane(KERNEL_TYPE=KERNEL_TYPE)
 
 rwkv7_op = generalized_delta_rule
 rwkv7_op_inference = generalized_delta_rule_inference
