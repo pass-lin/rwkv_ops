@@ -1,6 +1,7 @@
 """JAX 版 RWKV7 Triton kernel 封装。"""
 
 from __future__ import annotations
+import functools
 import jax
 import jax.numpy as jnp
 import jax_triton as jt
@@ -169,7 +170,7 @@ def _wkv7_bwd_triton_call(r, w, k, v, a, b, dy, sa, state_chkp, dht, chunk_size:
     return dr, dw, dk, dv, da, db, dh0
 
 
-@custom_partitioning
+@functools.partial(custom_partitioning, static_argnums=(7,))
 def _wkv7_fwd_spmd(r, w, k, v, a, b, h0, chunk_size: int):
     return _wkv7_fwd_triton_call(r, w, k, v, a, b, h0, chunk_size)
 
@@ -181,7 +182,7 @@ _wkv7_fwd_spmd.def_partition(
 )
 
 
-@custom_partitioning
+@functools.partial(custom_partitioning, static_argnums=(10,))
 def _wkv7_bwd_spmd(r, w, k, v, a, b, dy, sa, state_chkp, dht, chunk_size: int):
     return _wkv7_bwd_triton_call(r, w, k, v, a, b, dy, sa, state_chkp, dht, chunk_size)
 
@@ -193,7 +194,7 @@ _wkv7_bwd_spmd.def_partition(
 )
 
 
-@jax.custom_vjp
+@functools.partial(jax.custom_vjp, nondiff_argnums=(7,))
 def rwkv7_kernel_triton(r, w, k, v, a, b, h0, chunk_size: int):
     out, sa_out, state_chkp = _wkv7_fwd_spmd(r, w, k, v, a, b, h0, chunk_size)
     final_state = state_chkp[:, :, -1, :, :]
@@ -203,11 +204,11 @@ def rwkv7_kernel_triton(r, w, k, v, a, b, h0, chunk_size: int):
 def _fwd(r, w, k, v, a, b, h0, chunk_size: int):
     out, sa_out, state_chkp = _wkv7_fwd_spmd(r, w, k, v, a, b, h0, chunk_size)
     final_state = state_chkp[:, :, -1, :, :]
-    return (out, final_state), (r, w, k, v, a, b, sa_out, state_chkp, chunk_size)
+    return (out, final_state), (r, w, k, v, a, b, sa_out, state_chkp)
 
 
-def _bwd(res, grads):
-    r, w, k, v, a, b, sa_out, state_chkp, chunk_size = res
+def _bwd(chunk_size, res, grads):
+    r, w, k, v, a, b, sa_out, state_chkp = res
     dy, dht = grads
     dy = jnp.asarray(dy, jnp.bfloat16)
     if dht is None:
@@ -261,7 +262,7 @@ def _wkv7_fwd_with_mask_triton_call(r, w, k, v, a, b, h0, mask, chunk_size: int)
     return out, sa_out, state_chkp
 
 
-@custom_partitioning
+@functools.partial(custom_partitioning, static_argnums=(8,))
 def _wkv7_fwd_with_mask_spmd(r, w, k, v, a, b, h0, mask, chunk_size: int):
     return _wkv7_fwd_with_mask_triton_call(r, w, k, v, a, b, h0, mask, chunk_size)
 
@@ -316,7 +317,7 @@ def _wkv7_bwd_with_mask_triton_call(
     return dr, dw, dk, dv, da, db, dh0
 
 
-@custom_partitioning
+@functools.partial(custom_partitioning, static_argnums=(11,))
 def _wkv7_bwd_with_mask_spmd(
     r, w, k, v, a, b, mask, dy, sa, state_chkp, dht, chunk_size: int
 ):
@@ -332,7 +333,7 @@ _wkv7_bwd_with_mask_spmd.def_partition(
 )
 
 
-@jax.custom_vjp
+@functools.partial(jax.custom_vjp, nondiff_argnums=(8,))
 def rwkv7_kernel_with_mask_triton(r, w, k, v, a, b, h0, mask, chunk_size: int):
     out, sa_out, state_chkp = _wkv7_fwd_with_mask_spmd(
         r, w, k, v, a, b, h0, mask, chunk_size
@@ -346,22 +347,11 @@ def _fwd_with_mask(r, w, k, v, a, b, h0, mask, chunk_size: int):
         r, w, k, v, a, b, h0, mask, chunk_size
     )
     final_state = state_chkp[:, :, -1, :, :]
-    return (out, final_state), (
-        r,
-        w,
-        k,
-        v,
-        a,
-        b,
-        mask,
-        sa_out,
-        state_chkp,
-        chunk_size,
-    )
+    return (out, final_state), (r, w, k, v, a, b, mask, sa_out, state_chkp)
 
 
-def _bwd_with_mask(res, grads):
-    r, w, k, v, a, b, mask, sa_out, state_chkp, chunk_size = res
+def _bwd_with_mask(chunk_size, res, grads):
+    r, w, k, v, a, b, mask, sa_out, state_chkp = res
     dy, dht = grads
     dy = jnp.asarray(dy, jnp.bfloat16)
     if dht is None:

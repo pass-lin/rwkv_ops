@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 from typing import Optional, Tuple, Union
 
 import jax
@@ -370,7 +371,7 @@ def _wkv7_fwd_pallas_call(r, w, k, v, a, b, h0, chunk_size: int):
     )
 
 
-def _wkv7_fwd_warmup(r, w, k, v, a, b, h0, chunk_size: int):
+def _wkv7_fwd_warmup(chunk_size: int, r, w, k, v, a, b, h0):
     B, N, T, H = r.shape
     ensure_config(
         f"wkv7_fwd_{chunk_size}",
@@ -381,7 +382,7 @@ def _wkv7_fwd_warmup(r, w, k, v, a, b, h0, chunk_size: int):
     )
 
 
-def _wkv7_bwd_warmup(r, w, k, v, a, b, sa, state_chkp, dy, dht, chunk_size: int):
+def _wkv7_bwd_warmup(chunk_size: int, r, w, k, v, a, b, sa, state_chkp, dy, dht):
     B, N, T, H = r.shape
     ensure_config(
         f"wkv7_bwd_{chunk_size}",
@@ -392,7 +393,7 @@ def _wkv7_bwd_warmup(r, w, k, v, a, b, sa, state_chkp, dy, dht, chunk_size: int)
     )
 
 
-def _wkv7_fwd_with_mask_warmup(r, w, k, v, a, b, h0, mask, chunk_size: int):
+def _wkv7_fwd_with_mask_warmup(chunk_size: int, r, w, k, v, a, b, h0, mask):
     B, N, T, H = r.shape
     ensure_config(
         f"wkv7_fwd_mask_{chunk_size}",
@@ -404,7 +405,7 @@ def _wkv7_fwd_with_mask_warmup(r, w, k, v, a, b, h0, mask, chunk_size: int):
 
 
 def _wkv7_bwd_with_mask_warmup(
-    r, w, k, v, a, b, mask, dy, sa, state_chkp, dht, chunk_size: int
+    chunk_size: int, r, w, k, v, a, b, mask, dy, sa, state_chkp, dht
 ):
     B, N, T, H = r.shape
     ensure_config(
@@ -416,7 +417,7 @@ def _wkv7_bwd_with_mask_warmup(
     )
 
 
-@custom_partitioning
+@functools.partial(custom_partitioning, static_argnums=(7,))
 def _wkv7_fwd_spmd(r, w, k, v, a, b, h0, chunk_size: int):
     return _wkv7_fwd_pallas_call(r, w, k, v, a, b, h0, chunk_size)
 
@@ -439,7 +440,7 @@ def _wkv7_bwd_pallas_call(r, w, k, v, a, b, sa, state_chkp, dy, dht, chunk_size:
     )
 
 
-@custom_partitioning
+@functools.partial(custom_partitioning, static_argnums=(10,))
 def _wkv7_bwd_spmd(r, w, k, v, a, b, dy, sa, state_chkp, dht, chunk_size: int):
     return _wkv7_bwd_pallas_call(r, w, k, v, a, b, sa, state_chkp, dy, dht, chunk_size)
 
@@ -451,23 +452,23 @@ _wkv7_bwd_spmd.def_partition(
 )
 
 
-@jax.custom_vjp
+@functools.partial(jax.custom_vjp, nondiff_argnums=(7,))
 def rwkv7_kernel_pallas(r, w, k, v, a, b, h0, chunk_size: int):
-    _wkv7_fwd_warmup(r, w, k, v, a, b, h0, chunk_size)
+    _wkv7_fwd_warmup(chunk_size, r, w, k, v, a, b, h0)
     out, sa_out, state_chkp = _wkv7_fwd_spmd(r, w, k, v, a, b, h0, chunk_size)
     final_state = state_chkp[:, :, -1, :, :]
     return out, final_state
 
 
 def _fwd(r, w, k, v, a, b, h0, chunk_size: int):
-    _wkv7_fwd_warmup(r, w, k, v, a, b, h0, chunk_size)
+    _wkv7_fwd_warmup(chunk_size, r, w, k, v, a, b, h0)
     out, sa_out, state_chkp = _wkv7_fwd_spmd(r, w, k, v, a, b, h0, chunk_size)
     final_state = state_chkp[:, :, -1, :, :]
-    return (out, final_state), (r, w, k, v, a, b, sa_out, state_chkp, chunk_size)
+    return (out, final_state), (r, w, k, v, a, b, sa_out, state_chkp)
 
 
-def _bwd(res, grads):
-    r, w, k, v, a, b, sa_out, state_chkp, chunk_size = res
+def _bwd(chunk_size: int, res, grads):
+    r, w, k, v, a, b, sa_out, state_chkp = res
     dy, dht = grads
     dy = jnp.asarray(dy, jnp.bfloat16)
     if dht is None:
@@ -476,7 +477,7 @@ def _bwd(res, grads):
     else:
         dht = jnp.asarray(dht, jnp.float32)
 
-    _wkv7_bwd_warmup(r, w, k, v, a, b, sa_out, state_chkp, dy, dht, chunk_size)
+    _wkv7_bwd_warmup(chunk_size, r, w, k, v, a, b, sa_out, state_chkp, dy, dht)
     dr, dw, dk, dv, da, db, dh0 = _wkv7_bwd_spmd(
         r, w, k, v, a, b, dy, sa_out, state_chkp, dht, chunk_size
     )
@@ -498,7 +499,7 @@ def _wkv7_fwd_with_mask_pallas_call(r, w, k, v, a, b, h0, mask, chunk_size: int)
     )
 
 
-@custom_partitioning
+@functools.partial(custom_partitioning, static_argnums=(8,))
 def _wkv7_fwd_with_mask_spmd(r, w, k, v, a, b, h0, mask, chunk_size: int):
     return _wkv7_fwd_with_mask_pallas_call(r, w, k, v, a, b, h0, mask, chunk_size)
 
@@ -523,7 +524,7 @@ def _wkv7_bwd_with_mask_pallas_call(
     )
 
 
-@custom_partitioning
+@functools.partial(custom_partitioning, static_argnums=(11,))
 def _wkv7_bwd_with_mask_spmd(
     r, w, k, v, a, b, mask, dy, sa, state_chkp, dht, chunk_size: int
 ):
@@ -539,9 +540,9 @@ _wkv7_bwd_with_mask_spmd.def_partition(
 )
 
 
-@jax.custom_vjp
+@functools.partial(jax.custom_vjp, nondiff_argnums=(8,))
 def rwkv7_kernel_with_mask_pallas(r, w, k, v, a, b, h0, mask, chunk_size: int):
-    _wkv7_fwd_with_mask_warmup(r, w, k, v, a, b, h0, mask, chunk_size)
+    _wkv7_fwd_with_mask_warmup(chunk_size, r, w, k, v, a, b, h0, mask)
     out, sa_out, state_chkp = _wkv7_fwd_with_mask_spmd(
         r, w, k, v, a, b, h0, mask, chunk_size
     )
@@ -550,27 +551,16 @@ def rwkv7_kernel_with_mask_pallas(r, w, k, v, a, b, h0, mask, chunk_size: int):
 
 
 def _fwd_with_mask(r, w, k, v, a, b, h0, mask, chunk_size: int):
-    _wkv7_fwd_with_mask_warmup(r, w, k, v, a, b, h0, mask, chunk_size)
+    _wkv7_fwd_with_mask_warmup(chunk_size, r, w, k, v, a, b, h0, mask)
     out, sa_out, state_chkp = _wkv7_fwd_with_mask_spmd(
         r, w, k, v, a, b, h0, mask, chunk_size
     )
     final_state = state_chkp[:, :, -1, :, :]
-    return (out, final_state), (
-        r,
-        w,
-        k,
-        v,
-        a,
-        b,
-        mask,
-        sa_out,
-        state_chkp,
-        chunk_size,
-    )
+    return (out, final_state), (r, w, k, v, a, b, mask, sa_out, state_chkp)
 
 
-def _bwd_with_mask(res, grads):
-    r, w, k, v, a, b, mask, sa_out, state_chkp, chunk_size = res
+def _bwd_with_mask(chunk_size: int, res, grads):
+    r, w, k, v, a, b, mask, sa_out, state_chkp = res
     dy, dht = grads
     dy = jnp.asarray(dy, jnp.bfloat16)
     if dht is None:
@@ -580,7 +570,7 @@ def _bwd_with_mask(res, grads):
         dht = jnp.asarray(dht, jnp.float32)
 
     _wkv7_bwd_with_mask_warmup(
-        r, w, k, v, a, b, mask, dy, sa_out, state_chkp, dht, chunk_size
+        chunk_size, r, w, k, v, a, b, mask, dy, sa_out, state_chkp, dht
     )
     dr, dw, dk, dv, da, db, dh0 = _wkv7_bwd_with_mask_spmd(
         r, w, k, v, a, b, mask, dy, sa_out, state_chkp, dht, chunk_size

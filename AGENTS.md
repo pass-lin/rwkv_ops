@@ -63,7 +63,7 @@ MANIFEST.in                  # 源码分发清单
 | `KERNEL_BACKEND` | 算子后端 | `jax` / `torch` / `tensorflow` / `numpy` / `openvino` | `torch` | **最高** |
 | `KERAS_BACKEND` | Keras 后端 | `jax` / `torch` / `tensorflow` / `numpy` / `openvino` | — | 低 |
 | `KERNEL_TYPE` | 实现类型 | `triton` / `cuda` / `native` | `cuda` | — |
-| `RWKV_OPS_PALLAS_AUTOTUNE` | Pallas autotune 开关 | `1` / `0` | `1` | — |
+| `RWKV_OPS_PALLAS_AUTOTUNE` | Pallas autotune 开关 | `1` / `0` | `0` | — |
 | `RWKV_OPS_KERAS_NATIVE` | 强制 native 为纯 keras ops | `1` / `0` | `0` | — |
 | `RWKV_OPS_PALLAS_BACKEND` | Pallas 后端强制覆盖 | `default` / `mgpu` / `triton` | — | — |
 

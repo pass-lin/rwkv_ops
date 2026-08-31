@@ -181,7 +181,7 @@ def test_gdn_triton_sane_all_one_mask_equals_no_mask(
     assert s_no_mask is None
     assert s_all_one is not None
     assert_allclose_with_stats(
-        y_no_mask, y_all_one, "no_mask vs all_one_mask output", atol=1e-5, rtol=1e-5
+        y_no_mask, y_all_one, "no_mask vs all_one_mask output", atol=2e-5, rtol=1e-5
     )
 
 

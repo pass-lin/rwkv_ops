@@ -82,7 +82,7 @@ pip install rwkv_ops
 | `KERAS_BACKEND` | Keras backend | `jax` / `torch` / `tensorflow` / `numpy` / `openvino` | — | Low |
 | `KERNEL_BACKEND` | Operator backend | `jax` / `torch` / `tensorflow` / `numpy` / `openvino` | `torch` | **High** |
 | `KERNEL_TYPE` | Implementation type | `triton` / `cuda` / `native` | `cuda` | — |
-| `RWKV_OPS_PALLAS_AUTOTUNE` | Pallas autotune switch | `1` / `0` | `1` | — |
+| `RWKV_OPS_PALLAS_AUTOTUNE` | Pallas autotune switch | `1` / `0` | `0` | — |
 | `RWKV_OPS_KERAS_NATIVE` | Force native to pure keras ops | `1` / `0` | `0` | — |
 
 > With `KERNEL_TYPE=native`, the implementation is dispatched per backend and platform: jax + GPU/TPU uses the Pallas kernel (rwkv7/rwkv7_sane); torch + non-CPU uses the Triton kernel (rwkv7/rwkv7_sane/mhc, since pip torch bundles triton); everything else (CPU, mhc on jax, etc.) uses pure Keras ops. Set `RWKV_OPS_KERAS_NATIVE=1` to force pure Keras ops everywhere (for debugging).

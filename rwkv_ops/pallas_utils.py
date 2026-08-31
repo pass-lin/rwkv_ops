@@ -11,7 +11,7 @@ import jax.tree_util as jtu
 from jax.experimental import pallas as pl
 from .utils import _force_keras_native
 
-PALLAS_AUTOTUNE = os.environ.get("RWKV_OPS_PALLAS_AUTOTUNE", "1") == "1"
+PALLAS_AUTOTUNE = os.environ.get("RWKV_OPS_PALLAS_AUTOTUNE", "0") == "1"
 _PALLAS_BACKEND_ENV = os.environ.get("RWKV_OPS_PALLAS_BACKEND", "").lower()
 
 

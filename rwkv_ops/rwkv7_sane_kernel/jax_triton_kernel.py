@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import warnings
 from typing import Optional, Tuple, Union
 
@@ -198,7 +199,7 @@ def _wkv7_sane_fwd_triton_call(r, w, k, v, a, b, tau, h0, chunk_size: int):
     return out, sa_out, state_chkp
 
 
-@custom_partitioning
+@functools.partial(custom_partitioning, static_argnums=(8,))
 def _wkv7_sane_fwd_spmd(r, w, k, v, a, b, tau, h0, chunk_size: int):
     return _wkv7_sane_fwd_triton_call(r, w, k, v, a, b, tau, h0, chunk_size)
 
@@ -254,7 +255,7 @@ def _wkv7_sane_bwd_triton_call(
     return dr, dw, dk, dv, da, db, dtau, dh0
 
 
-@custom_partitioning
+@functools.partial(custom_partitioning, static_argnums=(11,))
 def _wkv7_sane_bwd_spmd(
     r, w, k, v, a, b, sa, state_chkp, tau, dy, dht, chunk_size: int
 ):
@@ -270,10 +271,10 @@ _wkv7_sane_bwd_spmd.def_partition(
 )
 
 
-@jax.custom_vjp
+@functools.partial(jax.custom_vjp, nondiff_argnums=(8,))
 def rwkv7_sane_kernel_triton(r, w, k, v, a, b, tau, h0, chunk_size: int):
     """无 mask JAX-Triton 训练 kernel 公开入口。"""
-    out, sa_out, state_chkp = _wkv7_sane_fwd_spmd(r, w, k, v, a, b, tau, h0)
+    out, sa_out, state_chkp = _wkv7_sane_fwd_spmd(r, w, k, v, a, b, tau, h0, chunk_size)
     final_state = _apply_sane_to_final_state(state_chkp[:, :, -1, :, :], tau)
     return out, final_state
 
@@ -281,11 +282,11 @@ def rwkv7_sane_kernel_triton(r, w, k, v, a, b, tau, h0, chunk_size: int):
 def _fwd(r, w, k, v, a, b, tau, h0, chunk_size: int):
     out, sa_out, state_chkp = _wkv7_sane_fwd_spmd(r, w, k, v, a, b, tau, h0, chunk_size)
     final_state = _apply_sane_to_final_state(state_chkp[:, :, -1, :, :], tau)
-    return (out, final_state), (r, w, k, v, a, b, tau, sa_out, state_chkp, chunk_size)
+    return (out, final_state), (r, w, k, v, a, b, tau, sa_out, state_chkp)
 
 
-def _bwd(res, grads):
-    r, w, k, v, a, b, tau, sa_out, state_chkp, chunk_size = res
+def _bwd(chunk_size, res, grads):
+    r, w, k, v, a, b, tau, sa_out, state_chkp = res
     dy, dht = grads
     dy = jnp.asarray(dy, jnp.bfloat16)
     if dht is None:
@@ -342,7 +343,7 @@ def _wkv7_sane_fwd_with_mask_triton_call(
     return out, sa_out, state_chkp
 
 
-@custom_partitioning
+@functools.partial(custom_partitioning, static_argnums=(9,))
 def _wkv7_sane_fwd_with_mask_spmd(r, w, k, v, a, b, tau, mask, h0, chunk_size: int):
     return _wkv7_sane_fwd_with_mask_triton_call(
         r, w, k, v, a, b, tau, mask, h0, chunk_size
@@ -401,7 +402,7 @@ def _wkv7_sane_bwd_with_mask_triton_call(
     return dr, dw, dk, dv, da, db, dtau, dh0
 
 
-@custom_partitioning
+@functools.partial(custom_partitioning, static_argnums=(12,))
 def _wkv7_sane_bwd_with_mask_spmd(
     r, w, k, v, a, b, sa, state_chkp, tau, mask, dy, dht, chunk_size: int
 ):
@@ -417,13 +418,13 @@ _wkv7_sane_bwd_with_mask_spmd.def_partition(
 )
 
 
-@jax.custom_vjp
+@functools.partial(jax.custom_vjp, nondiff_argnums=(9,))
 def rwkv7_sane_kernel_with_mask_triton(
     r, w, k, v, a, b, tau, mask, h0, chunk_size: int
 ):
     """带 mask JAX-Triton 训练 kernel 公开入口。"""
     out, sa_out, state_chkp = _wkv7_sane_fwd_with_mask_spmd(
-        r, w, k, v, a, b, tau, mask, h0
+        r, w, k, v, a, b, tau, mask, h0, chunk_size
     )
     final_state = _apply_sane_to_final_state(state_chkp[:, :, -1, :, :], tau, mask=mask)
     return out, final_state
@@ -434,23 +435,11 @@ def _fwd_with_mask(r, w, k, v, a, b, tau, mask, h0, chunk_size: int):
         r, w, k, v, a, b, tau, mask, h0, chunk_size
     )
     final_state = _apply_sane_to_final_state(state_chkp[:, :, -1, :, :], tau, mask=mask)
-    return (out, final_state), (
-        r,
-        w,
-        k,
-        v,
-        a,
-        b,
-        tau,
-        mask,
-        sa_out,
-        state_chkp,
-        chunk_size,
-    )
+    return (out, final_state), (r, w, k, v, a, b, tau, mask, sa_out, state_chkp)
 
 
-def _bwd_with_mask(res, grads):
-    r, w, k, v, a, b, tau, mask, sa_out, state_chkp, chunk_size = res
+def _bwd_with_mask(chunk_size, res, grads):
+    r, w, k, v, a, b, tau, mask, sa_out, state_chkp = res
     dy, dht = grads
     dy = jnp.asarray(dy, jnp.bfloat16)
     if dht is None:
@@ -545,7 +534,7 @@ def generalized_delta_rule_sane(
         return (out, last_state) if output_final_state else out
 
     # 无 mask 路径：chunk 边界无条件执行 SANE。
-    out, _ = rwkv7_sane_kernel_triton(r, w, k, v, a, b, tau, h0)
+    out, _ = rwkv7_sane_kernel_triton(r, w, k, v, a, b, tau, h0, chunk_size)
     out = jnp.transpose(out, (0, 2, 1, 3))
     out = jnp.asarray(out, dtype)
 
