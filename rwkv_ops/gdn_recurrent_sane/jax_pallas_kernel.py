@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import warnings
 from typing import Optional, Tuple, Union
 
@@ -13,7 +14,6 @@ from jax.sharding import NamedSharding, PartitionSpec
 
 from ..pallas_utils import create_partition, ensure_config, launch
 
-CHUNK_LEN = 16
 
 # SPMD 切分规则（Einsum 风格）
 # b=Batch, n=Head, t=Time, k=HeadK, v=HeadV, c=Chunk
@@ -153,9 +153,9 @@ def _transpose_head(x: jnp.ndarray, head_first: bool) -> jnp.ndarray:
 
 
 def _transpose_tau(tau: jnp.ndarray) -> jnp.ndarray:
-    """tau 公共接口始终为 [B, T//16, N]；需要转成 head-first [B, N, T//16]。"""
+    """tau 公共接口始终为 [B, T//chunk_size, N]；需要转成 head-first [B, N, T//chunk_size]。"""
     tau = jnp.asarray(tau, dtype=jnp.float32)
-    # [B, T//16, N] -> [B, N, T//16]
+    # [B, T//chunk_size, N] -> [B, N, T//chunk_size]
     return jnp.transpose(tau, (0, 2, 1))
 
 
@@ -193,39 +193,241 @@ def _apply_sane_to_final_state(
     return jnp.where(last_mask > 0, sane_state, state)
 
 
-def _gdn_recurrent_sane_fwd_kernel(
-    q_ref,
-    k_ref,
-    v_ref,
-    g_ref,
-    beta_ref,
-    tau_ref,
-    mask_ref,
-    h0_ref,
-    o_ref,
-    kv_mem_ref,
-    chkp_ref,
-    inv_norm_q_ref,
-    inv_norm_k_ref,
-):
-    """Gated DeltaNet recurrent SANE 训练前向 Pallas kernel。
+def _make_gdn_recurrent_sane_fwd_kernel(chunk_size: int):
+    """构造 Gated DeltaNet recurrent SANE 训练前向 Pallas kernel。
 
-    grid 为 (B, N)，每个 program 处理一个 (batch, head)。
-    chunk 内静态展开 16 步，保存 SANE 之前的 state checkpoint；
+    返回的 kernel 在 grid (B, N) 上运行，每个 program 处理一个 (batch, head)。
+    chunk 内静态展开 chunk_size 步，保存 SANE 之前的 state checkpoint；
     chunk 边界按 mask 选择是否执行 SANE。
     """
-    b = pl.program_id(0)
-    h = pl.program_id(1)
-    num_chunks = q_ref.shape[2] // CHUNK_LEN
-    scale = jax.lax.rsqrt(jnp.float32(q_ref.shape[3]))
-    eps = jnp.float32(1e-6)
 
-    state = h0_ref[b, h].astype(jnp.float32)
+    def _gdn_recurrent_sane_fwd_kernel(
+        q_ref,
+        k_ref,
+        v_ref,
+        g_ref,
+        beta_ref,
+        tau_ref,
+        mask_ref,
+        h0_ref,
+        o_ref,
+        kv_mem_ref,
+        chkp_ref,
+        inv_norm_q_ref,
+        inv_norm_k_ref,
+    ):
+        b = pl.program_id(0)
+        h = pl.program_id(1)
+        num_chunks = q_ref.shape[2] // chunk_size
+        scale = jax.lax.rsqrt(jnp.float32(q_ref.shape[3]))
+        eps = jnp.float32(1e-6)
 
-    def chunk_body(c, state):
-        for j in range(CHUNK_LEN):
-            t = c * CHUNK_LEN + j
+        state = h0_ref[b, h].astype(jnp.float32)
 
+        def chunk_body(c, state):
+            for j in range(chunk_size):
+                t = c * chunk_size + j
+
+                q_t = q_ref[b, h, t, :].astype(jnp.float32)
+                k_t = k_ref[b, h, t, :].astype(jnp.float32)
+                v_t = v_ref[b, h, t, :].astype(jnp.float32)
+                g_t = g_ref[b, h, t].astype(jnp.float32)
+                beta_t = beta_ref[b, h, t].astype(jnp.float32)
+
+                inv_norm_q_t = jax.lax.rsqrt(jnp.sum(q_t * q_t) + eps)
+                inv_norm_k_t = jax.lax.rsqrt(jnp.sum(k_t * k_t) + eps)
+                inv_norm_q_ref[b, h, t] = inv_norm_q_t
+                inv_norm_k_ref[b, h, t] = inv_norm_k_t
+
+                q_hat = q_t * inv_norm_q_t
+                k_hat = k_t * inv_norm_k_t
+                q_tilde = q_hat * scale
+
+                state = state * jnp.exp(g_t)
+                kv_mem = jnp.sum(state * k_hat[:, None], axis=0)
+                kv_mem_ref[b, h, t, :] = kv_mem
+
+                delta = beta_t * (v_t - kv_mem)
+                state = state + k_hat[:, None] * delta[None, :]
+
+                out_t = jnp.sum(state * q_tilde[:, None], axis=0)
+                o_ref[b, h, t, :] = out_t.astype(o_ref.dtype)
+
+            # checkpoint 保存 SANE 之前的 state 供反向使用。
+            chkp_ref[b, h, c] = state
+
+            tau_v = tau_ref[b, h, c].astype(jnp.float32)
+            tau_safe = jnp.maximum(tau_v, 1e-6)
+            u = state / tau_safe
+            tnh = jnp.tanh(u)
+            sane_state = tau_safe * tnh
+            m = mask_ref[b, c].astype(jnp.float32)
+            state = state * (1.0 - m) + sane_state * m
+            return state
+
+        jax.lax.fori_loop(0, num_chunks, chunk_body, state)
+
+    return _gdn_recurrent_sane_fwd_kernel
+
+
+def _make_gdn_recurrent_sane_bwd_kernel(chunk_size: int):
+    """构造 Gated DeltaNet recurrent SANE 训练反向 Pallas kernel。
+
+    返回的 kernel 在 grid (B, N) 上运行，每个 program 处理一个 (batch, head)。
+    在每个 chunk 边界先应用 SANE 反向，再回传 chunk 内 chunk_size 步的 GDN 梯度。
+    """
+
+    def _gdn_recurrent_sane_bwd_kernel(
+        q_ref,
+        k_ref,
+        v_ref,
+        g_ref,
+        beta_ref,
+        dy_ref,
+        dht_ref,
+        kv_mem_ref,
+        inv_norm_q_ref,
+        inv_norm_k_ref,
+        chkp_ref,
+        h0_ref,
+        tau_ref,
+        mask_ref,
+        dq_ref,
+        dk_ref,
+        dv_ref,
+        dg_ref,
+        dbeta_ref,
+        dh0_ref,
+        dtau_ref,
+    ):
+        b = pl.program_id(0)
+        h = pl.program_id(1)
+        num_chunks = q_ref.shape[2] // chunk_size
+        scale = jax.lax.rsqrt(jnp.float32(q_ref.shape[3]))
+
+        dS = dht_ref[b, h].astype(jnp.float32)
+
+        def chunk_body(c_rev, dS):
+            c = num_chunks - 1 - c_rev
+            # chkp 保存的是 SANE 之前的 state。
+            state = chkp_ref[b, h, c].astype(jnp.float32)
+
+            # 先对下游梯度 dS 应用 SANE 导数（按 mask blend）。
+            tau_v = tau_ref[b, h, c].astype(jnp.float32)
+            tau_safe = jnp.maximum(tau_v, 1e-6)
+            m = mask_ref[b, c].astype(jnp.float32)
+            u = state / tau_safe
+            tnh = jnp.tanh(u)
+            sech2 = 1.0 - tnh * tnh
+            blend = (1.0 - m) + m * sech2
+            dtau_local = jnp.sum(dS * m * (tnh - u * sech2))
+            dS = dS * blend
+            dtau_ref[b, h, c] = dtau_local
+
+            for j in range(chunk_size - 1, -1, -1):
+                t = c * chunk_size + j
+
+                q_t = q_ref[b, h, t, :].astype(jnp.float32)
+                k_t = k_ref[b, h, t, :].astype(jnp.float32)
+                v_t = v_ref[b, h, t, :].astype(jnp.float32)
+                g_t = g_ref[b, h, t].astype(jnp.float32)
+                beta_t = beta_ref[b, h, t].astype(jnp.float32)
+                dy_t = dy_ref[b, h, t, :].astype(jnp.float32)
+                kv_mem_t = kv_mem_ref[b, h, t, :].astype(jnp.float32)
+
+                inv_norm_q_t = inv_norm_q_ref[b, h, t]
+                inv_norm_k_t = inv_norm_k_ref[b, h, t]
+
+                q_hat = q_t * inv_norm_q_t
+                k_hat = k_t * inv_norm_k_t
+                q_tilde = q_hat * scale
+
+                delta = beta_t * (v_t - kv_mem_t)
+
+                # state 表示 S_{t+1}；输出 out_t 依赖 S_{t+1} 与 q_tilde。
+                d_q_tilde = jnp.sum(state * dy_t[None, :], axis=1)
+
+                # dS 是 L 对 S_{t+1} 的梯度；加上 out_t 带来的贡献。
+                dstate_new = dS + q_tilde[:, None] * dy_t[None, :]
+
+                # 传播到 delta_t 与 kv_mem_t。
+                d_delta = jnp.sum(dstate_new * k_hat[:, None], axis=0)
+                d_v = beta_t * d_delta
+                d_beta = jnp.sum((v_t - kv_mem_t) * d_delta)
+                d_kv_mem = -beta_t * d_delta
+
+                # S_{t+1} = S_t * exp(g_t) + k_hat * delta^T。
+                state_decay = state - k_hat[:, None] * delta[None, :]
+
+                # L 对 k_hat 的梯度。
+                d_k_hat = jnp.sum(dstate_new * delta[None, :], axis=1) + jnp.sum(
+                    state_decay * d_kv_mem[None, :], axis=1
+                )
+
+                # L 对 S_t * exp(g_t) 的梯度。
+                dstate_decay = dstate_new + k_hat[:, None] * d_kv_mem[None, :]
+
+                # L 对 g_t 的梯度。
+                d_g = jnp.sum(state_decay * dstate_decay)
+
+                # 传给下一步的 L 对 S_t 的梯度。
+                exp_g = jnp.exp(g_t)
+                dS = exp_g * dstate_decay
+
+                # 恢复 S_t 供下一次迭代使用。
+                state = state_decay / exp_g
+
+                # L2 归一化反向。
+                d_q_hat = scale * d_q_tilde
+                q_hat_dot = jnp.sum(q_hat * d_q_hat)
+                dq_t = inv_norm_q_t * (d_q_hat - q_hat * q_hat_dot)
+
+                k_hat_dot = jnp.sum(k_hat * d_k_hat)
+                dk_t = inv_norm_k_t * (d_k_hat - k_hat * k_hat_dot)
+
+                dq_ref[b, h, t, :] = dq_t.astype(dq_ref.dtype)
+                dk_ref[b, h, t, :] = dk_t.astype(dk_ref.dtype)
+                dv_ref[b, h, t, :] = d_v.astype(dv_ref.dtype)
+                dg_ref[b, h, t] = d_g.astype(dg_ref.dtype)
+                dbeta_ref[b, h, t] = d_beta.astype(dbeta_ref.dtype)
+
+            return dS
+
+        dS = jax.lax.fori_loop(0, num_chunks, chunk_body, dS)
+        dh0_ref[b, h] = dS.astype(dh0_ref.dtype)
+
+    return _gdn_recurrent_sane_bwd_kernel
+
+
+def _make_gdn_recurrent_sane_inf_kernel(chunk_size: int):
+    """构造 Gated DeltaNet recurrent SANE 推理前向 Pallas kernel。
+
+    与训练前向数学一致，但不做反向保存；支持任意序列长度 T。
+    """
+
+    def _gdn_recurrent_sane_inf_kernel(
+        q_ref,
+        k_ref,
+        v_ref,
+        g_ref,
+        beta_ref,
+        tau_ref,
+        mask_ref,
+        h0_ref,
+        o_ref,
+        ht_ref,
+    ):
+        b = pl.program_id(0)
+        h = pl.program_id(1)
+        T = q_ref.shape[2]
+        scale = jax.lax.rsqrt(jnp.float32(q_ref.shape[3]))
+        eps = jnp.float32(1e-6)
+        num_chunks = T // chunk_size
+        rem = T - num_chunks * chunk_size
+
+        state = h0_ref[b, h].astype(jnp.float32)
+
+        def step(state, t):
             q_t = q_ref[b, h, t, :].astype(jnp.float32)
             k_t = k_ref[b, h, t, :].astype(jnp.float32)
             v_t = v_ref[b, h, t, :].astype(jnp.float32)
@@ -234,228 +436,38 @@ def _gdn_recurrent_sane_fwd_kernel(
 
             inv_norm_q_t = jax.lax.rsqrt(jnp.sum(q_t * q_t) + eps)
             inv_norm_k_t = jax.lax.rsqrt(jnp.sum(k_t * k_t) + eps)
-            inv_norm_q_ref[b, h, t] = inv_norm_q_t
-            inv_norm_k_ref[b, h, t] = inv_norm_k_t
-
-            q_hat = q_t * inv_norm_q_t
+            q_hat = q_t * inv_norm_q_t * scale
             k_hat = k_t * inv_norm_k_t
-            q_tilde = q_hat * scale
 
             state = state * jnp.exp(g_t)
             kv_mem = jnp.sum(state * k_hat[:, None], axis=0)
-            kv_mem_ref[b, h, t, :] = kv_mem
-
             delta = beta_t * (v_t - kv_mem)
             state = state + k_hat[:, None] * delta[None, :]
 
-            out_t = jnp.sum(state * q_tilde[:, None], axis=0)
+            out_t = jnp.sum(state * q_hat[:, None], axis=0)
             o_ref[b, h, t, :] = out_t.astype(o_ref.dtype)
+            return state
 
-        # checkpoint 保存 SANE 之前的 state 供反向使用。
-        chkp_ref[b, h, c] = state
+        def chunk_body(c, state):
+            for j in range(chunk_size):
+                state = step(state, c * chunk_size + j)
 
-        tau_v = tau_ref[b, h, c].astype(jnp.float32)
-        tau_safe = jnp.maximum(tau_v, 1e-6)
-        u = state / tau_safe
-        tnh = jnp.tanh(u)
-        sane_state = tau_safe * tnh
-        m = mask_ref[b, c].astype(jnp.float32)
-        state = state * (1.0 - m) + sane_state * m
-        return state
+            tau_v = tau_ref[b, h, c].astype(jnp.float32)
+            tau_safe = jnp.maximum(tau_v, 1e-6)
+            u = state / tau_safe
+            tnh = jnp.tanh(u)
+            sane_state = tau_safe * tnh
+            m = mask_ref[b, c].astype(jnp.float32)
+            return state * (1.0 - m) + sane_state * m
 
-    jax.lax.fori_loop(0, num_chunks, chunk_body, state)
+        state = jax.lax.fori_loop(0, num_chunks, chunk_body, state)
 
+        for j in range(rem):
+            state = step(state, num_chunks * chunk_size + j)
 
-def _gdn_recurrent_sane_bwd_kernel(
-    q_ref,
-    k_ref,
-    v_ref,
-    g_ref,
-    beta_ref,
-    dy_ref,
-    dht_ref,
-    kv_mem_ref,
-    inv_norm_q_ref,
-    inv_norm_k_ref,
-    chkp_ref,
-    h0_ref,
-    tau_ref,
-    mask_ref,
-    dq_ref,
-    dk_ref,
-    dv_ref,
-    dg_ref,
-    dbeta_ref,
-    dh0_ref,
-    dtau_ref,
-):
-    """Gated DeltaNet recurrent SANE 训练反向 Pallas kernel。
+        ht_ref[b, h] = state.astype(ht_ref.dtype)
 
-    grid 为 (B, N)，每个 program 处理一个 (batch, head)。
-    在每个 chunk 边界先应用 SANE 反向，再回传 chunk 内 16 步的 GDN 梯度。
-    """
-    b = pl.program_id(0)
-    h = pl.program_id(1)
-    num_chunks = q_ref.shape[2] // CHUNK_LEN
-    scale = jax.lax.rsqrt(jnp.float32(q_ref.shape[3]))
-
-    dS = dht_ref[b, h].astype(jnp.float32)
-
-    def chunk_body(c_rev, dS):
-        c = num_chunks - 1 - c_rev
-        # chkp 保存的是 SANE 之前的 state。
-        state = chkp_ref[b, h, c].astype(jnp.float32)
-
-        # 先对下游梯度 dS 应用 SANE 导数（按 mask blend）。
-        tau_v = tau_ref[b, h, c].astype(jnp.float32)
-        tau_safe = jnp.maximum(tau_v, 1e-6)
-        m = mask_ref[b, c].astype(jnp.float32)
-        u = state / tau_safe
-        tnh = jnp.tanh(u)
-        sech2 = 1.0 - tnh * tnh
-        blend = (1.0 - m) + m * sech2
-        dtau_local = jnp.sum(dS * m * (tnh - u * sech2))
-        dS = dS * blend
-        dtau_ref[b, h, c] = dtau_local
-
-        for j in range(CHUNK_LEN - 1, -1, -1):
-            t = c * CHUNK_LEN + j
-
-            q_t = q_ref[b, h, t, :].astype(jnp.float32)
-            k_t = k_ref[b, h, t, :].astype(jnp.float32)
-            v_t = v_ref[b, h, t, :].astype(jnp.float32)
-            g_t = g_ref[b, h, t].astype(jnp.float32)
-            beta_t = beta_ref[b, h, t].astype(jnp.float32)
-            dy_t = dy_ref[b, h, t, :].astype(jnp.float32)
-            kv_mem_t = kv_mem_ref[b, h, t, :].astype(jnp.float32)
-
-            inv_norm_q_t = inv_norm_q_ref[b, h, t]
-            inv_norm_k_t = inv_norm_k_ref[b, h, t]
-
-            q_hat = q_t * inv_norm_q_t
-            k_hat = k_t * inv_norm_k_t
-            q_tilde = q_hat * scale
-
-            delta = beta_t * (v_t - kv_mem_t)
-
-            # state 表示 S_{t+1}；输出 out_t 依赖 S_{t+1} 与 q_tilde。
-            d_q_tilde = jnp.sum(state * dy_t[None, :], axis=1)
-
-            # dS 是 L 对 S_{t+1} 的梯度；加上 out_t 带来的贡献。
-            dstate_new = dS + q_tilde[:, None] * dy_t[None, :]
-
-            # 传播到 delta_t 与 kv_mem_t。
-            d_delta = jnp.sum(dstate_new * k_hat[:, None], axis=0)
-            d_v = beta_t * d_delta
-            d_beta = jnp.sum((v_t - kv_mem_t) * d_delta)
-            d_kv_mem = -beta_t * d_delta
-
-            # S_{t+1} = S_t * exp(g_t) + k_hat * delta^T。
-            state_decay = state - k_hat[:, None] * delta[None, :]
-
-            # L 对 k_hat 的梯度。
-            d_k_hat = jnp.sum(dstate_new * delta[None, :], axis=1) + jnp.sum(
-                state_decay * d_kv_mem[None, :], axis=1
-            )
-
-            # L 对 S_t * exp(g_t) 的梯度。
-            dstate_decay = dstate_new + k_hat[:, None] * d_kv_mem[None, :]
-
-            # L 对 g_t 的梯度。
-            d_g = jnp.sum(state_decay * dstate_decay)
-
-            # 传给下一步的 L 对 S_t 的梯度。
-            exp_g = jnp.exp(g_t)
-            dS = exp_g * dstate_decay
-
-            # 恢复 S_t 供下一次迭代使用。
-            state = state_decay / exp_g
-
-            # L2 归一化反向。
-            d_q_hat = scale * d_q_tilde
-            q_hat_dot = jnp.sum(q_hat * d_q_hat)
-            dq_t = inv_norm_q_t * (d_q_hat - q_hat * q_hat_dot)
-
-            k_hat_dot = jnp.sum(k_hat * d_k_hat)
-            dk_t = inv_norm_k_t * (d_k_hat - k_hat * k_hat_dot)
-
-            dq_ref[b, h, t, :] = dq_t.astype(dq_ref.dtype)
-            dk_ref[b, h, t, :] = dk_t.astype(dk_ref.dtype)
-            dv_ref[b, h, t, :] = d_v.astype(dv_ref.dtype)
-            dg_ref[b, h, t] = d_g.astype(dg_ref.dtype)
-            dbeta_ref[b, h, t] = d_beta.astype(dbeta_ref.dtype)
-
-        return dS
-
-    dS = jax.lax.fori_loop(0, num_chunks, chunk_body, dS)
-    dh0_ref[b, h] = dS.astype(dh0_ref.dtype)
-
-
-def _gdn_recurrent_sane_inf_kernel(
-    q_ref,
-    k_ref,
-    v_ref,
-    g_ref,
-    beta_ref,
-    tau_ref,
-    mask_ref,
-    h0_ref,
-    o_ref,
-    ht_ref,
-):
-    """Gated DeltaNet recurrent SANE 推理前向 Pallas kernel。
-
-    与训练前向数学一致，但不做反向保存；支持任意序列长度 T。
-    """
-    b = pl.program_id(0)
-    h = pl.program_id(1)
-    T = q_ref.shape[2]
-    scale = jax.lax.rsqrt(jnp.float32(q_ref.shape[3]))
-    eps = jnp.float32(1e-6)
-    num_chunks = T // CHUNK_LEN
-    rem = T - num_chunks * CHUNK_LEN
-
-    state = h0_ref[b, h].astype(jnp.float32)
-
-    def step(state, t):
-        q_t = q_ref[b, h, t, :].astype(jnp.float32)
-        k_t = k_ref[b, h, t, :].astype(jnp.float32)
-        v_t = v_ref[b, h, t, :].astype(jnp.float32)
-        g_t = g_ref[b, h, t].astype(jnp.float32)
-        beta_t = beta_ref[b, h, t].astype(jnp.float32)
-
-        inv_norm_q_t = jax.lax.rsqrt(jnp.sum(q_t * q_t) + eps)
-        inv_norm_k_t = jax.lax.rsqrt(jnp.sum(k_t * k_t) + eps)
-        q_hat = q_t * inv_norm_q_t * scale
-        k_hat = k_t * inv_norm_k_t
-
-        state = state * jnp.exp(g_t)
-        kv_mem = jnp.sum(state * k_hat[:, None], axis=0)
-        delta = beta_t * (v_t - kv_mem)
-        state = state + k_hat[:, None] * delta[None, :]
-
-        out_t = jnp.sum(state * q_hat[:, None], axis=0)
-        o_ref[b, h, t, :] = out_t.astype(o_ref.dtype)
-        return state
-
-    def chunk_body(c, state):
-        for j in range(CHUNK_LEN):
-            state = step(state, c * CHUNK_LEN + j)
-
-        tau_v = tau_ref[b, h, c].astype(jnp.float32)
-        tau_safe = jnp.maximum(tau_v, 1e-6)
-        u = state / tau_safe
-        tnh = jnp.tanh(u)
-        sane_state = tau_safe * tnh
-        m = mask_ref[b, c].astype(jnp.float32)
-        return state * (1.0 - m) + sane_state * m
-
-    state = jax.lax.fori_loop(0, num_chunks, chunk_body, state)
-
-    for j in range(rem):
-        state = step(state, num_chunks * CHUNK_LEN + j)
-
-    ht_ref[b, h] = state.astype(ht_ref.dtype)
+    return _gdn_recurrent_sane_inf_kernel
 
 
 def _gdn_recurrent_sane_single_step_kernel(
@@ -514,43 +526,47 @@ def _gdn_recurrent_sane_single_step_kernel(
 # 训练前向 launcher
 
 
-def _fwd_out_shape(q, v):
+def _fwd_out_shape(q, v, chunk_size: int):
     B, N, T, K = q.shape
     V = v.shape[-1]
     return [
         jax.ShapeDtypeStruct((B, N, T, V), v.dtype),
         jax.ShapeDtypeStruct((B, N, T, V), jnp.float32),
-        jax.ShapeDtypeStruct((B, N, T // CHUNK_LEN, K, V), jnp.float32),
+        jax.ShapeDtypeStruct((B, N, T // chunk_size, K, V), jnp.float32),
         jax.ShapeDtypeStruct((B, N, T), jnp.float32),
         jax.ShapeDtypeStruct((B, N, T), jnp.float32),
     ]
 
 
-def _gdn_recurrent_sane_fwd_pallas_call(q, k, v, g, beta, tau, mask, h0):
+def _gdn_recurrent_sane_fwd_pallas_call(
+    q, k, v, g, beta, tau, mask, h0, chunk_size: int
+):
     B, N, T, K = q.shape
     return launch(
-        "gdn_recurrent_sane_fwd",
-        _gdn_recurrent_sane_fwd_kernel,
-        _fwd_out_shape(q, v),
+        f"gdn_recurrent_sane_fwd_{chunk_size}",
+        _make_gdn_recurrent_sane_fwd_kernel(chunk_size),
+        _fwd_out_shape(q, v, chunk_size),
         (B, N),
         (q, k, v, g, beta, tau, mask, h0),
     )
 
 
-def _gdn_recurrent_sane_fwd_warmup(q, k, v, g, beta, tau, mask, h0):
+def _gdn_recurrent_sane_fwd_warmup(q, k, v, g, beta, tau, mask, h0, chunk_size: int):
     B, N, T, K = q.shape
     ensure_config(
-        "gdn_recurrent_sane_fwd",
-        _gdn_recurrent_sane_fwd_kernel,
-        _fwd_out_shape(q, v),
+        f"gdn_recurrent_sane_fwd_{chunk_size}",
+        _make_gdn_recurrent_sane_fwd_kernel(chunk_size),
+        _fwd_out_shape(q, v, chunk_size),
         (B, N),
         (q, k, v, g, beta, tau, mask, h0),
     )
 
 
-@custom_partitioning
-def _gdn_recurrent_sane_fwd_spmd(q, k, v, g, beta, tau, mask, h0):
-    return _gdn_recurrent_sane_fwd_pallas_call(q, k, v, g, beta, tau, mask, h0)
+@functools.partial(custom_partitioning, static_argnums=(8,))
+def _gdn_recurrent_sane_fwd_spmd(q, k, v, g, beta, tau, mask, h0, chunk_size: int):
+    return _gdn_recurrent_sane_fwd_pallas_call(
+        q, k, v, g, beta, tau, mask, h0, chunk_size
+    )
 
 
 _gdn_recurrent_sane_fwd_spmd.def_partition(
@@ -563,7 +579,7 @@ _gdn_recurrent_sane_fwd_spmd.def_partition(
 # 训练反向 launcher
 
 
-def _bwd_out_shape(q, v):
+def _bwd_out_shape(q, v, chunk_size: int):
     B, N, T, K = q.shape
     V = v.shape[-1]
     return [
@@ -573,18 +589,32 @@ def _bwd_out_shape(q, v):
         jax.ShapeDtypeStruct((B, N, T), jnp.float32),
         jax.ShapeDtypeStruct((B, N, T), jnp.float32),
         jax.ShapeDtypeStruct((B, N, K, V), jnp.float32),
-        jax.ShapeDtypeStruct((B, N, T // CHUNK_LEN), jnp.float32),
+        jax.ShapeDtypeStruct((B, N, T // chunk_size), jnp.float32),
     ]
 
 
 def _gdn_recurrent_sane_bwd_pallas_call(
-    q, k, v, g, beta, dy, dht, kv_mem, inv_norm_q, inv_norm_k, chkp, h0, tau, mask
+    q,
+    k,
+    v,
+    g,
+    beta,
+    dy,
+    dht,
+    kv_mem,
+    inv_norm_q,
+    inv_norm_k,
+    chkp,
+    h0,
+    tau,
+    mask,
+    chunk_size: int,
 ):
     B, N, T, K = q.shape
     return launch(
-        "gdn_recurrent_sane_bwd",
-        _gdn_recurrent_sane_bwd_kernel,
-        _bwd_out_shape(q, v),
+        f"gdn_recurrent_sane_bwd_{chunk_size}",
+        _make_gdn_recurrent_sane_bwd_kernel(chunk_size),
+        _bwd_out_shape(q, v, chunk_size),
         (B, N),
         (
             q,
@@ -606,13 +636,27 @@ def _gdn_recurrent_sane_bwd_pallas_call(
 
 
 def _gdn_recurrent_sane_bwd_warmup(
-    q, k, v, g, beta, dy, dht, kv_mem, inv_norm_q, inv_norm_k, chkp, h0, tau, mask
+    q,
+    k,
+    v,
+    g,
+    beta,
+    dy,
+    dht,
+    kv_mem,
+    inv_norm_q,
+    inv_norm_k,
+    chkp,
+    h0,
+    tau,
+    mask,
+    chunk_size: int,
 ):
     B, N, T, K = q.shape
     ensure_config(
-        "gdn_recurrent_sane_bwd",
-        _gdn_recurrent_sane_bwd_kernel,
-        _bwd_out_shape(q, v),
+        f"gdn_recurrent_sane_bwd_{chunk_size}",
+        _make_gdn_recurrent_sane_bwd_kernel(chunk_size),
+        _bwd_out_shape(q, v, chunk_size),
         (B, N),
         (
             q,
@@ -633,12 +677,40 @@ def _gdn_recurrent_sane_bwd_warmup(
     )
 
 
-@custom_partitioning
+@functools.partial(custom_partitioning, static_argnums=(14,))
 def _gdn_recurrent_sane_bwd_spmd(
-    q, k, v, g, beta, dy, dht, kv_mem, inv_norm_q, inv_norm_k, chkp, h0, tau, mask
+    q,
+    k,
+    v,
+    g,
+    beta,
+    dy,
+    dht,
+    kv_mem,
+    inv_norm_q,
+    inv_norm_k,
+    chkp,
+    h0,
+    tau,
+    mask,
+    chunk_size: int,
 ):
     return _gdn_recurrent_sane_bwd_pallas_call(
-        q, k, v, g, beta, dy, dht, kv_mem, inv_norm_q, inv_norm_k, chkp, h0, tau, mask
+        q,
+        k,
+        v,
+        g,
+        beta,
+        dy,
+        dht,
+        kv_mem,
+        inv_norm_q,
+        inv_norm_k,
+        chkp,
+        h0,
+        tau,
+        mask,
+        chunk_size,
     )
 
 
@@ -649,20 +721,20 @@ _gdn_recurrent_sane_bwd_spmd.def_partition(
 )
 
 
-@jax.custom_vjp
-def _gdn_recurrent_sane_train(q, k, v, g, beta, tau, mask, h0):
-    _gdn_recurrent_sane_fwd_warmup(q, k, v, g, beta, tau, mask, h0)
+@functools.partial(jax.custom_vjp, nondiff_argnums=(8,))
+def _gdn_recurrent_sane_train(q, k, v, g, beta, tau, mask, h0, chunk_size: int):
+    _gdn_recurrent_sane_fwd_warmup(q, k, v, g, beta, tau, mask, h0, chunk_size)
     out, kv_mem, state_chkp, inv_norm_q, inv_norm_k = _gdn_recurrent_sane_fwd_spmd(
-        q, k, v, g, beta, tau, mask, h0
+        q, k, v, g, beta, tau, mask, h0, chunk_size
     )
     final_state = _apply_sane_to_final_state(state_chkp[:, :, -1, :, :], tau, mask=mask)
     return out, final_state
 
 
-def _gdn_train_fwd(q, k, v, g, beta, tau, mask, h0):
-    _gdn_recurrent_sane_fwd_warmup(q, k, v, g, beta, tau, mask, h0)
+def _gdn_train_fwd(q, k, v, g, beta, tau, mask, h0, chunk_size: int):
+    _gdn_recurrent_sane_fwd_warmup(q, k, v, g, beta, tau, mask, h0, chunk_size)
     out, kv_mem, state_chkp, inv_norm_q, inv_norm_k = _gdn_recurrent_sane_fwd_spmd(
-        q, k, v, g, beta, tau, mask, h0
+        q, k, v, g, beta, tau, mask, h0, chunk_size
     )
     final_state = _apply_sane_to_final_state(state_chkp[:, :, -1, :, :], tau, mask=mask)
     return (out, final_state), (
@@ -681,7 +753,7 @@ def _gdn_train_fwd(q, k, v, g, beta, tau, mask, h0):
     )
 
 
-def _gdn_train_bwd(res, grads):
+def _gdn_train_bwd(chunk_size: int, res, grads):
     q, k, v, g, beta, tau, mask, kv_mem, inv_norm_q, inv_norm_k, state_chkp, h0 = res
     dy, dht = grads
     dy = jnp.asarray(dy, q.dtype)
@@ -707,6 +779,7 @@ def _gdn_train_bwd(res, grads):
         h0,
         tau,
         mask,
+        chunk_size,
     )
     dq, dk, dv, dg, dbeta, dh0, dtau = _gdn_recurrent_sane_bwd_spmd(
         q,
@@ -723,6 +796,7 @@ def _gdn_train_bwd(res, grads):
         h0,
         tau,
         mask,
+        chunk_size,
     )
     return dq, dk, dv, dg, dbeta, dtau, None, dh0
 
@@ -742,31 +816,35 @@ def _inf_out_shape(q, v):
     ]
 
 
-def _gdn_recurrent_sane_inf_pallas_call(q, k, v, g, beta, tau, mask, h0):
+def _gdn_recurrent_sane_inf_pallas_call(
+    q, k, v, g, beta, tau, mask, h0, chunk_size: int
+):
     B, N, T, K = q.shape
     return launch(
-        "gdn_recurrent_sane_inf",
-        _gdn_recurrent_sane_inf_kernel,
+        f"gdn_recurrent_sane_inf_{chunk_size}",
+        _make_gdn_recurrent_sane_inf_kernel(chunk_size),
         _inf_out_shape(q, v),
         (B, N),
         (q, k, v, g, beta, tau, mask, h0),
     )
 
 
-def _gdn_recurrent_sane_inf_warmup(q, k, v, g, beta, tau, mask, h0):
+def _gdn_recurrent_sane_inf_warmup(q, k, v, g, beta, tau, mask, h0, chunk_size: int):
     B, N, T, K = q.shape
     ensure_config(
-        "gdn_recurrent_sane_inf",
-        _gdn_recurrent_sane_inf_kernel,
+        f"gdn_recurrent_sane_inf_{chunk_size}",
+        _make_gdn_recurrent_sane_inf_kernel(chunk_size),
         _inf_out_shape(q, v),
         (B, N),
         (q, k, v, g, beta, tau, mask, h0),
     )
 
 
-@custom_partitioning
-def _gdn_recurrent_sane_inf_spmd(q, k, v, g, beta, tau, mask, h0):
-    return _gdn_recurrent_sane_inf_pallas_call(q, k, v, g, beta, tau, mask, h0)
+@functools.partial(custom_partitioning, static_argnums=(8,))
+def _gdn_recurrent_sane_inf_spmd(q, k, v, g, beta, tau, mask, h0, chunk_size: int):
+    return _gdn_recurrent_sane_inf_pallas_call(
+        q, k, v, g, beta, tau, mask, h0, chunk_size
+    )
 
 
 _gdn_recurrent_sane_inf_spmd.def_partition(
@@ -842,7 +920,7 @@ def gated_delta_net_recurrent_sane(
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, Optional[jnp.ndarray]]]:
     """带 State Anomaly Neutralization 的 Gated DeltaNet recurrent 训练算子（JAX Pallas）。
 
-    在 chunk 边界（每 16 个 token）按 mask 对 state 执行
+    在 chunk 边界（每 chunk_size 个 token）按 mask 对 state 执行
     `state = tau * tanh(state / tau)`；输出始终基于 SANE 之前的 state。
 
     Args:
@@ -850,13 +928,13 @@ def gated_delta_net_recurrent_sane(
         v: [B, T, H, V]，值。
         g: [B, T, H]，log-space decay。
         beta: [B, T, H]，写入强度，必须已在外部过 sigmoid。
-        tau: [B, T//16, H]，float32。阈值，必须 > 0。
-        mask: [B, T//16]，float32 或 None。>0 的 chunk 边界执行 SANE；
+        tau: [B, T//chunk_size, H]，float32。阈值，必须 > 0。
+        mask: [B, T//chunk_size]，float32 或 None。>0 的 chunk 边界执行 SANE；
             仅当 output_final_state=True 时生效。
         initial_state: [B, H, K, V] 或 [1, H, K, V]，float32，可选。
         output_final_state: bool，是否返回最终 state。
         head_first: bool，输入输出是否 head 维优先 ([B, H, T, *])。
-        chunk_size: int，chunk 长度，默认 16。当前 Pallas kernel 仅支持 16。
+        chunk_size: int，chunk 长度，默认 16。
 
     Returns:
         out: [B, T, H, V]，与 v 同 dtype。
@@ -865,14 +943,8 @@ def gated_delta_net_recurrent_sane(
             output_final_state=True 且 mask=None 时也为 None 并发出 UserWarning。
 
     Raises:
-        ValueError: T 不被 16 整除，或 tau/mask 形状不匹配。
+        ValueError: T 不被 chunk_size 整除，或 tau/mask 形状不匹配。
     """
-    if chunk_size != CHUNK_LEN:
-        raise NotImplementedError(
-            f"JAX Pallas gdn_recurrent_sane currently only supports chunk_size={CHUNK_LEN}, "
-            f"got {chunk_size}"
-        )
-
     dtype = v.dtype
     q = _transpose_head(q, head_first)
     k = _transpose_head(k, head_first)
@@ -883,15 +955,15 @@ def gated_delta_net_recurrent_sane(
 
     B, N, T, K = q.shape
     V = v.shape[-1]
-    if T % CHUNK_LEN != 0:
+    if T % chunk_size != 0:
         raise ValueError(
-            f"Pallas SANE kernel requires sequence length T={T} to be divisible by {CHUNK_LEN}"
+            f"Pallas SANE kernel requires sequence length T={T} to be divisible by chunk_size={chunk_size}"
         )
 
-    C = T // CHUNK_LEN
+    C = T // chunk_size
     if tau.shape != (B, N, C):
         raise ValueError(
-            f"tau shape {tau.shape} does not match expected (B={B}, N={N}, T//16={C})"
+            f"tau shape {tau.shape} does not match expected (B={B}, N={N}, T//chunk_size={C})"
         )
 
     use_mask = output_final_state and mask is not None
@@ -899,14 +971,16 @@ def gated_delta_net_recurrent_sane(
         mask_arr = jnp.asarray(mask, dtype=jnp.float32)
         if mask_arr.shape != (B, C):
             raise ValueError(
-                f"mask shape {mask_arr.shape} must match (B, T//16) = ({B}, {C})"
+                f"mask shape {mask_arr.shape} must match (B, T//chunk_size) = ({B}, {C})"
             )
     else:
         mask_arr = jnp.ones((B, C), dtype=jnp.float32)
 
     h0 = _prepare_h0(initial_state, B, N, K, V)
 
-    out, final_state = _gdn_recurrent_sane_train(q, k, v, g, beta, tau, mask_arr, h0)
+    out, final_state = _gdn_recurrent_sane_train(
+        q, k, v, g, beta, tau, mask_arr, h0, chunk_size
+    )
 
     out = jnp.transpose(out, (0, 2, 1, 3))
     out = jnp.asarray(out, dtype)
@@ -953,12 +1027,12 @@ def gated_delta_net_recurrent_sane_inference(
         v: [B, T, H, V]，值。
         g: [B, T, H]，log-space decay。
         beta: [B, T, H]，写入强度，必须已在外部过 sigmoid。
-        tau: [B, T//16, H]，float32。
-        mask: [B, T//16]，float32 或 None。
+        tau: [B, T//chunk_size, H]，float32。
+        mask: [B, T//chunk_size]，float32 或 None。
         initial_state: [B, H, K, V] 或 [1, H, K, V]，float32，可选。
         output_final_state: bool，是否返回最终 state。
         head_first: bool，输入输出是否 head 维优先 ([B, H, T, *])。
-        chunk_size: int，chunk 长度，默认 16。当前 Pallas kernel 仅支持 16。
+        chunk_size: int，chunk 长度，默认 16。
 
     Returns:
         out: [B, T, H, V]，与 v 同 dtype。
@@ -969,12 +1043,6 @@ def gated_delta_net_recurrent_sane_inference(
     Raises:
         ValueError: tau/mask 形状不匹配。
     """
-    if chunk_size != CHUNK_LEN:
-        raise NotImplementedError(
-            f"JAX Pallas gdn_recurrent_sane_inference currently only supports chunk_size={CHUNK_LEN}, "
-            f"got {chunk_size}"
-        )
-
     dtype = v.dtype
     q = _transpose_head(q, head_first)
     k = _transpose_head(k, head_first)
@@ -985,7 +1053,7 @@ def gated_delta_net_recurrent_sane_inference(
 
     B, N, T, K = q.shape
     V = v.shape[-1]
-    C = max(T // CHUNK_LEN, 1)
+    C = max(T // chunk_size, 1)
 
     if tau.shape[-1] < C:
         tau = jnp.pad(
@@ -993,7 +1061,7 @@ def gated_delta_net_recurrent_sane_inference(
         )
     if tau.shape != (B, N, C):
         raise ValueError(
-            f"tau shape {tau.shape} does not match expected (B={B}, N={N}, T//16={C})"
+            f"tau shape {tau.shape} does not match expected (B={B}, N={N}, T//chunk_size={C})"
         )
 
     use_mask = output_final_state and mask is not None
@@ -1007,15 +1075,17 @@ def gated_delta_net_recurrent_sane_inference(
             )
         if mask_arr.shape != (B, C):
             raise ValueError(
-                f"mask shape {mask_arr.shape} must match (B, T//16) = ({B}, {C})"
+                f"mask shape {mask_arr.shape} must match (B, T//chunk_size) = ({B}, {C})"
             )
     else:
         mask_arr = jnp.ones((B, C), dtype=jnp.float32)
 
     h0 = _prepare_h0(initial_state, B, N, K, V)
 
-    _gdn_recurrent_sane_inf_warmup(q, k, v, g, beta, tau, mask_arr, h0)
-    out, final_state = _gdn_recurrent_sane_inf_spmd(q, k, v, g, beta, tau, mask_arr, h0)
+    _gdn_recurrent_sane_inf_warmup(q, k, v, g, beta, tau, mask_arr, h0, chunk_size)
+    out, final_state = _gdn_recurrent_sane_inf_spmd(
+        q, k, v, g, beta, tau, mask_arr, h0, chunk_size
+    )
 
     out = jnp.transpose(out, (0, 2, 1, 3))
     out = jnp.asarray(out, dtype)
