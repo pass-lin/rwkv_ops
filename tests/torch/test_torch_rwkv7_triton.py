@@ -15,19 +15,19 @@ def _to_torch(arr, dtype, device):
     return torch.tensor(arr, dtype=getattr(torch, dtype), device=device)
 
 
-def _chunk8_triton_op(rwkv7_shape):
-    """构造 chunk_size=8 的 RWKV-7 Torch Triton 训练算子。
+def _chunk32_triton_op(rwkv7_shape):
+    """构造 chunk_size=32 的 RWKV-7 Torch Triton 训练算子。
 
     Args:
         rwkv7_shape: tuple, (B, T, H, K)。
 
     Returns:
-        Callable: chunk_size=8 的训练 kernel。
+        Callable: chunk_size=32 的训练 kernel。
     """
     from rwkv_ops import get_generalized_delta_rule
 
     _, _, _, K = rwkv7_shape
-    op, _ = get_generalized_delta_rule(HEAD_SIZE=K, KERNEL_TYPE="triton", chunk_size=8)
+    op, _ = get_generalized_delta_rule(HEAD_SIZE=K, KERNEL_TYPE="triton", chunk_size=32)
     return op
 
 
@@ -203,25 +203,27 @@ def test_rwkv7_triton_mask_all_one_equivalent(triton_op, rwkv7_inputs, device):
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_triton_forward_state_chunk8(
+def test_rwkv7_triton_forward_state_chunk32(
     native_op, rwkv7_inputs, rwkv7_shape, device
 ):
-    """验证 RWKV-7 Triton kernel 在 chunk_size=8 时前向输出与 final_state 正确。"""
-    triton_op = _chunk8_triton_op(rwkv7_shape)
+    """验证 RWKV-7 Triton kernel 在 chunk_size=32 时前向输出与 final_state 正确。"""
+    triton_op = _chunk32_triton_op(rwkv7_shape)
     ref = _make_inputs(rwkv7_inputs, device, "bfloat16")
     tgt = _make_inputs(rwkv7_inputs, device, "bfloat16")
 
-    y_ref, s_ref = _call_op(native_op, ref, output_final_state=True, chunk_size=8)
-    y_tgt, s_tgt = _call_op(triton_op, tgt, output_final_state=True, chunk_size=8)
+    y_ref, s_ref = _call_op(native_op, ref, output_final_state=True, chunk_size=32)
+    y_tgt, s_tgt = _call_op(triton_op, tgt, output_final_state=True, chunk_size=32)
 
-    assert_allclose_with_stats(y_ref, y_tgt, "y_chunk8", atol=1e-5, rtol=1e-2)
-    assert_allclose_with_stats(s_ref, s_tgt, "final_state_chunk8", atol=1e-5, rtol=1e-3)
+    assert_allclose_with_stats(y_ref, y_tgt, "y_chunk32", atol=1e-5, rtol=1e-2)
+    assert_allclose_with_stats(
+        s_ref, s_tgt, "final_state_chunk32", atol=1e-5, rtol=1e-3
+    )
 
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_triton_backward_chunk8(native_op, rwkv7_inputs, rwkv7_shape, device):
-    """验证 RWKV-7 Triton kernel 在 chunk_size=8 时反向梯度正确。"""
+def test_rwkv7_triton_backward_chunk32(native_op, rwkv7_inputs, rwkv7_shape, device):
+    """验证 RWKV-7 Triton kernel 在 chunk_size=32 时反向梯度正确。"""
 
     def grads(op, tensors, chunk_size):
         t = {k: v.clone().requires_grad_(True) for k, v in tensors.items()}
@@ -231,18 +233,18 @@ def test_rwkv7_triton_backward_chunk8(native_op, rwkv7_inputs, rwkv7_shape, devi
         loss.backward()
         return {k: t[k].grad for k in t}
 
-    triton_op = _chunk8_triton_op(rwkv7_shape)
+    triton_op = _chunk32_triton_op(rwkv7_shape)
     ref = _make_inputs(rwkv7_inputs, device, "bfloat16")
     tgt = _make_inputs(rwkv7_inputs, device, "bfloat16")
 
-    g_ref = grads(native_op, ref, chunk_size=8)
-    g_tgt = grads(triton_op, tgt, chunk_size=8)
+    g_ref = grads(native_op, ref, chunk_size=32)
+    g_tgt = grads(triton_op, tgt, chunk_size=32)
 
     for name in ["r", "k", "v", "a", "b", "w", "h0"]:
         assert_allclose_with_stats(
             g_ref[name],
             g_tgt[name],
-            f"grad_{name}_chunk8",
+            f"grad_{name}_chunk32",
             atol=7e-3,
             rtol=7e-3,
         )
@@ -250,10 +252,10 @@ def test_rwkv7_triton_backward_chunk8(native_op, rwkv7_inputs, rwkv7_shape, devi
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_triton_forward_state_masked_chunk8(
+def test_rwkv7_triton_forward_state_masked_chunk32(
     native_op, rwkv7_inputs, rwkv7_shape, device, rng
 ):
-    """验证 RWKV-7 Triton kernel 在 chunk_size=8 且带 mask 时前向正确。"""
+    """验证 RWKV-7 Triton kernel 在 chunk_size=32 且带 mask 时前向正确。"""
     B, T = rwkv7_inputs["r"].shape[:2]
     mask_np = np.ones((B, T), dtype=np.float32)
     freeze = rng.random((B, T)) < 0.3
@@ -261,29 +263,29 @@ def test_rwkv7_triton_forward_state_masked_chunk8(
     mask_np[:, -5:] = 0.0
     mask = torch.tensor(mask_np, dtype=torch.float32, device=device)
 
-    triton_op = _chunk8_triton_op(rwkv7_shape)
+    triton_op = _chunk32_triton_op(rwkv7_shape)
     ref = _make_inputs(rwkv7_inputs, device, "bfloat16")
     tgt = _make_inputs(rwkv7_inputs, device, "bfloat16")
 
     y_ref, s_ref = _call_op(
-        native_op, ref, output_final_state=True, mask=mask, chunk_size=8
+        native_op, ref, output_final_state=True, mask=mask, chunk_size=32
     )
     y_tgt, s_tgt = _call_op(
-        triton_op, tgt, output_final_state=True, mask=mask, chunk_size=8
+        triton_op, tgt, output_final_state=True, mask=mask, chunk_size=32
     )
 
-    assert_allclose_with_stats(y_ref, y_tgt, "y_mask_chunk8", atol=1e-5, rtol=1e-2)
+    assert_allclose_with_stats(y_ref, y_tgt, "y_mask_chunk32", atol=1e-5, rtol=1e-2)
     assert_allclose_with_stats(
-        s_ref, s_tgt, "final_state_mask_chunk8", atol=1e-5, rtol=1e-3
+        s_ref, s_tgt, "final_state_mask_chunk32", atol=1e-5, rtol=1e-3
     )
 
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_triton_backward_masked_chunk8(
+def test_rwkv7_triton_backward_masked_chunk32(
     native_op, rwkv7_inputs, rwkv7_shape, device, rng
 ):
-    """验证 RWKV-7 Triton kernel 在 chunk_size=8 且带 mask 时反向梯度正确。"""
+    """验证 RWKV-7 Triton kernel 在 chunk_size=32 且带 mask 时反向梯度正确。"""
     B, T = rwkv7_inputs["r"].shape[:2]
     mask_np = np.ones((B, T), dtype=np.float32)
     freeze = rng.random((B, T)) < 0.3
@@ -301,18 +303,18 @@ def test_rwkv7_triton_backward_masked_chunk8(
         loss.backward()
         return {k: t[k].grad for k in t}
 
-    triton_op = _chunk8_triton_op(rwkv7_shape)
+    triton_op = _chunk32_triton_op(rwkv7_shape)
     ref = _make_inputs(rwkv7_inputs, device, "bfloat16")
     tgt = _make_inputs(rwkv7_inputs, device, "bfloat16")
 
-    g_ref = grads(native_op, ref, mask, chunk_size=8)
-    g_tgt = grads(triton_op, tgt, mask, chunk_size=8)
+    g_ref = grads(native_op, ref, mask, chunk_size=32)
+    g_tgt = grads(triton_op, tgt, mask, chunk_size=32)
 
     for name in ["r", "k", "v", "a", "b", "w", "h0"]:
         assert_allclose_with_stats(
             g_ref[name],
             g_tgt[name],
-            f"grad_{name}_mask_chunk8",
+            f"grad_{name}_mask_chunk32",
             atol=7e-3,
             rtol=7e-3,
         )

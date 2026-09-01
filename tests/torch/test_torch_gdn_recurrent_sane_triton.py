@@ -692,47 +692,6 @@ def test_gdn_sane_triton_mask_all_zeros_matches_original_gdn_chunk_size_8(
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_gdn_sane_triton_rejects_arbitrary_length_chunk_size_8(
-    gdn_sane_inputs, gdn_sane_cuda_device
-):
-    """chunk_size=8 时 recurrent SANE Triton 训练核只支持 T 被 chunk_size 整除。"""
-    q = _to_cuda_tensor(gdn_sane_inputs["q"][:, :37], gdn_sane_cuda_device)
-    k = _to_cuda_tensor(gdn_sane_inputs["k"][:, :37], gdn_sane_cuda_device)
-    v = _to_cuda_tensor(gdn_sane_inputs["v"][:, :37], gdn_sane_cuda_device)
-    g = _to_cuda_tensor(gdn_sane_inputs["g"][:, :37], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"][:, :37], gdn_sane_cuda_device)
-    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
-
-    B, _, H, _ = q.shape
-    tau8 = _to_cuda_tensor(
-        np.random.default_rng(42).standard_normal((B, 37 // 8, H), dtype=np.float32)
-        * 0.5
-        + 7.0,
-        gdn_sane_cuda_device,
-    )
-    mask8 = _to_cuda_tensor(
-        np.random.default_rng(42).integers(0, 2, (B, 37 // 8)).astype(np.float32),
-        gdn_sane_cuda_device,
-    )
-
-    op_tri = get_gated_delta_net_recurrent_sane(KERNEL_TYPE="triton", chunk_size=8)
-
-    with pytest.raises(ValueError, match="必须被 chunk_size"):
-        op_tri(
-            q,
-            k,
-            v,
-            g,
-            beta,
-            tau8,
-            mask=mask8,
-            initial_state=h0,
-            output_final_state=True,
-        )
-
-
-@pytest.mark.torch
-@pytest.mark.slow
 def test_gdn_sane_triton_bfloat16_chunk_size_8(gdn_sane_inputs, gdn_sane_cuda_device):
     """chunk_size=8 时 bfloat16 I/O 下 Triton 结果仍与 native float32 参考一致。"""
     pytest.importorskip("torch").bfloat16  # noqa: B015

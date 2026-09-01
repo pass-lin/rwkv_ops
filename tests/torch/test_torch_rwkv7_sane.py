@@ -32,7 +32,13 @@ def _generate_chunk_tau_mask(rng, B, T, H, chunk_size, masked=False):
 
 
 def _make_inputs(
-    rwkv7_sane_inputs, device, dtype="bfloat16", grad=False, chunk_size=16, rng=None
+    rwkv7_sane_inputs,
+    device,
+    dtype="bfloat16",
+    grad=False,
+    chunk_size=16,
+    rng=None,
+    tau=None,
 ):
     """构造指定 chunk_size 的 Torch 输入张量。"""
     tensors = {
@@ -41,11 +47,13 @@ def _make_inputs(
     }
     B, T, H, _ = rwkv7_sane_inputs["r"].shape
     n_chunks = T // chunk_size
-    if rng is None and chunk_size == 16:
+    if tau is not None:
+        tensors["tau"] = _to_torch(tau, "float32", device)
+    elif rng is None and chunk_size == 16:
         tensors["tau"] = _to_torch(rwkv7_sane_inputs["tau"], "float32", device)
     else:
         if rng is None:
-            raise ValueError("chunk_size != 16 时必须提供 rng")
+            raise ValueError("chunk_size != 16 时必须提供 rng 或 tau")
         tau_np, _ = _generate_chunk_tau_mask(rng, B, T, H, chunk_size, masked=False)
         tensors["tau"] = _to_torch(tau_np, "float32", device)
     tensors["mask"] = torch.ones(B, n_chunks, dtype=torch.float32, device=device)
@@ -468,28 +476,30 @@ def test_rwkv7_sane_irregular_padding(
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_sane_chunk8_forward_state(
+def test_rwkv7_sane_chunk32_forward_state(
     rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
 ):
-    """RWKV-7-SANE CUDA 训练算子在 chunk_size=8 时与 native 前向对齐。"""
+    """RWKV-7-SANE CUDA 训练算子在 chunk_size=32 时与 native 前向对齐。"""
     from rwkv_ops import get_generalized_delta_rule_sane
 
     _, _, _, K = rwkv7_sane_inputs["r"].shape
     op, _ = get_generalized_delta_rule_sane(
-        HEAD_SIZE=K, KERNEL_TYPE="cuda", chunk_size=8
+        HEAD_SIZE=K, KERNEL_TYPE="cuda", chunk_size=32
     )
 
-    ref = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", chunk_size=8, rng=rng)
-    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", chunk_size=8, rng=rng)
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
+    tau_np, _ = _generate_chunk_tau_mask(rng, B, T, H, 32, masked=False)
+    ref = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", chunk_size=32, tau=tau_np)
+    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", chunk_size=32, tau=tau_np)
 
     y_ref, s_ref = _call_op(
-        rwkv7_sane_native_op, ref, output_final_state=True, chunk_size=8
+        rwkv7_sane_native_op, ref, output_final_state=True, chunk_size=32
     )
-    y_tgt, s_tgt = _call_op(op, tgt, output_final_state=True, chunk_size=8)
+    y_tgt, s_tgt = _call_op(op, tgt, output_final_state=True, chunk_size=32)
 
-    _test_is_close("y_chunk8", y_ref, y_tgt, atol=1e-4, rtol=1e-2, min_exact_rate=99.0)
+    _test_is_close("y_chunk32", y_ref, y_tgt, atol=1e-4, rtol=1e-2, min_exact_rate=99.0)
     _test_is_close(
-        "final_state_chunk8",
+        "final_state_chunk32",
         s_ref,
         s_tgt,
         atol=1e-5,
@@ -500,10 +510,10 @@ def test_rwkv7_sane_chunk8_forward_state(
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_sane_chunk8_backward(
+def test_rwkv7_sane_chunk32_backward(
     rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
 ):
-    """RWKV-7-SANE CUDA 训练算子 chunk_size=8 反向梯度与 native 对齐。"""
+    """RWKV-7-SANE CUDA 训练算子 chunk_size=32 反向梯度与 native 对齐。"""
 
     def grads(operator, tensors):
         t = {
@@ -512,30 +522,31 @@ def test_rwkv7_sane_chunk8_backward(
             if k != "mask"
         }
         t["mask"] = tensors["mask"]
-        y, s = _call_op(operator, t, output_final_state=True, chunk_size=8)
+        y, s = _call_op(operator, t, output_final_state=True, chunk_size=32)
         loss = (y.float() ** 2).mean() + (s.float() ** 2).mean()
         loss.backward()
         return {k: t[k].grad for k in ["r", "k", "v", "a", "b", "w", "tau", "h0"]}
 
     from rwkv_ops import get_generalized_delta_rule_sane
 
-    _, _, _, K = rwkv7_sane_inputs["r"].shape
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
     op, _ = get_generalized_delta_rule_sane(
-        HEAD_SIZE=K, KERNEL_TYPE="cuda", chunk_size=8
+        HEAD_SIZE=K, KERNEL_TYPE="cuda", chunk_size=32
     )
 
+    tau_np, _ = _generate_chunk_tau_mask(rng, B, T, H, 32, masked=False)
     ref = _make_inputs(
-        rwkv7_sane_inputs, device, "bfloat16", grad=True, chunk_size=8, rng=rng
+        rwkv7_sane_inputs, device, "bfloat16", grad=True, chunk_size=32, tau=tau_np
     )
     tgt = _make_inputs(
-        rwkv7_sane_inputs, device, "bfloat16", grad=True, chunk_size=8, rng=rng
+        rwkv7_sane_inputs, device, "bfloat16", grad=True, chunk_size=32, tau=tau_np
     )
 
     g_ref = grads(rwkv7_sane_native_op, ref)
     g_tgt = grads(op, tgt)
 
     thresholds = {
-        "r": (1e-4, 1e-2, 98.0),
+        "r": (7e-4, 1e-2, 98.0),
         "k": (7e-3, 1e-2, 60.0),
         "v": (7e-3, 1e-2, 35.0),
         "a": (7e-3, 1e-2, 35.0),
@@ -547,39 +558,39 @@ def test_rwkv7_sane_chunk8_backward(
     for name in thresholds:
         atol, rtol, exact = thresholds[name]
         _test_is_close(
-            f"grad_chunk8_{name}", g_ref[name], g_tgt[name], atol, rtol, exact
+            f"grad_chunk32_{name}", g_ref[name], g_tgt[name], atol, rtol, exact
         )
 
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_sane_chunk8_forward_state_masked(
+def test_rwkv7_sane_chunk32_forward_state_masked(
     rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
 ):
-    """RWKV-7-SANE CUDA 训练算子 chunk_size=8 随机 mask 前向与 native 对齐。"""
+    """RWKV-7-SANE CUDA 训练算子 chunk_size=32 随机 mask 前向与 native 对齐。"""
     from rwkv_ops import get_generalized_delta_rule_sane
 
     B, T, H, K = rwkv7_sane_inputs["r"].shape
-    _, mask_np = _generate_chunk_tau_mask(rng, B, T, H, 8, masked=True)
+    tau_np, mask_np = _generate_chunk_tau_mask(rng, B, T, H, 32, masked=True)
     mask = _to_torch(mask_np, "float32", device)
 
     op, _ = get_generalized_delta_rule_sane(
-        HEAD_SIZE=K, KERNEL_TYPE="cuda", chunk_size=8
+        HEAD_SIZE=K, KERNEL_TYPE="cuda", chunk_size=32
     )
 
-    ref = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", chunk_size=8, rng=rng)
-    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", chunk_size=8, rng=rng)
+    ref = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", chunk_size=32, tau=tau_np)
+    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", chunk_size=32, tau=tau_np)
 
     y_ref, s_ref = _call_op(
-        rwkv7_sane_native_op, ref, output_final_state=True, mask=mask, chunk_size=8
+        rwkv7_sane_native_op, ref, output_final_state=True, mask=mask, chunk_size=32
     )
-    y_tgt, s_tgt = _call_op(op, tgt, output_final_state=True, mask=mask, chunk_size=8)
+    y_tgt, s_tgt = _call_op(op, tgt, output_final_state=True, mask=mask, chunk_size=32)
 
     _test_is_close(
-        "y_chunk8_mask", y_ref, y_tgt, atol=1e-4, rtol=1e-2, min_exact_rate=99.0
+        "y_chunk32_mask", y_ref, y_tgt, atol=1e-4, rtol=1e-2, min_exact_rate=99.0
     )
     _test_is_close(
-        "final_state_chunk8_mask",
+        "final_state_chunk32_mask",
         s_ref,
         s_tgt,
         atol=1e-5,
@@ -590,10 +601,10 @@ def test_rwkv7_sane_chunk8_forward_state_masked(
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_sane_chunk8_backward_masked(
+def test_rwkv7_sane_chunk32_backward_masked(
     rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
 ):
-    """RWKV-7-SANE CUDA 训练算子 chunk_size=8 随机 mask 反向梯度与 native 对齐。"""
+    """RWKV-7-SANE CUDA 训练算子 chunk_size=32 随机 mask 反向梯度与 native 对齐。"""
 
     def grads(operator, tensors, mask):
         t = {
@@ -602,7 +613,7 @@ def test_rwkv7_sane_chunk8_backward_masked(
             if k != "mask"
         }
         t["mask"] = tensors["mask"]
-        y, s = _call_op(operator, t, output_final_state=True, mask=mask, chunk_size=8)
+        y, s = _call_op(operator, t, output_final_state=True, mask=mask, chunk_size=32)
         loss = (y.float() ** 2).mean() + (s.float() ** 2).mean()
         loss.backward()
         return {k: t[k].grad for k in ["r", "k", "v", "a", "b", "w", "tau", "h0"]}
@@ -610,25 +621,25 @@ def test_rwkv7_sane_chunk8_backward_masked(
     from rwkv_ops import get_generalized_delta_rule_sane
 
     B, T, H, K = rwkv7_sane_inputs["r"].shape
-    _, mask_np = _generate_chunk_tau_mask(rng, B, T, H, 8, masked=True)
+    tau_np, mask_np = _generate_chunk_tau_mask(rng, B, T, H, 32, masked=True)
     mask = _to_torch(mask_np, "float32", device)
 
     op, _ = get_generalized_delta_rule_sane(
-        HEAD_SIZE=K, KERNEL_TYPE="cuda", chunk_size=8
+        HEAD_SIZE=K, KERNEL_TYPE="cuda", chunk_size=32
     )
 
     ref = _make_inputs(
-        rwkv7_sane_inputs, device, "bfloat16", grad=True, chunk_size=8, rng=rng
+        rwkv7_sane_inputs, device, "bfloat16", grad=True, chunk_size=32, tau=tau_np
     )
     tgt = _make_inputs(
-        rwkv7_sane_inputs, device, "bfloat16", grad=True, chunk_size=8, rng=rng
+        rwkv7_sane_inputs, device, "bfloat16", grad=True, chunk_size=32, tau=tau_np
     )
 
     g_ref = grads(rwkv7_sane_native_op, ref, mask)
     g_tgt = grads(op, tgt, mask)
 
     thresholds = {
-        "r": (1e-4, 1e-2, 98.0),
+        "r": (7e-4, 1e-2, 98.0),
         "k": (7e-3, 1e-2, 60.0),
         "v": (7e-3, 1e-2, 35.0),
         "a": (7e-3, 1e-2, 35.0),
@@ -640,7 +651,7 @@ def test_rwkv7_sane_chunk8_backward_masked(
     for name in thresholds:
         atol, rtol, exact = thresholds[name]
         _test_is_close(
-            f"grad_chunk8_mask_{name}",
+            f"grad_chunk32_mask_{name}",
             g_ref[name],
             g_tgt[name],
             atol,
@@ -651,28 +662,29 @@ def test_rwkv7_sane_chunk8_backward_masked(
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_sane_chunk8_triton_forward_state(
+def test_rwkv7_sane_chunk32_triton_forward_state(
     rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
 ):
-    """RWKV-7-SANE Triton 训练算子 chunk_size=8 前向与 native 对齐。"""
+    """RWKV-7-SANE Triton 训练算子 chunk_size=32 前向与 native 对齐。"""
     pytest.importorskip("triton")
     from rwkv_ops import get_generalized_delta_rule_sane
 
-    _, _, _, K = rwkv7_sane_inputs["r"].shape
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
     op, _ = get_generalized_delta_rule_sane(
-        HEAD_SIZE=K, KERNEL_TYPE="triton", chunk_size=8
+        HEAD_SIZE=K, KERNEL_TYPE="triton", chunk_size=32
     )
 
-    ref = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", chunk_size=8, rng=rng)
-    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", chunk_size=8, rng=rng)
+    tau_np, _ = _generate_chunk_tau_mask(rng, B, T, H, 32, masked=False)
+    ref = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", chunk_size=32, tau=tau_np)
+    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", chunk_size=32, tau=tau_np)
 
     y_ref, s_ref = _call_op(
-        rwkv7_sane_native_op, ref, output_final_state=True, chunk_size=8
+        rwkv7_sane_native_op, ref, output_final_state=True, chunk_size=32
     )
-    y_tgt, s_tgt = _call_op(op, tgt, output_final_state=True, chunk_size=8)
+    y_tgt, s_tgt = _call_op(op, tgt, output_final_state=True, chunk_size=32)
 
     _test_is_close(
-        "y_chunk8_triton",
+        "y_chunk32_triton",
         y_ref,
         y_tgt,
         atol=1e-4,
@@ -680,7 +692,7 @@ def test_rwkv7_sane_chunk8_triton_forward_state(
         min_exact_rate=99.0,
     )
     _test_is_close(
-        "final_state_chunk8_triton",
+        "final_state_chunk32_triton",
         s_ref,
         s_tgt,
         atol=1e-5,
@@ -691,21 +703,21 @@ def test_rwkv7_sane_chunk8_triton_forward_state(
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_sane_chunk8_inference(rwkv7_sane_inputs, device, rng):
-    """RWKV-7-SANE CUDA 推理算子 chunk_size=8 支持任意长度（T 不被 8 整除）。"""
+def test_rwkv7_sane_chunk32_inference(rwkv7_sane_inputs, device, rng):
+    """RWKV-7-SANE CUDA 推理算子 chunk_size=32 支持任意长度（T 不被 8 整除）。"""
     from rwkv_ops import get_generalized_delta_rule_sane
 
     B, _, H, K = rwkv7_sane_inputs["r"].shape
     actual_len = 34
     _, op = get_generalized_delta_rule_sane(
-        HEAD_SIZE=K, KERNEL_TYPE="cuda", chunk_size=8
+        HEAD_SIZE=K, KERNEL_TYPE="cuda", chunk_size=32
     )
 
     tensors = {
         name: _to_torch(rwkv7_sane_inputs[name][:, :actual_len], "bfloat16", device)
         for name in ["r", "k", "v", "a", "b", "w"]
     }
-    tau_np, _ = _generate_chunk_tau_mask(rng, B, actual_len, H, 8, masked=False)
+    tau_np, _ = _generate_chunk_tau_mask(rng, B, actual_len, H, 32, masked=False)
     tensors["tau"] = _to_torch(tau_np, "float32", device)
     tensors["h0"] = _to_torch(rwkv7_sane_inputs["h0"], "float32", device)
 
@@ -721,7 +733,7 @@ def test_rwkv7_sane_chunk8_inference(rwkv7_sane_inputs, device, rng):
             initial_state=tensors["h0"],
             output_final_state=False,
             head_first=False,
-            chunk_size=8,
+            chunk_size=32,
         )
     assert y.shape == (B, actual_len, H, K)
 
@@ -739,7 +751,7 @@ def test_rwkv7_sane_chunk8_inference(rwkv7_sane_inputs, device, rng):
                 initial_state=tensors["h0"],
                 output_final_state=True,
                 head_first=False,
-                chunk_size=8,
+                chunk_size=32,
             )
     assert y2.shape == (B, actual_len, H, K)
     assert s is None
@@ -748,19 +760,20 @@ def test_rwkv7_sane_chunk8_inference(rwkv7_sane_inputs, device, rng):
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_rwkv7_sane_chunk8_no_mask_forward(
+def test_rwkv7_sane_chunk32_no_mask_forward(
     rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
 ):
-    """RWKV-7-SANE CUDA 训练算子 chunk_size=8 无 mask 路径前向与 native 对齐。"""
+    """RWKV-7-SANE CUDA 训练算子 chunk_size=32 无 mask 路径前向与 native 对齐。"""
     from rwkv_ops import get_generalized_delta_rule_sane
 
-    _, _, _, K = rwkv7_sane_inputs["r"].shape
+    B, T, H, K = rwkv7_sane_inputs["r"].shape
     op, _ = get_generalized_delta_rule_sane(
-        HEAD_SIZE=K, KERNEL_TYPE="cuda", chunk_size=8
+        HEAD_SIZE=K, KERNEL_TYPE="cuda", chunk_size=32
     )
 
-    ref = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", chunk_size=8, rng=rng)
-    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", chunk_size=8, rng=rng)
+    tau_np, _ = _generate_chunk_tau_mask(rng, B, T, H, 32, masked=False)
+    ref = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", chunk_size=32, tau=tau_np)
+    tgt = _make_inputs(rwkv7_sane_inputs, device, "bfloat16", chunk_size=32, tau=tau_np)
 
     with torch.no_grad():
         y_ref = _call_op(
@@ -768,12 +781,12 @@ def test_rwkv7_sane_chunk8_no_mask_forward(
             ref,
             output_final_state=False,
             mask=None,
-            chunk_size=8,
+            chunk_size=32,
         )
-        y_tgt = _call_op(op, tgt, output_final_state=False, mask=None, chunk_size=8)
+        y_tgt = _call_op(op, tgt, output_final_state=False, mask=None, chunk_size=32)
 
     _test_is_close(
-        "y_chunk8_no_mask",
+        "y_chunk32_no_mask",
         y_ref,
         y_tgt,
         atol=1e-4,

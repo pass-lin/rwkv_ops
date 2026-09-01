@@ -408,15 +408,15 @@ def test_rwkv7_sane_pallas_head_sharding(rwkv7_sane_jax_pallas_op, rwkv7_sane_in
 @pytest.mark.jax
 @pytest.mark.slow
 @pytest.mark.parametrize("head_first", [False, True])
-def test_rwkv7_sane_pallas_forward_state_chunk8(
+def test_rwkv7_sane_pallas_forward_state_chunk32(
     rwkv7_sane_native_op, rwkv7_sane_inputs, rng, head_first
 ):
-    """对比 Pallas 与 native 在 chunk_size=8 时的前向输出和最终 state（带 mask）。"""
+    """对比 Pallas 与 native 在 chunk_size=32 时的前向输出和最终 state（带 mask）。"""
     _, _, _, K = rwkv7_sane_inputs["r"].shape
-    pallas_op = _get_pallas_sane_op(K, chunk_size=8)
+    pallas_op = _get_pallas_sane_op(K, chunk_size=32)
 
     r, k, v, a, b, w, tau, mask, h0 = _prepare_inputs(
-        rwkv7_sane_inputs, head_first, "bfloat16", rng, chunk_size=8
+        rwkv7_sane_inputs, head_first, "bfloat16", rng, chunk_size=32
     )
 
     y_ref, s_ref = rwkv7_sane_native_op(
@@ -431,7 +431,7 @@ def test_rwkv7_sane_pallas_forward_state_chunk8(
         initial_state=h0,
         output_final_state=True,
         head_first=head_first,
-        chunk_size=8,
+        chunk_size=32,
     )
     y_c, s_c = pallas_op(
         r=r,
@@ -448,25 +448,25 @@ def test_rwkv7_sane_pallas_forward_state_chunk8(
     )
 
     _test_is_close(
-        f"y_chunk8_head_first={head_first}", y_ref, y_c, atol=1e-4, rtol=1e-2
+        f"y_chunk32_head_first={head_first}", y_ref, y_c, atol=1e-4, rtol=1e-2
     )
     _test_is_close(
-        f"final_state_chunk8_head_first={head_first}", s_ref, s_c, atol=1e-5, rtol=1e-3
+        f"final_state_chunk32_head_first={head_first}", s_ref, s_c, atol=1e-5, rtol=1e-3
     )
 
 
 @pytest.mark.jax
 @pytest.mark.slow
 @pytest.mark.parametrize("head_first", [False, True])
-def test_rwkv7_sane_pallas_backward_chunk8(
+def test_rwkv7_sane_pallas_backward_chunk32(
     rwkv7_sane_native_op, rwkv7_sane_inputs, rng, head_first
 ):
-    """对比 Pallas 与 native 在 chunk_size=8 时的反向梯度（含 tau/mask）。"""
+    """对比 Pallas 与 native 在 chunk_size=32 时的反向梯度（含 tau/mask）。"""
     _, _, _, K = rwkv7_sane_inputs["r"].shape
-    pallas_op = _get_pallas_sane_op(K, chunk_size=8)
+    pallas_op = _get_pallas_sane_op(K, chunk_size=32)
 
     r, k, v, a, b, w, tau, mask, h0 = _prepare_inputs(
-        rwkv7_sane_inputs, head_first, "bfloat16", rng, chunk_size=8
+        rwkv7_sane_inputs, head_first, "bfloat16", rng, chunk_size=32
     )
 
     def loss(op, params):
@@ -483,7 +483,7 @@ def test_rwkv7_sane_pallas_backward_chunk8(
             initial_state=h0,
             output_final_state=True,
             head_first=head_first,
-            chunk_size=8,
+            chunk_size=32,
         )
         return jnp.mean(jnp.asarray(y, jnp.float32) ** 2) + jnp.mean(
             jnp.asarray(state, jnp.float32) ** 2
@@ -501,7 +501,7 @@ def test_rwkv7_sane_pallas_backward_chunk8(
         assert_allclose_with_stats(
             g_ref,
             g_c,
-            f"grad_chunk8_{name}_head_first={head_first}",
+            f"grad_chunk32_{name}_head_first={head_first}",
             atol=7e-3,
             rtol=1e-3,
         )
@@ -509,63 +509,60 @@ def test_rwkv7_sane_pallas_backward_chunk8(
 
 @pytest.mark.jax
 @pytest.mark.parametrize("head_first", [False, True])
-def test_rwkv7_sane_pallas_no_mask_forward_state_chunk8(
+def test_rwkv7_sane_pallas_no_mask_forward_state_chunk32(
     rwkv7_sane_native_op, rwkv7_sane_inputs, rng, head_first
 ):
-    """无 mask 路径在 chunk_size=8 时的前向输出与 native 对比。"""
+    """无 mask 路径在 chunk_size=32 时的前向输出与 native 对比。"""
     _, _, _, K = rwkv7_sane_inputs["r"].shape
-    pallas_op = _get_pallas_sane_op(K, chunk_size=8)
+    pallas_op = _get_pallas_sane_op(K, chunk_size=32)
 
-    r_ref, k_ref, v_ref, a_ref, b_ref, w_ref, tau_ref, _, h0_ref = _prepare_inputs(
-        rwkv7_sane_inputs, head_first, "bfloat16", rng, chunk_size=8
-    )
-    r_c, k_c, v_c, a_c, b_c, w_c, tau_c, _, h0_c = _prepare_inputs(
-        rwkv7_sane_inputs, head_first, "bfloat16", rng, chunk_size=8
+    r, k, v, a, b, w, tau, _, h0 = _prepare_inputs(
+        rwkv7_sane_inputs, head_first, "bfloat16", rng, chunk_size=32
     )
 
     y_ref = rwkv7_sane_native_op(
-        r=r_ref,
-        w=w_ref,
-        k=k_ref,
-        v=v_ref,
-        a=a_ref,
-        b=b_ref,
-        tau=tau_ref,
-        initial_state=h0_ref,
+        r=r,
+        w=w,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        tau=tau,
+        initial_state=h0,
         output_final_state=False,
         head_first=head_first,
-        chunk_size=8,
+        chunk_size=32,
     )
     y_c = pallas_op(
-        r=r_c,
-        w=w_c,
-        k=k_c,
-        v=v_c,
-        a=a_c,
-        b=b_c,
-        tau=tau_c,
-        initial_state=h0_c,
+        r=r,
+        w=w,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        tau=tau,
+        initial_state=h0,
         output_final_state=False,
         head_first=head_first,
     )
 
     _test_is_close(
-        f"y_no_mask_chunk8_head_first={head_first}", y_ref, y_c, atol=1e-4, rtol=1e-2
+        f"y_no_mask_chunk32_head_first={head_first}", y_ref, y_c, atol=1e-4, rtol=1e-2
     )
 
 
 @pytest.mark.jax
 @pytest.mark.slow
 @pytest.mark.parametrize("head_first", [False, True])
-def test_rwkv7_sane_pallas_no_mask_backward_chunk8(
+def test_rwkv7_sane_pallas_no_mask_backward_chunk32(
     rwkv7_sane_native_op, rwkv7_sane_inputs, rng, head_first
 ):
-    """无 mask 路径在 chunk_size=8 时的反向梯度与 native 对比。"""
+    """无 mask 路径在 chunk_size=32 时的反向梯度与 native 对比。"""
     _, _, _, K = rwkv7_sane_inputs["r"].shape
-    pallas_op = _get_pallas_sane_op(K, chunk_size=8)
+    pallas_op = _get_pallas_sane_op(K, chunk_size=32)
 
     r, k, v, a, b, w, tau, _, h0 = _prepare_inputs(
-        rwkv7_sane_inputs, head_first, "bfloat16", rng, chunk_size=8
+        rwkv7_sane_inputs, head_first, "bfloat16", rng, chunk_size=32
     )
 
     def loss(op, params):
@@ -581,7 +578,7 @@ def test_rwkv7_sane_pallas_no_mask_backward_chunk8(
             initial_state=h0,
             output_final_state=False,
             head_first=head_first,
-            chunk_size=8,
+            chunk_size=32,
         )
         return jnp.mean(jnp.asarray(y, jnp.float32) ** 2)
 
@@ -597,7 +594,7 @@ def test_rwkv7_sane_pallas_no_mask_backward_chunk8(
         assert_allclose_with_stats(
             g_ref,
             g_c,
-            f"grad_no_mask_chunk8_{name}_head_first={head_first}",
+            f"grad_no_mask_chunk32_{name}_head_first={head_first}",
             atol=7e-3,
             rtol=1e-3,
         )

@@ -188,8 +188,8 @@ def test_chunk_triton_bwd_vs_native(gdn_inputs, device):
 
 
 @pytest.mark.torch
-def test_chunk_triton_fwd_chunk_size_8(gdn_inputs, device):
-    """chunk_size=8 时 Triton chunkwise 前向与 native 参考实现对拍（bf16 I/O）。"""
+def test_chunk_triton_fwd_chunk_size_32(gdn_inputs, device):
+    """chunk_size=32 时 Triton chunkwise 前向与 native 参考实现对拍（bf16 I/O）。"""
     q, k, v = gdn_inputs["q"], gdn_inputs["k"], gdn_inputs["v"]
     g, beta, h0 = gdn_inputs["g"], gdn_inputs["beta"], gdn_inputs["h0"]
 
@@ -200,10 +200,10 @@ def test_chunk_triton_fwd_chunk_size_8(gdn_inputs, device):
     beta_t = torch.from_numpy(beta).to(device)
     h0_t = torch.from_numpy(h0).to(device)
 
-    native_chunk_8 = get_gated_delta_net_chunk(KERNEL_TYPE="native", chunk_size=8)
-    triton_chunk_8 = get_gated_delta_net_chunk(KERNEL_TYPE="triton", chunk_size=8)
+    native_chunk_32 = get_gated_delta_net_chunk(KERNEL_TYPE="native", chunk_size=32)
+    triton_chunk_32 = get_gated_delta_net_chunk(KERNEL_TYPE="triton", chunk_size=32)
 
-    out_native, state_native = native_chunk_8(
+    out_native, state_native = native_chunk_32(
         q_t,
         k_t,
         v_t,
@@ -212,7 +212,7 @@ def test_chunk_triton_fwd_chunk_size_8(gdn_inputs, device):
         initial_state=h0_t,
         output_final_state=True,
     )
-    out_triton, state_triton = triton_chunk_8(
+    out_triton, state_triton = triton_chunk_32(
         q_t,
         k_t,
         v_t,
@@ -225,22 +225,22 @@ def test_chunk_triton_fwd_chunk_size_8(gdn_inputs, device):
     assert_allclose_with_stats(
         out_native,
         out_triton,
-        "chunk_size=8 triton vs native output",
+        "chunk_size=32 triton vs native output",
         atol=1e-2,
         rtol=1e-2,
     )
     assert_allclose_with_stats(
         state_native,
         state_triton,
-        "chunk_size=8 triton vs native state",
+        "chunk_size=32 triton vs native state",
         atol=1e-2,
         rtol=1e-2,
     )
 
 
 @pytest.mark.torch
-def test_chunk_triton_no_final_state_chunk_size_8(gdn_inputs, device):
-    """chunk_size=8 且 output_final_state=False 时不返回 state（bf16 I/O）。"""
+def test_chunk_triton_no_final_state_chunk_size_32(gdn_inputs, device):
+    """chunk_size=32 且 output_final_state=False 时不返回 state（bf16 I/O）。"""
     q, k, v = gdn_inputs["q"], gdn_inputs["k"], gdn_inputs["v"]
     g, beta = gdn_inputs["g"], gdn_inputs["beta"]
 
@@ -250,10 +250,10 @@ def test_chunk_triton_no_final_state_chunk_size_8(gdn_inputs, device):
     g_t = torch.from_numpy(g).to(device)
     beta_t = torch.from_numpy(beta).to(device)
 
-    native_chunk_8 = get_gated_delta_net_chunk(KERNEL_TYPE="native", chunk_size=8)
-    triton_chunk_8 = get_gated_delta_net_chunk(KERNEL_TYPE="triton", chunk_size=8)
+    native_chunk_32 = get_gated_delta_net_chunk(KERNEL_TYPE="native", chunk_size=32)
+    triton_chunk_32 = get_gated_delta_net_chunk(KERNEL_TYPE="triton", chunk_size=32)
 
-    out_native, state_native = native_chunk_8(
+    out_native, state_native = native_chunk_32(
         q_t,
         k_t,
         v_t,
@@ -261,7 +261,7 @@ def test_chunk_triton_no_final_state_chunk_size_8(gdn_inputs, device):
         beta_t,
         output_final_state=False,
     )
-    out_triton, state_triton = triton_chunk_8(
+    out_triton, state_triton = triton_chunk_32(
         q_t,
         k_t,
         v_t,
@@ -275,7 +275,7 @@ def test_chunk_triton_no_final_state_chunk_size_8(gdn_inputs, device):
     assert_allclose_with_stats(
         out_native,
         out_triton,
-        "chunk_size=8 no-state chunk output",
+        "chunk_size=32 no-state chunk output",
         atol=1e-2,
         rtol=1e-2,
     )
@@ -283,8 +283,8 @@ def test_chunk_triton_no_final_state_chunk_size_8(gdn_inputs, device):
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_chunk_triton_bwd_chunk_size_8(gdn_inputs, device):
-    """chunk_size=8 时 Triton chunkwise 反向与 native Keras autograd 对拍。"""
+def test_chunk_triton_bwd_chunk_size_32(gdn_inputs, device):
+    """chunk_size=32 时 Triton chunkwise 反向与 native Keras autograd 对拍。"""
     q, k, v = gdn_inputs["q"], gdn_inputs["k"], gdn_inputs["v"]
     g, beta, h0 = gdn_inputs["g"], gdn_inputs["beta"], gdn_inputs["h0"]
 
@@ -316,11 +316,11 @@ def test_chunk_triton_bwd_chunk_size_8(gdn_inputs, device):
             h0_t.grad,
         )
 
-    native_chunk_8 = get_gated_delta_net_chunk(KERNEL_TYPE="native", chunk_size=8)
-    triton_chunk_8 = get_gated_delta_net_chunk(KERNEL_TYPE="triton", chunk_size=8)
+    native_chunk_32 = get_gated_delta_net_chunk(KERNEL_TYPE="native", chunk_size=32)
+    triton_chunk_32 = get_gated_delta_net_chunk(KERNEL_TYPE="triton", chunk_size=32)
 
-    grads_native = _run_and_grad(native_chunk_8)
-    grads_triton = _run_and_grad(triton_chunk_8)
+    grads_native = _run_and_grad(native_chunk_32)
+    grads_triton = _run_and_grad(triton_chunk_32)
 
     names = ["q", "k", "v", "g", "beta", "h0"]
     for name, ref, tgt in zip(names, grads_native, grads_triton):
@@ -329,7 +329,7 @@ def test_chunk_triton_bwd_chunk_size_8(gdn_inputs, device):
         assert_allclose_with_stats(
             ref,
             tgt,
-            f"chunk_size=8 bwd {name}",
+            f"chunk_size=32 bwd {name}",
             atol=1e-1,
             rtol=1e-1,
         )

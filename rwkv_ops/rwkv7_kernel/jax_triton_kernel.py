@@ -414,6 +414,8 @@ def generalized_delta_rule(
         raise ValueError(
             f"Triton kernel requires sequence length T={T} to be divisible by {chunk_size}"
         )
+    if chunk_size < 16:
+        raise ValueError(f"Triton kernel requires chunk_size >= 16, got {chunk_size}")
 
     # 准备初始状态
     if initial_state is None:

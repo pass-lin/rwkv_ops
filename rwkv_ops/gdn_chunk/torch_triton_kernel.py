@@ -79,6 +79,10 @@ class GatedDeltaNetChunkTritonFunction(torch.autograd.Function):
 
         if T % chunk_size != 0:
             raise ValueError(f"T={T} 必须被 chunk_size={chunk_size} 整除")
+        if chunk_size < 16:
+            raise ValueError(
+                f"Triton kernel requires chunk_size >= 16, got {chunk_size}"
+            )
 
         # 保存原始 q/k 供 L2 norm 反向使用。
         q_orig = q.clone()

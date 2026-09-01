@@ -507,6 +507,8 @@ def generalized_delta_rule_sane(
         raise ValueError(
             f"Triton SANE kernel requires sequence length T={T} to be divisible by {chunk_size}"
         )
+    if chunk_size < 16:
+        raise ValueError(f"Triton kernel requires chunk_size >= 16, got {chunk_size}")
 
     if tau.shape != (B, N, T // chunk_size):
         raise ValueError(

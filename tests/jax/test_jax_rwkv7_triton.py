@@ -210,11 +210,11 @@ def test_rwkv7_triton_backward(triton_op, native_op, rwkv7_inputs, head_first):
 @pytest.mark.jax
 @pytest.mark.slow
 @pytest.mark.parametrize("head_first", [False, True])
-def test_rwkv7_triton_forward_state_chunk_size_8(native_op, rwkv7_inputs, head_first):
-    """对比 Triton chunk_size=8 与 native 前向输出和最终 state。"""
+def test_rwkv7_triton_forward_state_chunk_size_32(native_op, rwkv7_inputs, head_first):
+    """对比 Triton chunk_size=32 与 native 前向输出和最终 state。"""
     r, k, v, a, b, w, h0 = _prepare_inputs(rwkv7_inputs, head_first, "bfloat16")
     K = int(r.shape[-1])
-    triton_op = _make_triton_op(K, chunk_size=8)
+    triton_op = _make_triton_op(K, chunk_size=32)
 
     y_ref, s_ref = native_op(
         r=r,
@@ -226,7 +226,7 @@ def test_rwkv7_triton_forward_state_chunk_size_8(native_op, rwkv7_inputs, head_f
         initial_state=h0,
         output_final_state=True,
         head_first=head_first,
-        chunk_size=8,
+        chunk_size=32,
     )
     y_c, s_c = triton_op(
         r=r,
@@ -241,21 +241,21 @@ def test_rwkv7_triton_forward_state_chunk_size_8(native_op, rwkv7_inputs, head_f
     )
 
     assert_allclose_with_stats(
-        y_ref, y_c, f"y_chunk8_head_first={head_first}", atol=1e-5, rtol=1e-2
+        y_ref, y_c, f"y_chunk32_head_first={head_first}", atol=1e-5, rtol=1e-2
     )
     assert_allclose_with_stats(
-        s_ref, s_c, f"final_state_chunk8_head_first={head_first}", atol=1e-5, rtol=1e-3
+        s_ref, s_c, f"final_state_chunk32_head_first={head_first}", atol=1e-5, rtol=1e-3
     )
 
 
 @pytest.mark.jax
 @pytest.mark.slow
 @pytest.mark.parametrize("head_first", [False, True])
-def test_rwkv7_triton_backward_chunk_size_8(native_op, rwkv7_inputs, head_first):
-    """Triton chunk_size=8 custom_vjp 反向梯度与 native Keras 实现对比。"""
+def test_rwkv7_triton_backward_chunk_size_32(native_op, rwkv7_inputs, head_first):
+    """Triton chunk_size=32 custom_vjp 反向梯度与 native Keras 实现对比。"""
     r, k, v, a, b, w, h0 = _prepare_inputs(rwkv7_inputs, head_first, "bfloat16")
     K = int(r.shape[-1])
-    triton_op = _make_triton_op(K, chunk_size=8)
+    triton_op = _make_triton_op(K, chunk_size=32)
 
     ref_grads = jax.grad(
         lambda *p: _loss_fn(native_op, p, head_first), argnums=range(7)
@@ -269,7 +269,7 @@ def test_rwkv7_triton_backward_chunk_size_8(native_op, rwkv7_inputs, head_first)
         assert_allclose_with_stats(
             g_ref,
             g_c,
-            f"grad_chunk8_{name}_head_first={head_first}",
+            f"grad_chunk32_{name}_head_first={head_first}",
             atol=7e-3,
             rtol=1e-3,
         )

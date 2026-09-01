@@ -407,12 +407,12 @@ def _get_sane_triton_op(K, chunk_size):
 @pytest.mark.jax
 @pytest.mark.slow
 @pytest.mark.parametrize("head_first", [False, True])
-def test_rwkv7_sane_triton_forward_state_chunk_size_8(
+def test_rwkv7_sane_triton_forward_state_chunk_size_32(
     rwkv7_sane_native_op, rwkv7_sane_inputs, rwkv7_shape, rng, head_first
 ):
-    """对比 Triton chunk_size=8 与 native 前向输出和最终 state（带 mask）。"""
+    """对比 Triton chunk_size=32 与 native 前向输出和最终 state（带 mask）。"""
     B, T, H, K = rwkv7_shape
-    chunk_size = 8
+    chunk_size = 32
     op = _get_sane_triton_op(K, chunk_size)
 
     r_ref, k_ref, v_ref, a_ref, b_ref, w_ref, _, _, h0_ref = _prepare_inputs(
@@ -458,10 +458,10 @@ def test_rwkv7_sane_triton_forward_state_chunk_size_8(
     )
 
     _test_is_close(
-        f"y_chunk_size_8_head_first={head_first}", y_ref, y_c, atol=1e-4, rtol=1e-2
+        f"y_chunk_size_32_head_first={head_first}", y_ref, y_c, atol=1e-4, rtol=1e-2
     )
     _test_is_close(
-        f"final_state_chunk_size_8_head_first={head_first}",
+        f"final_state_chunk_size_32_head_first={head_first}",
         s_ref,
         s_c,
         atol=1e-5,
@@ -472,12 +472,12 @@ def test_rwkv7_sane_triton_forward_state_chunk_size_8(
 @pytest.mark.jax
 @pytest.mark.slow
 @pytest.mark.parametrize("head_first", [False, True])
-def test_rwkv7_sane_triton_backward_chunk_size_8(
+def test_rwkv7_sane_triton_backward_chunk_size_32(
     rwkv7_sane_native_op, rwkv7_sane_inputs, rwkv7_shape, rng, head_first
 ):
-    """对比 Triton chunk_size=8 与 native 反向梯度（含 tau/mask）。"""
+    """对比 Triton chunk_size=32 与 native 反向梯度（含 tau/mask）。"""
     B, T, H, K = rwkv7_shape
-    chunk_size = 8
+    chunk_size = 32
     op = _get_sane_triton_op(K, chunk_size)
 
     r, k, v, a, b, w, _, _, h0 = _prepare_inputs(
@@ -520,7 +520,7 @@ def test_rwkv7_sane_triton_backward_chunk_size_8(
         assert_allclose_with_stats(
             g_ref,
             g_c,
-            f"grad_chunk_size_8_{name}_head_first={head_first}",
+            f"grad_chunk_size_32_{name}_head_first={head_first}",
             atol=7e-3,
             rtol=1e-3,
         )
@@ -529,12 +529,12 @@ def test_rwkv7_sane_triton_backward_chunk_size_8(
 @pytest.mark.jax
 @pytest.mark.slow
 @pytest.mark.parametrize("head_first", [False, True])
-def test_rwkv7_sane_triton_no_mask_forward_state_chunk_size_8(
+def test_rwkv7_sane_triton_no_mask_forward_state_chunk_size_32(
     rwkv7_sane_native_op, rwkv7_sane_inputs, rwkv7_shape, rng, head_first
 ):
-    """无 mask 路径 chunk_size=8 前向输出与 native 对比。"""
+    """无 mask 路径 chunk_size=32 前向输出与 native 对比。"""
     B, T, H, K = rwkv7_shape
-    chunk_size = 8
+    chunk_size = 32
     op = _get_sane_triton_op(K, chunk_size)
 
     r_ref, k_ref, v_ref, a_ref, b_ref, w_ref, _, _, h0_ref = _prepare_inputs(
@@ -576,7 +576,7 @@ def test_rwkv7_sane_triton_no_mask_forward_state_chunk_size_8(
     )
 
     _test_is_close(
-        f"y_no_mask_chunk_size_8_head_first={head_first}",
+        f"y_no_mask_chunk_size_32_head_first={head_first}",
         y_ref,
         y_c,
         atol=1e-4,
@@ -587,12 +587,12 @@ def test_rwkv7_sane_triton_no_mask_forward_state_chunk_size_8(
 @pytest.mark.jax
 @pytest.mark.slow
 @pytest.mark.parametrize("head_first", [False, True])
-def test_rwkv7_sane_triton_no_mask_backward_chunk_size_8(
+def test_rwkv7_sane_triton_no_mask_backward_chunk_size_32(
     rwkv7_sane_native_op, rwkv7_sane_inputs, rwkv7_shape, rng, head_first
 ):
-    """无 mask 路径 chunk_size=8 反向梯度与 native 对比。"""
+    """无 mask 路径 chunk_size=32 反向梯度与 native 对比。"""
     B, T, H, K = rwkv7_shape
-    chunk_size = 8
+    chunk_size = 32
     op = _get_sane_triton_op(K, chunk_size)
 
     r, k, v, a, b, w, _, _, h0 = _prepare_inputs(
@@ -631,7 +631,7 @@ def test_rwkv7_sane_triton_no_mask_backward_chunk_size_8(
         assert_allclose_with_stats(
             g_ref,
             g_c,
-            f"grad_no_mask_chunk_size_8_{name}_head_first={head_first}",
+            f"grad_no_mask_chunk_size_32_{name}_head_first={head_first}",
             atol=7e-3,
             rtol=1e-3,
         )

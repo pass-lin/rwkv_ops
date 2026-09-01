@@ -185,8 +185,8 @@ def test_chunk_triton_bwd_vs_native(
 
 
 @pytest.mark.jax
-def test_chunk_triton_fwd_vs_native_chunk_size_8(gdn_inputs):
-    """JAX-Triton chunkwise 前向在 chunk_size=8 下与 native 参考实现对拍。"""
+def test_chunk_triton_fwd_vs_native_chunk_size_32(gdn_inputs):
+    """JAX-Triton chunkwise 前向在 chunk_size=32 下与 native 参考实现对拍。"""
     pytest.importorskip("triton")
     from rwkv_ops import get_gated_delta_net_chunk
 
@@ -200,8 +200,8 @@ def test_chunk_triton_fwd_vs_native_chunk_size_8(gdn_inputs):
     beta_j = jnp.asarray(beta)
     h0_j = jnp.asarray(h0)
 
-    native_op = get_gated_delta_net_chunk(KERNEL_TYPE="native", chunk_size=8)
-    triton_op = get_gated_delta_net_chunk(KERNEL_TYPE="triton", chunk_size=8)
+    native_op = get_gated_delta_net_chunk(KERNEL_TYPE="native", chunk_size=32)
+    triton_op = get_gated_delta_net_chunk(KERNEL_TYPE="triton", chunk_size=32)
 
     out_native, state_native = native_op(
         q_j,
@@ -225,22 +225,22 @@ def test_chunk_triton_fwd_vs_native_chunk_size_8(gdn_inputs):
     assert_allclose_with_stats(
         out_native,
         out_triton,
-        "chunk_size=8 triton vs native output",
+        "chunk_size=32 triton vs native output",
         atol=1e-2,
         rtol=1e-2,
     )
     assert_allclose_with_stats(
         state_native,
         state_triton,
-        "chunk_size=8 triton vs native state",
+        "chunk_size=32 triton vs native state",
         atol=1e-2,
         rtol=1e-2,
     )
 
 
 @pytest.mark.jax
-def test_chunk_triton_no_final_state_chunk_size_8(gdn_inputs):
-    """output_final_state=False 且 chunk_size=8 时不返回 state。"""
+def test_chunk_triton_no_final_state_chunk_size_32(gdn_inputs):
+    """output_final_state=False 且 chunk_size=32 时不返回 state。"""
     pytest.importorskip("triton")
     from rwkv_ops import get_gated_delta_net_chunk
 
@@ -253,8 +253,8 @@ def test_chunk_triton_no_final_state_chunk_size_8(gdn_inputs):
     g_j = jnp.asarray(g)
     beta_j = jnp.asarray(beta)
 
-    native_op = get_gated_delta_net_chunk(KERNEL_TYPE="native", chunk_size=8)
-    triton_op = get_gated_delta_net_chunk(KERNEL_TYPE="triton", chunk_size=8)
+    native_op = get_gated_delta_net_chunk(KERNEL_TYPE="native", chunk_size=32)
+    triton_op = get_gated_delta_net_chunk(KERNEL_TYPE="triton", chunk_size=32)
 
     out_native, state_native = native_op(
         q_j, k_j, v_j, g_j, beta_j, output_final_state=False
@@ -268,7 +268,7 @@ def test_chunk_triton_no_final_state_chunk_size_8(gdn_inputs):
     assert_allclose_with_stats(
         out_native,
         out_triton,
-        "chunk_size=8 no-state chunk output",
+        "chunk_size=32 no-state chunk output",
         atol=1e-2,
         rtol=1e-2,
     )
@@ -276,8 +276,8 @@ def test_chunk_triton_no_final_state_chunk_size_8(gdn_inputs):
 
 @pytest.mark.jax
 @pytest.mark.slow
-def test_chunk_triton_bwd_vs_native_chunk_size_8(gdn_inputs):
-    """JAX-Triton chunkwise 反向在 chunk_size=8 下与 native Keras autograd 对拍。"""
+def test_chunk_triton_bwd_vs_native_chunk_size_32(gdn_inputs):
+    """JAX-Triton chunkwise 反向在 chunk_size=32 下与 native Keras autograd 对拍。"""
     pytest.importorskip("triton")
     from rwkv_ops import get_gated_delta_net_chunk
 
@@ -309,8 +309,8 @@ def test_chunk_triton_bwd_vs_native_chunk_size_8(gdn_inputs):
         )
         return grads
 
-    native_op = get_gated_delta_net_chunk(KERNEL_TYPE="native", chunk_size=8)
-    triton_op = get_gated_delta_net_chunk(KERNEL_TYPE="triton", chunk_size=8)
+    native_op = get_gated_delta_net_chunk(KERNEL_TYPE="native", chunk_size=32)
+    triton_op = get_gated_delta_net_chunk(KERNEL_TYPE="triton", chunk_size=32)
 
     grads_native = _run_and_grad(native_op)
     grads_triton = _run_and_grad(triton_op)
@@ -322,7 +322,7 @@ def test_chunk_triton_bwd_vs_native_chunk_size_8(gdn_inputs):
         assert_allclose_with_stats(
             ref,
             tgt,
-            f"chunk_size=8 bwd {name}",
+            f"chunk_size=32 bwd {name}",
             atol=7e-3,
             rtol=1e-3,
         )

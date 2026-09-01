@@ -53,6 +53,10 @@ def _make_sane_triton_op_with_mask(chunk_size: int):
                 raise ValueError(
                     f"Sequence length T={T} must be divisible by {chunk_size}"
                 )
+            if chunk_size < 16:
+                raise ValueError(
+                    f"Triton kernel requires chunk_size >= 16, got {chunk_size}"
+                )
             if H != 64:
                 raise ValueError(
                     f"Triton SANE kernel currently only supports Head Size = 64, got {H}"
@@ -172,6 +176,10 @@ def _make_sane_triton_op_no_mask(chunk_size: int):
             if T % chunk_size != 0:
                 raise ValueError(
                     f"Sequence length T={T} must be divisible by {chunk_size}"
+                )
+            if chunk_size < 16:
+                raise ValueError(
+                    f"Triton kernel requires chunk_size >= 16, got {chunk_size}"
                 )
             if H != 64:
                 raise ValueError(

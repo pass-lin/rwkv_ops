@@ -761,6 +761,8 @@ def gated_delta_net_chunk(
     B, H, T, K = q.shape
     if T % chunk_size != 0:
         raise ValueError(f"T={T} 必须被 chunk_size={chunk_size} 整除")
+    if chunk_size < 16:
+        raise ValueError(f"Triton kernel requires chunk_size >= 16, got {chunk_size}")
 
     if initial_state is None:
         h0 = jnp.zeros((B, H, K, v.shape[-1]), dtype=jnp.float32)

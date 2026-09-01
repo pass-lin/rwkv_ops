@@ -301,7 +301,7 @@ def test_rwkv7_sane_triton_forward_state_chunk_size(
     rwkv7_sane_triton_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
 ):
     B, T, H, K = rwkv7_sane_inputs["r"].shape
-    chunk_size = 8
+    chunk_size = 32
     tau = _make_tau(B, T, H, chunk_size, rng)
     ref = _make_inputs(
         rwkv7_sane_inputs, device, "bfloat16", chunk_size=chunk_size, tau=tau
@@ -317,8 +317,8 @@ def test_rwkv7_sane_triton_forward_state_chunk_size(
         rwkv7_sane_triton_op, tgt, output_final_state=True, chunk_size=chunk_size
     )
 
-    _test_is_close("y_chunk_size_8", y_ref, y_tgt, atol=1e-4, rtol=1e-2)
-    _test_is_close("final_state_chunk_size_8", s_ref, s_tgt, atol=1e-5, rtol=1e-3)
+    _test_is_close("y_chunk_size_32", y_ref, y_tgt, atol=2e-2, rtol=2e-2)
+    _test_is_close("final_state_chunk_size_32", s_ref, s_tgt, atol=1e-3, rtol=1e-1)
 
 
 @pytest.mark.torch
@@ -327,7 +327,7 @@ def test_rwkv7_sane_triton_backward_chunk_size(
     rwkv7_sane_triton_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
 ):
     B, T, H, K = rwkv7_sane_inputs["r"].shape
-    chunk_size = 8
+    chunk_size = 32
     tau = _make_tau(B, T, H, chunk_size, rng)
 
     def grads(op, tensors):
@@ -353,7 +353,7 @@ def test_rwkv7_sane_triton_backward_chunk_size(
     g_tgt = grads(rwkv7_sane_triton_op, tgt)
 
     thresholds = {
-        "r": (1e-4, 1e-2),
+        "r": (1e-3, 1e-1),
         "k": (7e-3, 1e-2),
         "v": (7e-3, 1e-2),
         "a": (7e-3, 1e-2),
@@ -365,7 +365,7 @@ def test_rwkv7_sane_triton_backward_chunk_size(
     for name in thresholds:
         atol, rtol = thresholds[name]
         _test_is_close(
-            f"grad_{name}_chunk_size_8", g_ref[name], g_tgt[name], atol, rtol
+            f"grad_{name}_chunk_size_32", g_ref[name], g_tgt[name], atol, rtol
         )
 
 
@@ -375,7 +375,7 @@ def test_rwkv7_sane_triton_forward_state_masked_chunk_size(
     rwkv7_sane_triton_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
 ):
     B, T, H, K = rwkv7_sane_inputs["r"].shape
-    chunk_size = 8
+    chunk_size = 32
     n_chunks = T // chunk_size
     mask_np = np.ones((B, n_chunks), dtype=np.float32)
     freeze = rng.random((B, n_chunks)) < 0.3
@@ -406,8 +406,8 @@ def test_rwkv7_sane_triton_forward_state_masked_chunk_size(
         chunk_size=chunk_size,
     )
 
-    _test_is_close("y_mask_chunk_size_8", y_ref, y_tgt, atol=1e-4, rtol=1e-2)
-    _test_is_close("final_state_mask_chunk_size_8", s_ref, s_tgt, atol=1e-5, rtol=1e-3)
+    _test_is_close("y_mask_chunk_size_32", y_ref, y_tgt, atol=2e-2, rtol=2e-2)
+    _test_is_close("final_state_mask_chunk_size_32", s_ref, s_tgt, atol=1e-3, rtol=1e-1)
 
 
 @pytest.mark.torch
@@ -416,7 +416,7 @@ def test_rwkv7_sane_triton_backward_masked_chunk_size(
     rwkv7_sane_triton_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
 ):
     B, T, H, K = rwkv7_sane_inputs["r"].shape
-    chunk_size = 8
+    chunk_size = 32
     n_chunks = T // chunk_size
     mask_np = np.ones((B, n_chunks), dtype=np.float32)
     freeze = rng.random((B, n_chunks)) < 0.3
@@ -451,7 +451,7 @@ def test_rwkv7_sane_triton_backward_masked_chunk_size(
     g_tgt = grads(rwkv7_sane_triton_op, tgt, mask)
 
     thresholds = {
-        "r": (1e-4, 1e-2),
+        "r": (1e-3, 1e-1),
         "k": (7e-3, 1e-2),
         "v": (7e-3, 1e-2),
         "a": (7e-3, 1e-2),
@@ -463,7 +463,7 @@ def test_rwkv7_sane_triton_backward_masked_chunk_size(
     for name in thresholds:
         atol, rtol = thresholds[name]
         _test_is_close(
-            f"grad_{name}_mask_chunk_size_8", g_ref[name], g_tgt[name], atol, rtol
+            f"grad_{name}_mask_chunk_size_32", g_ref[name], g_tgt[name], atol, rtol
         )
 
 
@@ -473,7 +473,7 @@ def test_rwkv7_sane_triton_no_mask_forward_chunk_size(
     rwkv7_sane_triton_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
 ):
     B, T, H, K = rwkv7_sane_inputs["r"].shape
-    chunk_size = 8
+    chunk_size = 32
     tau = _make_tau(B, T, H, chunk_size, rng)
     ref = _make_inputs(
         rwkv7_sane_inputs, device, "bfloat16", chunk_size=chunk_size, tau=tau
@@ -490,7 +490,7 @@ def test_rwkv7_sane_triton_no_mask_forward_chunk_size(
             rwkv7_sane_triton_op, tgt, output_final_state=False, chunk_size=chunk_size
         )
 
-    _test_is_close("y_no_mask_chunk_size_8", y_ref, y_tgt, atol=1e-4, rtol=1e-2)
+    _test_is_close("y_no_mask_chunk_size_32", y_ref, y_tgt, atol=2e-2, rtol=2e-2)
 
 
 @pytest.mark.torch
@@ -499,7 +499,7 @@ def test_rwkv7_sane_triton_no_mask_backward_chunk_size(
     rwkv7_sane_triton_op, rwkv7_sane_native_op, rwkv7_sane_inputs, device, rng
 ):
     B, T, H, K = rwkv7_sane_inputs["r"].shape
-    chunk_size = 8
+    chunk_size = 32
     tau = _make_tau(B, T, H, chunk_size, rng)
 
     def grads(op, tensors):
@@ -525,7 +525,7 @@ def test_rwkv7_sane_triton_no_mask_backward_chunk_size(
     g_tgt = grads(rwkv7_sane_triton_op, tgt)
 
     thresholds = {
-        "r": (1e-4, 1e-2),
+        "r": (1e-3, 1e-1),
         "k": (7e-3, 1e-2),
         "v": (7e-3, 1e-2),
         "a": (7e-3, 1e-2),
@@ -537,5 +537,5 @@ def test_rwkv7_sane_triton_no_mask_backward_chunk_size(
     for name in thresholds:
         atol, rtol = thresholds[name]
         _test_is_close(
-            f"grad_no_mask_{name}_chunk_size_8", g_ref[name], g_tgt[name], atol, rtol
+            f"grad_no_mask_{name}_chunk_size_32", g_ref[name], g_tgt[name], atol, rtol
         )

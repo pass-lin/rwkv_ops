@@ -52,8 +52,8 @@ def _prepare_inputs(rwkv7_inputs, head_first, dtype="bfloat16"):
     return r, k, v, a, b, w, h0
 
 
-def _get_rwkv7_pallas_op_chunk_size_8(rwkv7_shape):
-    """构造 chunk_size=8 的 RWKV-7 JAX Pallas 训练算子。
+def _get_rwkv7_pallas_op_chunk_size_32(rwkv7_shape):
+    """构造 chunk_size=32 的 RWKV-7 JAX Pallas 训练算子。
 
     非 GPU/TPU 环境下会 pytest.skip。
 
@@ -61,7 +61,7 @@ def _get_rwkv7_pallas_op_chunk_size_8(rwkv7_shape):
         rwkv7_shape: tuple, (B, T, H, K)。
 
     Returns:
-        Callable: chunk_size=8 的 RWKV-7 Pallas 训练 kernel。
+        Callable: chunk_size=32 的 RWKV-7 Pallas 训练 kernel。
     """
     pytest.importorskip("jax.experimental.pallas")
     import jax
@@ -71,7 +71,7 @@ def _get_rwkv7_pallas_op_chunk_size_8(rwkv7_shape):
     from rwkv_ops import get_generalized_delta_rule
 
     _, _, _, K = rwkv7_shape
-    op, _ = get_generalized_delta_rule(HEAD_SIZE=K, KERNEL_TYPE="pallas", chunk_size=8)
+    op, _ = get_generalized_delta_rule(HEAD_SIZE=K, KERNEL_TYPE="pallas", chunk_size=32)
     return op
 
 
@@ -241,11 +241,11 @@ def test_rwkv7_pallas_mask_forward_backward(
 @pytest.mark.jax
 @pytest.mark.slow
 @pytest.mark.parametrize("head_first", [False, True])
-def test_rwkv7_pallas_forward_state_chunk_size_8(
+def test_rwkv7_pallas_forward_state_chunk_size_32(
     rwkv7_native_op, rwkv7_inputs, rwkv7_shape, head_first
 ):
-    """对比 chunk_size=8 时 Pallas 与 native 前向输出和最终 state。"""
-    pallas_op = _get_rwkv7_pallas_op_chunk_size_8(rwkv7_shape)
+    """对比 chunk_size=32 时 Pallas 与 native 前向输出和最终 state。"""
+    pallas_op = _get_rwkv7_pallas_op_chunk_size_32(rwkv7_shape)
     r, k, v, a, b, w, h0 = _prepare_inputs(rwkv7_inputs, head_first, "bfloat16")
 
     y_ref, s_ref = rwkv7_native_op(
@@ -258,7 +258,7 @@ def test_rwkv7_pallas_forward_state_chunk_size_8(
         initial_state=h0,
         output_final_state=True,
         head_first=head_first,
-        chunk_size=8,
+        chunk_size=32,
     )
     y_c, s_c = pallas_op(
         r=r,
@@ -270,16 +270,16 @@ def test_rwkv7_pallas_forward_state_chunk_size_8(
         initial_state=h0,
         output_final_state=True,
         head_first=head_first,
-        chunk_size=8,
+        chunk_size=32,
     )
 
     assert_allclose_with_stats(
-        y_ref, y_c, f"y_chunk_size=8_head_first={head_first}", atol=1e-5, rtol=1e-2
+        y_ref, y_c, f"y_chunk_size=32_head_first={head_first}", atol=1e-5, rtol=1e-2
     )
     assert_allclose_with_stats(
         s_ref,
         s_c,
-        f"final_state_chunk_size=8_head_first={head_first}",
+        f"final_state_chunk_size=32_head_first={head_first}",
         atol=1e-5,
         rtol=1e-3,
     )
@@ -288,11 +288,11 @@ def test_rwkv7_pallas_forward_state_chunk_size_8(
 @pytest.mark.jax
 @pytest.mark.slow
 @pytest.mark.parametrize("head_first", [False, True])
-def test_rwkv7_pallas_backward_chunk_size_8(
+def test_rwkv7_pallas_backward_chunk_size_32(
     rwkv7_native_op, rwkv7_inputs, rwkv7_shape, head_first
 ):
-    """chunk_size=8 时 Pallas custom_vjp 反向梯度与 native Keras 实现对比。"""
-    pallas_op = _get_rwkv7_pallas_op_chunk_size_8(rwkv7_shape)
+    """chunk_size=32 时 Pallas custom_vjp 反向梯度与 native Keras 实现对比。"""
+    pallas_op = _get_rwkv7_pallas_op_chunk_size_32(rwkv7_shape)
     r, k, v, a, b, w, h0 = _prepare_inputs(rwkv7_inputs, head_first, "bfloat16")
 
     def loss(op, params):
@@ -307,7 +307,7 @@ def test_rwkv7_pallas_backward_chunk_size_8(
             initial_state=h0,
             output_final_state=True,
             head_first=head_first,
-            chunk_size=8,
+            chunk_size=32,
         )
         return jnp.mean(jnp.asarray(y, jnp.float32) ** 2) + jnp.mean(
             jnp.asarray(state, jnp.float32) ** 2
@@ -325,7 +325,7 @@ def test_rwkv7_pallas_backward_chunk_size_8(
         assert_allclose_with_stats(
             g_ref,
             g_c,
-            f"grad_chunk_size=8_{name}_head_first={head_first}",
+            f"grad_chunk_size=32_{name}_head_first={head_first}",
             atol=7e-3,
             rtol=1e-3,
         )
@@ -334,11 +334,11 @@ def test_rwkv7_pallas_backward_chunk_size_8(
 @pytest.mark.jax
 @pytest.mark.slow
 @pytest.mark.parametrize("head_first", [False, True])
-def test_rwkv7_pallas_mask_forward_backward_chunk_size_8(
+def test_rwkv7_pallas_mask_forward_backward_chunk_size_32(
     rwkv7_native_op, rwkv7_inputs, rwkv7_shape, head_first
 ):
-    """chunk_size=8 时带 mask 路径的前向与反向对比（后半序列 padding）。"""
-    pallas_op = _get_rwkv7_pallas_op_chunk_size_8(rwkv7_shape)
+    """chunk_size=32 时带 mask 路径的前向与反向对比（后半序列 padding）。"""
+    pallas_op = _get_rwkv7_pallas_op_chunk_size_32(rwkv7_shape)
     r, k, v, a, b, w, h0 = _prepare_inputs(rwkv7_inputs, head_first, "bfloat16")
     B, T = rwkv7_inputs["r"].shape[0], rwkv7_inputs["r"].shape[1]
     mask = np.ones((B, T), dtype=np.float32)
@@ -358,7 +358,7 @@ def test_rwkv7_pallas_mask_forward_backward_chunk_size_8(
             output_final_state=True,
             head_first=head_first,
             mask=mask,
-            chunk_size=8,
+            chunk_size=32,
         )
         return jnp.mean(jnp.asarray(y, jnp.float32) ** 2) + jnp.mean(
             jnp.asarray(state, jnp.float32) ** 2
@@ -376,7 +376,7 @@ def test_rwkv7_pallas_mask_forward_backward_chunk_size_8(
         output_final_state=True,
         head_first=head_first,
         mask=mask,
-        chunk_size=8,
+        chunk_size=32,
     )
     y_c, s_c = pallas_op(
         r=r,
@@ -389,19 +389,19 @@ def test_rwkv7_pallas_mask_forward_backward_chunk_size_8(
         output_final_state=True,
         head_first=head_first,
         mask=mask,
-        chunk_size=8,
+        chunk_size=32,
     )
     assert_allclose_with_stats(
         y_ref,
         y_c,
-        f"y_mask_chunk_size=8_head_first={head_first}",
+        f"y_mask_chunk_size=32_head_first={head_first}",
         atol=1e-5,
         rtol=1e-2,
     )
     assert_allclose_with_stats(
         s_ref,
         s_c,
-        f"final_state_mask_chunk_size=8_head_first={head_first}",
+        f"final_state_mask_chunk_size=32_head_first={head_first}",
         atol=1e-5,
         rtol=1e-3,
     )
@@ -414,7 +414,7 @@ def test_rwkv7_pallas_mask_forward_backward_chunk_size_8(
         assert_allclose_with_stats(
             g_ref,
             g_c,
-            f"grad_mask_chunk_size=8_{name}_head_first={head_first}",
+            f"grad_mask_chunk_size=32_{name}_head_first={head_first}",
             atol=7e-3,
             rtol=1e-3,
         )
