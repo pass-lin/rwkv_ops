@@ -25,6 +25,9 @@ _CLEAN_PATTERNS = [
     # Gated DeltaNet recurrent JAX FFI
     "rwkv_ops/gdn_recurrent/jax_cuda_kernel/build_*",
     "rwkv_ops/gdn_recurrent/jax_cuda_kernel/*.so",
+    # Gated DeltaNet recurrent SANE JAX FFI
+    "rwkv_ops/gdn_recurrent_sane/jax_cuda_kernel/build_*",
+    "rwkv_ops/gdn_recurrent_sane/jax_cuda_kernel/*.so",
     # 根目录 ninja 日志
     ".ninja_log",
     ".ninja_deps",

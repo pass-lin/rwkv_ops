@@ -649,8 +649,8 @@ Same interface as `gated_delta_net_recurrent_sane`, but **does not compute gradi
 
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
-| PyTorch     | ❌   | ✅     | ✅     |
-| JAX         | ❌   | ✅     | ✅¹    |
+| PyTorch     | ✅   | ✅     | ✅     |
+| JAX         | ✅   | ✅     | ✅¹    |
 | TensorFlow  | ❌   | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 | OpenVINO    | ❌   | ❌     | ✅     |
@@ -658,7 +658,8 @@ Same interface as `gated_delta_net_recurrent_sane`, but **does not compute gradi
 > ¹ With the JAX backend, `native` on GPU/TPU uses the Pallas implementation (`jax_pallas_kernel.py`); `triton` is the JAX-Triton implementation when `KERNEL_TYPE="triton"` is set explicitly; elsewhere it falls back to pure Keras ops.
 
 1. The training entry point supports back-propagation (including `tau` gradients); the inference and single-step entry points **do not support gradients**.
-2. When `mask=None`, unconditional SANE is still performed, but `output_final_state=True` emits a `UserWarning` and sets `final_state=None` to avoid using a state potentially contaminated by padding.
+2. With the `cuda` backend, `chunk_size` is a compile-time constant and the kernel is lazily compiled per `(K, V, chunk_size)` on first use; different `chunk_size` values may be passed at call time (each compiles once). On the JAX side, `cuda` is an FFI implementation (`jax_cuda_kernel/`) covering the same training (with backward), inference, and single-step entry points.
+3. When `mask=None`, unconditional SANE is still performed, but `output_final_state=True` emits a `UserWarning` and sets `final_state=None` to avoid using a state potentially contaminated by padding.
 
 <a id="usage-of-gdn_chunk"></a>
 ## Usage of `gdn_chunk`
@@ -781,8 +782,8 @@ over batch)** and **TP (tensor parallel over heads)**:
 | rwkv7 cuda / triton / pallas | ✅ | ✅ |
 | rwkv7_sane cuda / triton / pallas | ✅ | ✅ |
 | rwkv7 / rwkv7_sane single-step cuda | ✅ | ✅ |
-| gdn_recurrent triton / pallas | ✅ | ✅ |
-| gdn_recurrent_sane triton / pallas | ✅ | ✅ |
+| gdn_recurrent cuda / triton / pallas | ✅ | ✅ |
+| gdn_recurrent_sane cuda / triton / pallas | ✅ | ✅ |
 | gdn_chunk triton | ✅ | ✅ |
 | gdn_chunk_sane triton | ✅ | ✅ |
 | rwkv6 cuda | ✅ | ❌ |

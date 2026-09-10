@@ -630,8 +630,8 @@ out, state = gated_delta_net_recurrent_sane_single_step(
 
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
-| PyTorch     | ❌   | ✅     | ✅     |
-| JAX         | ❌   | ✅     | ✅¹    |
+| PyTorch     | ✅   | ✅     | ✅     |
+| JAX         | ✅   | ✅     | ✅¹    |
 | TensorFlow  | ❌   | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 | OpenVINO    | ❌   | ❌     | ✅     |
@@ -639,7 +639,8 @@ out, state = gated_delta_net_recurrent_sane_single_step(
 > ¹ JAX 后端的 `native` 在 GPU/TPU 上为 Pallas 实现（`jax_pallas_kernel.py`），`triton` 显式 `KERNEL_TYPE="triton"` 时为 JAX-Triton 实现；其余为纯 Keras ops。
 
 1. 训练入口支持反向传播（含 `tau` 梯度）；推理与单步入口**没有梯度**。
-2. `mask=None` 时仍执行无条件 SANE，但 `output_final_state=True` 会发出 `UserWarning` 并将 `final_state` 置为 `None`，避免 padding 污染被误用。
+2. `cuda` 后端的 `chunk_size` 作为编译期常量按 `(K, V, chunk_size)` 在首次调用时懒编译，调用时可传入不同 `chunk_size`（各自编译一次）；JAX 侧 `cuda` 为 FFI 实现（`jax_cuda_kernel/`），同样覆盖训练（含反向）/推理/单步三个入口。
+3. `mask=None` 时仍执行无条件 SANE，但 `output_final_state=True` 会发出 `UserWarning` 并将 `final_state` 置为 `None`，避免 padding 污染被误用。
 
 <a id="gdn_chunk-使用方法"></a>
 ## gdn_chunk 使用方法
@@ -759,8 +760,8 @@ JAX 侧所有加速算子都通过 `custom_partitioning` + einsum 风格 `shardi
 | rwkv7 cuda / triton / pallas | ✅ | ✅ |
 | rwkv7_sane cuda / triton / pallas | ✅ | ✅ |
 | rwkv7 / rwkv7_sane 单步 cuda | ✅ | ✅ |
-| gdn_recurrent triton / pallas | ✅ | ✅ |
-| gdn_recurrent_sane triton / pallas | ✅ | ✅ |
+| gdn_recurrent cuda / triton / pallas | ✅ | ✅ |
+| gdn_recurrent_sane cuda / triton / pallas | ✅ | ✅ |
 | gdn_chunk triton | ✅ | ✅ |
 | gdn_chunk_sane triton | ✅ | ✅ |
 | rwkv6 cuda | ✅ | ❌ |

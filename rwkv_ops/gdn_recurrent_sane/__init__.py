@@ -24,7 +24,7 @@ def get_gated_delta_net_recurrent_sane(KERNEL_TYPE="native", chunk_size: int = 1
 
     Args:
         KERNEL_TYPE: str，"native" / "pallas" / "cuda" / "triton"。
-            "cuda" 在 torch CUDA 后端提供加速实现；
+            "cuda" 在 torch/jax CUDA 后端提供加速实现；
             torch 后端 "native"/"triton" 走 Triton；jax 后端 "native"/"pallas" 在
             GPU/TPU 上走 Pallas；缺硬件静默回退 native。
         chunk_size: int，chunk 长度，默认 16。
@@ -53,6 +53,15 @@ def get_gated_delta_net_recurrent_sane(KERNEL_TYPE="native", chunk_size: int = 1
     elif keras.config.backend() == "jax":
         from ..pallas_utils import _use_jax_pallas
 
+        if KERNEL_TYPE == "cuda":
+            import jax
+
+            if jax.devices()[0].platform == "gpu":
+                from .jax_cuda_kernel.gdn_recurrent_sane_jax import (
+                    gated_delta_net_recurrent_sane as cuda_op,
+                )
+
+                return functools.partial(cuda_op, chunk_size=chunk_size)
         if KERNEL_TYPE == "triton" and _use_jax_triton(KERNEL_TYPE):
             from .jax_triton_kernel import (
                 gated_delta_net_recurrent_sane as triton_op,
@@ -74,7 +83,7 @@ def get_gated_delta_net_recurrent_sane_inference(
 
     Args:
         KERNEL_TYPE: str，"native" / "pallas" / "cuda" / "triton"。
-            "cuda" 在 torch CUDA 后端提供加速实现；
+            "cuda" 在 torch/jax CUDA 后端提供加速实现；
             torch 后端 "native"/"triton" 走 Triton；jax 后端 "native"/"pallas" 在
             GPU/TPU 上走 Pallas；缺硬件静默回退 native。
         chunk_size: int，chunk 长度，默认 16。
@@ -103,6 +112,15 @@ def get_gated_delta_net_recurrent_sane_inference(
     elif keras.config.backend() == "jax":
         from ..pallas_utils import _use_jax_pallas
 
+        if KERNEL_TYPE == "cuda":
+            import jax
+
+            if jax.devices()[0].platform == "gpu":
+                from .jax_cuda_kernel.gdn_recurrent_sane_jax import (
+                    gated_delta_net_recurrent_sane_inference as cuda_op,
+                )
+
+                return functools.partial(cuda_op, chunk_size=chunk_size)
         if KERNEL_TYPE == "triton" and _use_jax_triton(KERNEL_TYPE):
             from .jax_triton_kernel import (
                 gated_delta_net_recurrent_sane_inference as triton_op,
@@ -128,7 +146,7 @@ def get_gated_delta_net_recurrent_sane_single_step(
 
     Args:
         KERNEL_TYPE: str，"native" / "pallas" / "cuda" / "triton"。
-            "cuda" 在 torch CUDA 后端提供加速实现；
+            "cuda" 在 torch/jax CUDA 后端提供加速实现；
             torch 后端 "native"/"triton" 走 Triton；jax 后端 "native"/"pallas" 在
             GPU/TPU 上走 Pallas；缺硬件静默回退 native。
         chunk_size: int，chunk 长度，默认 16。单步实现忽略该参数。
@@ -157,6 +175,15 @@ def get_gated_delta_net_recurrent_sane_single_step(
     elif keras.config.backend() == "jax":
         from ..pallas_utils import _use_jax_pallas
 
+        if KERNEL_TYPE == "cuda":
+            import jax
+
+            if jax.devices()[0].platform == "gpu":
+                from .jax_cuda_kernel.gdn_recurrent_sane_jax import (
+                    gated_delta_net_recurrent_sane_single_step as cuda_op,
+                )
+
+                return functools.partial(cuda_op, chunk_size=chunk_size)
         if KERNEL_TYPE == "triton" and _use_jax_triton(KERNEL_TYPE):
             from .jax_triton_kernel import (
                 gated_delta_net_recurrent_sane_single_step as triton_op,
