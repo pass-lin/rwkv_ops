@@ -526,7 +526,7 @@ out, state = gated_delta_net_recurrent_single_step(
 
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
-| PyTorch     | ❌   | ✅     | ✅     |
+| PyTorch     | ✅   | ✅     | ✅     |
 | JAX         | ❌   | ✅     | ✅¹    |
 | TensorFlow  | ❌   | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
@@ -535,7 +535,8 @@ out, state = gated_delta_net_recurrent_single_step(
 > ¹ JAX 后端的 `native` 在 GPU/TPU 上为 Pallas 实现（`jax_pallas_kernel.py`），`triton` 显式 `KERNEL_TYPE="triton"` 时为 JAX-Triton 实现；其余为纯 Keras ops。
 
 1. 训练入口支持反向传播；推理与单步入口**没有梯度**。
-2. chunkwise 版本位于 `gdn_chunk/`，见下节。
+2. PyTorch `cuda` 后端的 `chunk_size` 作为编译期常量按 `(K, V, chunk_size)` 在首次调用时懒编译，调用时可传入不同 `chunk_size`（各自编译一次）。
+3. chunkwise 版本位于 `gdn_chunk/`，见下节。
 
 <a id="gdn_recurrent_sane-使用方法"></a>
 ## gdn_recurrent_sane 使用方法

@@ -99,7 +99,10 @@ MANIFEST.in                  # 源码分发清单
 - **CUDA 后端**：`chunk_size` 是编译期常量（`-D_CHUNK_LEN_`），必须通过工厂函数指定；返回的算子仍带 `chunk_size` 参数，但传入与编译值不同的 `chunk_size` 会报错。不同 `chunk_size` 会各自编译一次，互不影响。涉及算子：`generalized_delta_rule`、`generalized_delta_rule_sane`、`gated_delta_net_chunk`、`gated_delta_net_chunk_sane`、`gated_delta_net_recurrent_sane`。
 - **Triton / Pallas / native 后端**：`chunk_size` 在每次调用时作为 `tl.constexpr` 或直接参数传入，无需工厂指定，可在调用时修改。
 
-`gated_delta_net_recurrent`（无 SANE）接受 `chunk_size` 但忽略，仅保持签名一致。
+`gated_delta_net_recurrent`（无 SANE）的 native/Triton 实现接受 `chunk_size` 但忽略，
+仅保持签名一致；其 PyTorch CUDA 实现把 `chunk_size` 作为编译期常量按
+`(K, V, chunk_size)` 在首次调用时懒编译，调用时传入不同值会各自编译一次，
+不经过工厂指定也不做一致性校验。
 
 ### 2.2 各算子的后端支持矩阵
 
@@ -190,13 +193,16 @@ MANIFEST.in                  # 源码分发清单
 
 | Framework | cuda | triton | native |
 |-----------|------|--------|--------|
-| PyTorch   | ❌   | ✅     | ✅     |
+| PyTorch   | ✅   | ✅     | ✅     |
 | JAX       | ❌   | ✅     | ✅³    |
 | TensorFlow| ❌   | ❌     | ✅     |
 | NumPy     | ❌   | ❌     | ✅     |
 | OpenVINO  | ❌   | ❌     | ✅     |
 
-> PyTorch 侧 `gdn_recurrent` 已提供 Triton 前向 kernel（训练/推理/单步 RNN 三个入口）；
+> PyTorch 侧 `gdn_recurrent` 已提供 Triton 前向 kernel（训练/推理/单步 RNN 三个入口）
+> 与 CUDA kernel（训练含反向、推理、单步 RNN 三个入口，`torch_cuda_kernel/`）；
+> CUDA 版 `chunk_size` 作为编译期常量按 `(K, V, chunk_size)` 在首次调用时懒编译，
+> 调用时传入不同 `chunk_size` 会各自编译一次（不做工厂值校验）；
 > JAX 侧 `triton` 显式 `KERNEL_TYPE="triton"` 时启用 JAX-Triton 前向 kernel，
 > `native` 在 GPU/TPU 上为 Pallas 实现（`jax_pallas_kernel.py`），并覆盖训练/推理/单步
 > RNN 三个入口。
@@ -273,8 +279,8 @@ rwkv7_kernel/
 
 `gdn_chunk/` 与 `gdn_recurrent/` 采用同样的目录约定，但拆成两个家族：
 chunkwise 版本专门放分块并行实现（训练 / 推理），recurrent 版本放逐步
-参考实现与单步 decode 实现。Phase 1 两者都只有 `native_keras_op.py`，后续
-加速内核按 `KERNEL_TYPE` 在 `gdn_chunk/` 下扩展。
+参考实现与单步 decode 实现。加速内核按 `KERNEL_TYPE` 在各自家族目录下扩展
+（如 `gdn_recurrent/torch_cuda_kernel/`）。
 
 ### 3.2 原生实现的地位
 
@@ -549,8 +555,9 @@ y_t = sum_K(state_t * q_t)
   求 `(I - lower_triangular(k_beta k^T * decay))^{-1}`，最后按 recurrent 方式
   跨 chunk 传递 state。数值上必须与 `gated_delta_net_reference` 逐位一致。
 - 当前 Phase 1 `gdn_chunk/` 仅提供纯 Keras native 实现；`gdn_recurrent/`
-  在 PyTorch CUDA 后端已提供 Triton 前向 kernel，包含训练、推理、单步 RNN
-  三个入口（`gated_delta_net_recurrent` / `..._inference` / `..._single_step`），
+  在 PyTorch CUDA 后端已提供 Triton 前向 kernel 与 CUDA kernel，均包含训练、
+  推理、单步 RNN 三个入口（`gated_delta_net_recurrent` / `..._inference` /
+  `..._single_step`；CUDA 版位于 `torch_cuda_kernel/`，训练入口含反向），
   其余后端/框架仍回退 native。后续 cuda / triton / pallas 加速内核会按同样
   的目录约定扩展。
 
@@ -655,7 +662,7 @@ pytest tests/jax -v -m "not slow"
     final_state atol=1e-5 / rtol=1e-3；反向 grad atol=7e-3 / rtol=1e-3
     （grad_b 放宽到 1e-2）。
   - GDN native：recurrent / chunkwise / reference 互相对齐，atol=1e-5 / rtol=1e-3；
-    Triton 前向与 native 对齐，atol=1e-4 / rtol=1e-3；bf16 放宽到 1e-2 / 1e-2。
+    Triton/CUDA 前向与 native 对齐，atol=1e-4 / rtol=1e-3；bf16 放宽到 1e-2 / 1e-2。
   - RWKV-6 / mHC：一律 1e-2 / 1e-2。
 - mHC 测试同时包含速度和显存基准。
 
@@ -1491,6 +1498,7 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
 | `rwkv_ops/gdn_recurrent/native_keras_op.py` | GDN recurrent 原生参考实现 |
 | `rwkv_ops/gdn_recurrent/triton_kernel.py` | GDN recurrent 共享 Triton 内核 |
 | `rwkv_ops/gdn_recurrent/torch_triton_kernel.py` | GDN recurrent PyTorch Triton 桥接 |
+| `rwkv_ops/gdn_recurrent/torch_cuda_kernel/` | GDN recurrent PyTorch C++/CUDA 扩展（训练含反向 / 推理 / 单步） |
 | `rwkv_ops/rwkv6_kernel/ops_rwkv_kernel.py` | RWKV-6 数值 ground truth |
 | `rwkv_ops/rwkv6_kernel/native_keras_op.py` | RWKV-6 函数式原生封装 |
 | `rwkv_ops/mhc_kernel/native_op.py` | mHC 原生参考实现 |
