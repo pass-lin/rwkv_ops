@@ -218,6 +218,51 @@ def gdn_sane_inputs(rng, gdn_inputs):
 
 
 @pytest.fixture(scope="session")
+def delta_net_shape():
+    """DeltaNet 测试默认形状。
+
+    Returns:
+        tuple: (B, T, H, K, V) = (2, 128, 4, 64, 128)。
+    """
+    return 2, 128, 4, 64, 128
+
+
+@pytest.fixture(scope="session")
+def delta_net_inputs(rng, delta_net_shape):
+    """DeltaNet 测试输入张量。
+
+    q/k 不做 L2 norm，由算子内部处理。beta 取 sigmoid，使其落在 (0,1)。
+
+    Args:
+        rng: np.random.Generator，随机数生成器。
+        delta_net_shape: tuple, (B, T, H, K, V)。
+
+    Returns:
+        dict: 包含 q/k/v/beta/h0，均为 float32 numpy 数组。
+            q/k: [B, T, H, K]。
+            v: [B, T, H, V]。
+            beta: [B, T, H]。
+            h0: [B, H, K, V]。
+    """
+    B, T, H, K, V = delta_net_shape
+    q = rng.standard_normal((B, T, H, K), dtype=np.float32)
+    k = rng.standard_normal((B, T, H, K), dtype=np.float32)
+    v = rng.standard_normal((B, T, H, V), dtype=np.float32)
+
+    beta_raw = rng.standard_normal((B, T, H), dtype=np.float32)
+    beta = (1.0 / (1.0 + np.exp(-beta_raw))).astype(np.float32)
+
+    h0 = rng.standard_normal((B, H, K, V), dtype=np.float32) * 0.1
+    return {
+        "q": q,
+        "k": k,
+        "v": v,
+        "beta": beta,
+        "h0": h0,
+    }
+
+
+@pytest.fixture(scope="session")
 def mhc_shape():
     """mHC 测试默认形状。
 

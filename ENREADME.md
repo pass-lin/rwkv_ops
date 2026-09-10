@@ -56,6 +56,16 @@
   - [API Reference](#api-reference-4)
     - [`gated_delta_net_chunk_sane`](#gated_delta_net_chunk_sane)
   - [Implementation Status of `gdn_chunk_sane`](#implementation-status-of-gdn_chunk_sane)
+- [Usage of `delta_net_recurrent`](#usage-of-delta_net_recurrent)
+  - [API Reference](#api-reference-5)
+    - [`delta_net_recurrent`](#delta_net_recurrent)
+    - [`delta_net_recurrent_inference`](#delta_net_recurrent_inference)
+    - [`delta_net_recurrent_single_step`](#delta_net_recurrent_single_step)
+  - [Implementation Status of `delta_net_recurrent`](#implementation-status-of-delta_net_recurrent)
+- [Usage of `delta_net_chunk`](#usage-of-delta_net_chunk)
+  - [API Reference](#api-reference-6)
+    - [`delta_net_chunk`](#delta_net_chunk)
+  - [Implementation Status of `delta_net_chunk`](#implementation-status-of-delta_net_chunk)
 - [Usage of `rwkv6op`](#usage-of-rwkv6op)
 - [Factory functions and custom parameters](#factory-functions-and-custom-parameters)
 - [Distributed Parallelism (JAX)](#distributed-parallelism)
@@ -769,6 +779,148 @@ out, final_state = gated_delta_net_chunk_sane(
 
 ---
 
+<a id="usage-of-delta_net_recurrent"></a>
+## Usage of `delta_net_recurrent`
+
+`delta_net_recurrent` provides a step-by-step recurrent implementation of the **ungated DeltaNet** (delta rule), with training, inference, and single-step RNN entry points. Its only difference from Gated DeltaNet is the absence of the decay gate `g` (decay is always 1); all other conventions (`q`/`k` L2-normalized inside the operator, output scaled by `1/sqrt(K)`, `beta` must have passed through sigmoid externally) are identical. The input layout is fixed to `[B, T, H, K/V]`.
+
+```python
+from rwkv_ops import (
+    delta_net_recurrent,
+    delta_net_recurrent_inference,
+    delta_net_recurrent_single_step,
+)
+
+# Training / prefill (gradients available)
+out, final_state = delta_net_recurrent(
+    q, k, v, beta,
+    initial_state=h0,
+    output_final_state=True,
+)
+
+# Inference only (no gradients, lower memory)
+out, final_state = delta_net_recurrent_inference(
+    q, k, v, beta,
+    initial_state=h0,
+    output_final_state=True,
+)
+
+# Single-step RNN (decode)
+out, state = delta_net_recurrent_single_step(
+    q, k, v, beta,
+    initial_state=state,
+    output_final_state=True,
+)
+```
+
+<a id="api-reference-5"></a>
+### API Reference
+
+<a id="delta_net_recurrent"></a>
+#### `delta_net_recurrent`
+
+| Argument | Shape | Description |
+|---|---|---|
+| q, k | (B, T, H, K) | Query and key; L2-normalized inside the operator |
+| v | (B, T, H, V) | Value |
+| beta | (B, T, H) | Write strength; must have already passed through sigmoid, i.e. in (0, 1) |
+| initial_state | (B, H, K, V) or (1, H, K, V), float32, optional | Initial recurrent state |
+| output_final_state | bool | Whether to return the final state |
+| chunk_size | int | Chunk length, default 16; ignored by the pure recurrent implementation (signature consistency only) |
+
+| Return | Shape | Description |
+|---|---|---|
+| out | (B, T, H, V) | Same dtype as `v` |
+| final_state | (B, H, K, V) or None | Final state, float32 |
+
+<a id="delta_net_recurrent_inference"></a>
+#### `delta_net_recurrent_inference`
+
+Same interface as `delta_net_recurrent`, but **does not compute gradients** and therefore avoids storing reverse-only intermediates.
+
+<a id="delta_net_recurrent_single_step"></a>
+#### `delta_net_recurrent_single_step`
+
+| Argument | Shape | Description |
+|---|---|---|
+| q, k | (B, H, K) | Single-step query and key |
+| v | (B, H, V) | Single-step value |
+| beta | (B, H) | Single-step write strength, already sigmoid-ed |
+| initial_state | (B, H, K, V) or (1, H, K, V), float32, optional | Current state |
+| output_final_state | bool | Whether to return the next state |
+| chunk_size | int | Chunk length, default 16; ignored by the single-step implementation (signature consistency only) |
+
+| Return | Shape | Description |
+|---|---|---|
+| out | (B, H, V) | Same dtype as `v` |
+| next_state | (B, H, K, V) or None | Next state, float32 |
+
+<a id="implementation-status-of-delta_net_recurrent"></a>
+### Implementation Status of `delta_net_recurrent`
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ❌   | ❌     | ✅     |
+| JAX         | ❌   | ❌     | ✅     |
+| TensorFlow  | ❌   | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
+
+1. Currently only the pure Keras ops native implementation is provided, available on all five backends; Triton/CUDA/Pallas accelerated kernels will come in later phases.
+2. The training entry point supports back-propagation; the inference and single-step entry points **do not support gradients**.
+3. The chunkwise counterpart lives in `delta_net_chunk/`, see below.
+
+<a id="usage-of-delta_net_chunk"></a>
+## Usage of `delta_net_chunk`
+
+`delta_net_chunk` provides a **chunkwise parallel** training implementation of the ungated DeltaNet. Its difference from `gdn_chunk` is the absence of the decay gate `g`: the intra-chunk decay matrix degenerates to a lower-triangular all-ones matrix, and the cross-chunk state is carried over without decay. The input layout is fixed to `[B, T, H, K/V]`.
+
+```python
+from rwkv_ops import delta_net_chunk
+
+out, final_state = delta_net_chunk(
+    q, k, v, beta,
+    initial_state=h0,
+    output_final_state=True,
+    chunk_size=16,
+)
+```
+
+<a id="api-reference-6"></a>
+### API Reference
+
+<a id="delta_net_chunk"></a>
+#### `delta_net_chunk`
+
+| Argument | Shape | Description |
+|---|---|---|
+| q, k | (B, T, H, K) | Query and key; L2-normalized inside the operator |
+| v | (B, T, H, V) | Value |
+| beta | (B, T, H) | Write strength; must have already passed through sigmoid, i.e. in (0, 1) |
+| initial_state | (B, H, K, V) or (1, H, K, V), float32, optional | Initial recurrent state |
+| output_final_state | bool | Whether to return the final state |
+| chunk_size | int | Chunk length, default 16; the sequence is padded internally to a multiple of chunk_size |
+
+| Return | Shape | Description |
+|---|---|---|
+| out | (B, T, H, V) | Same dtype as `v` |
+| final_state | (B, H, K, V) or None | Final state, float32 |
+
+<a id="implementation-status-of-delta_net_chunk"></a>
+### Implementation Status of `delta_net_chunk`
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ❌   | ❌     | ✅     |
+| JAX         | ❌   | ❌     | ✅     |
+| TensorFlow  | ❌   | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
+
+> Currently only the pure Keras ops native implementation is provided, available on all five backends, and the training entry point supports back-propagation; a Triton accelerated kernel will come in later phases.
+
+---
+
 <a id="distributed-parallelism"></a>
 ## Distributed Parallelism (JAX)
 
@@ -921,6 +1073,8 @@ from rwkv_ops import (
     get_gated_delta_net_chunk_sane,       # GDN chunkwise SANE
     get_gated_delta_net_recurrent,        # GDN recurrent (non-SANE)
     get_gated_delta_net_recurrent_sane,   # GDN recurrent SANE
+    get_delta_net_chunk,                  # DeltaNet chunkwise
+    get_delta_net_recurrent,              # DeltaNet recurrent
 )
 
 # RWKV-7 CUDA: HEAD_SIZE and chunk_size are compile-time constants and must be set in the factory
@@ -948,6 +1102,12 @@ gdn_recurrent = get_gated_delta_net_recurrent(KERNEL_TYPE="triton", chunk_size=3
 gdn_recurrent_sane = get_gated_delta_net_recurrent_sane(
     KERNEL_TYPE="triton", chunk_size=32
 )
+
+# DeltaNet chunkwise (currently native only; chunk_size can be passed at call time)
+dn_chunk = get_delta_net_chunk(KERNEL_TYPE="native", chunk_size=32)
+
+# DeltaNet recurrent (currently native only; chunk_size is ignored, kept only for signature consistency)
+dn_recurrent = get_delta_net_recurrent(KERNEL_TYPE="native", chunk_size=32)
 ```
 
 **Notes:**

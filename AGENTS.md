@@ -51,8 +51,10 @@ MANIFEST.in                  # 源码分发清单
 | `gated_delta_net_recurrent_sane` / `gated_delta_net_recurrent_sane_inference` / `gated_delta_net_recurrent_sane_single_step` | Gated DeltaNet recurrent SANE 算子 |
 | `gated_delta_net_chunk` | Gated DeltaNet chunkwise 算子 |
 | `gated_delta_net_chunk_sane` | Gated DeltaNet chunkwise SANE 算子 |
+| `delta_net_recurrent` / `delta_net_recurrent_inference` / `delta_net_recurrent_single_step` | DeltaNet recurrent 算子（训练/推理/单步） |
+| `delta_net_chunk` | DeltaNet chunkwise 算子 |
 | `mhc_pre_op` / `mhc_post_op` | mHC 预处理/后处理算子 |
-| `get_generalized_delta_rule` 等 10 个工厂函数 | 按 head_size / KERNEL_TYPE / chunk_size 获取算子 |
+| `get_generalized_delta_rule` 等 14 个工厂函数 | 按 head_size / KERNEL_TYPE / chunk_size 获取算子 |
 
 ---
 
@@ -233,6 +235,28 @@ MANIFEST.in                  # 源码分发清单
 > RNN 三个入口；其余环境回退 native Keras ops。
 > `mask=None` 时仍执行无条件 SANE，但 `output_final_state=True` 会发出 `UserWarning` 并将
 > `final_state` 置为 `None`（与 `rwkv7_sane` 语义一致）。
+
+#### DeltaNet recurrent `delta_net_recurrent` / `delta_net_recurrent_inference` / `delta_net_recurrent_single_step`
+
+| Framework | cuda | triton | native |
+|-----------|------|--------|--------|
+| PyTorch   | ❌   | ❌     | ✅     |
+| JAX       | ❌   | ❌     | ✅     |
+| TensorFlow| ❌   | ❌     | ✅     |
+| NumPy     | ❌   | ❌     | ✅     |
+| OpenVINO  | ❌   | ❌     | ✅     |
+
+#### DeltaNet chunkwise `delta_net_chunk`
+
+| Framework | cuda | triton | native |
+|-----------|------|--------|--------|
+| PyTorch   | ❌   | ❌     | ✅     |
+| JAX       | ❌   | ❌     | ✅     |
+| TensorFlow| ❌   | ❌     | ✅     |
+| NumPy     | ❌   | ❌     | ✅     |
+| OpenVINO  | ❌   | ❌     | ✅     |
+
+> Triton/CUDA/Pallas 加速内核在后续阶段提供（见 §14）。
 
 ### 2.3 分布式分片（jax）
 
@@ -670,6 +694,9 @@ pytest tests/jax -v -m "not slow"
     （grad_b 放宽到 1e-2）。
   - GDN native：recurrent / chunkwise / reference 互相对齐，atol=1e-5 / rtol=1e-3；
     Triton/CUDA 前向与 native 对齐，atol=1e-4 / rtol=1e-3；bf16 放宽到 1e-2 / 1e-2。
+  - DeltaNet native：互拍沿用 GDN 惯例——chunk 参与的对比输入 cast bf16
+    （beta/state 保持 f32），atol=1e-2 / rtol=1e-3；recurrent vs reference /
+    single_step / inference 对比保持 fp32，atol=1e-5 / rtol=1e-3。
   - RWKV-6 / mHC：一律 1e-2 / 1e-2。
 - mHC 测试同时包含速度和显存基准。
 
@@ -1509,6 +1536,8 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
 | `rwkv_ops/gdn_recurrent/jax_cuda_kernel/` | GDN recurrent JAX FFI CUDA（训练含反向 / 推理 / 单步，按 (K,V,chunk) 懒编译） |
 | `rwkv_ops/gdn_recurrent_sane/torch_cuda_kernel/` | GDN recurrent SANE PyTorch C++/CUDA 扩展（训练含反向含 dtau / 推理 / 单步） |
 | `rwkv_ops/gdn_recurrent_sane/jax_cuda_kernel/` | GDN recurrent SANE JAX FFI CUDA（训练含反向 / 推理 / 单步，按 (K,V,chunk) 懒编译） |
+| `rwkv_ops/delta_net_chunk/native_keras_op.py` | DeltaNet chunkwise 原生参考实现 |
+| `rwkv_ops/delta_net_recurrent/native_keras_op.py` | DeltaNet recurrent 原生参考实现 |
 | `rwkv_ops/rwkv6_kernel/ops_rwkv_kernel.py` | RWKV-6 数值 ground truth |
 | `rwkv_ops/rwkv6_kernel/native_keras_op.py` | RWKV-6 函数式原生封装 |
 | `rwkv_ops/mhc_kernel/native_op.py` | mHC 原生参考实现 |
@@ -1558,7 +1587,7 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| 1 | native 实现（chunk + recurrent 两家族）。重点是测试：`delta_net_chunk` / `delta_net_recurrent` / `delta_net_reference` 三方互拍对齐作为后续加速内核的基准，另做 g≡0 交叉验证（同输入喂 `gated_delta_net_*` 传 `g=zeros` 应一致）。测试覆盖全部五个后端 | 进行中 |
+| 1 | native 实现（chunk + recurrent 两家族）。重点是测试：`delta_net_chunk` / `delta_net_recurrent` / `delta_net_reference` 三方互拍对齐作为后续加速内核的基准，另做 g≡0 交叉验证（同输入喂 `gated_delta_net_*` 传 `g=zeros` 应一致）。测试覆盖全部五个后端 | 完成 |
 | 2 | recurrent Triton（`triton_kernel.py` 共享 kernel + torch/jax 桥接），对照 `gdn_recurrent/` 的实现方式与 API 派生；训练/推理/单步三个算子都要有 Triton 入口 | 未开始 |
 | 3 | recurrent Pallas（jax）+ CUDA（torch 扩展 / jax FFI），对照阶段 2 的 Triton 逻辑。分发语义：torch 非 CPU 时 native 默认即 Triton；jax GPU/TPU 时 native 默认即 Pallas；cuda 需显式 `KERNEL_TYPE="cuda"` | 未开始 |
 | 4 | chunk Triton（torch/jax）。chunk 家族**只做 native + Triton**：Pallas 过于复杂不做；CUDA 不做（自研 SIMT gemm 打不过 `tl.dot`） | 未开始 |

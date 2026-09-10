@@ -58,6 +58,16 @@
   - [函数接口说明](#函数接口说明-4)
     - [`gated_delta_net_chunk_sane`](#gated_delta_net_chunk_sane)
   - [gdn_chunk_sane 实现状态](#gdn_chunk_sane-实现状态)
+- [delta_net_recurrent 使用方法](#delta_net_recurrent-使用方法)
+  - [函数接口说明](#函数接口说明-5)
+    - [`delta_net_recurrent`](#delta_net_recurrent)
+    - [`delta_net_recurrent_inference`](#delta_net_recurrent_inference)
+    - [`delta_net_recurrent_single_step`](#delta_net_recurrent_single_step)
+  - [delta_net_recurrent 实现状态](#delta_net_recurrent-实现状态)
+- [delta_net_chunk 使用方法](#delta_net_chunk-使用方法)
+  - [函数接口说明](#函数接口说明-6)
+    - [`delta_net_chunk`](#delta_net_chunk)
+  - [delta_net_chunk 实现状态](#delta_net_chunk-实现状态)
 - [rwkv6op 使用方法](#rwkv6op-使用方法)
 - [分布式并行（JAX）](#分布式并行)
   - [PyTorch 使用注意事项](#pytorch-使用注意事项)
@@ -748,6 +758,148 @@ out, final_state = gated_delta_net_chunk_sane(
 > 训练入口支持反向传播（含 `tau` 梯度）。JAX 侧 `triton` 需显式 `KERNEL_TYPE="triton"` 并安装 `jax-triton`。
 > `mask=None` 时输出仍使用无条件 SANE，但 `output_final_state=True` 会发出 `UserWarning` 并将 `final_state` 置为 `None`。
 
+---
+
+<a id="delta_net_recurrent-使用方法"></a>
+## delta_net_recurrent 使用方法
+
+`delta_net_recurrent` 提供**无门控 DeltaNet**（delta rule）的逐步 recurrent 实现，支持训练、推理与单步 RNN 三种入口。它与 Gated DeltaNet 的唯一差别是没有 decay gate `g`（decay 恒为 1），其余约定（`q`/`k` 内部 L2 归一化、输出乘 `1/sqrt(K)`、`beta` 需外部 sigmoid）完全一致。输入 layout 固定为 `[B, T, H, K/V]`。
+
+```python
+from rwkv_ops import (
+    delta_net_recurrent,
+    delta_net_recurrent_inference,
+    delta_net_recurrent_single_step,
+)
+
+# 训练 / prefill（可求梯度）
+out, final_state = delta_net_recurrent(
+    q, k, v, beta,
+    initial_state=h0,
+    output_final_state=True,
+)
+
+# 推理专用（无梯度，省显存）
+out, final_state = delta_net_recurrent_inference(
+    q, k, v, beta,
+    initial_state=h0,
+    output_final_state=True,
+)
+
+# 单步 RNN（decode 阶段）
+out, state = delta_net_recurrent_single_step(
+    q, k, v, beta,
+    initial_state=state,
+    output_final_state=True,
+)
+```
+
+<a id="函数接口说明-5"></a>
+### 函数接口说明
+
+<a id="delta_net_recurrent"></a>
+#### `delta_net_recurrent`
+
+| 参数 | 形状 | 说明 |
+|---|---|---|
+| q, k | (B, T, H, K) | 查询与键，内部先做 L2 归一化 |
+| v | (B, T, H, V) | 值 |
+| beta | (B, T, H) | 写入强度，需已在外部过 sigmoid，落在 (0, 1) |
+| initial_state | (B, H, K, V) 或 (1, H, K, V)，float32，可选 | 初始 recurrent state |
+| output_final_state | bool | 是否返回最终 state |
+| chunk_size | int | chunk 长度，默认 16；纯 recurrent 实现忽略该参数（仅签名一致） |
+
+| 返回值 | 形状 | 说明 |
+|---|---|---|
+| out | (B, T, H, V) | 与 `v` 同 dtype |
+| final_state | (B, H, K, V) 或 None | 最终 state，float32 |
+
+<a id="delta_net_recurrent_inference"></a>
+#### `delta_net_recurrent_inference`
+
+接口与 `delta_net_recurrent` 完全一致，但**不计算梯度**，因此不保存反向所需的中间量，显存占用更低。
+
+<a id="delta_net_recurrent_single_step"></a>
+#### `delta_net_recurrent_single_step`
+
+| 参数 | 形状 | 说明 |
+|---|---|---|
+| q, k | (B, H, K) | 单步查询与键 |
+| v | (B, H, V) | 单步值 |
+| beta | (B, H) | 单步写入强度，已 sigmoid |
+| initial_state | (B, H, K, V) 或 (1, H, K, V)，float32，可选 | 当前 state |
+| output_final_state | bool | 是否返回下一步 state |
+| chunk_size | int | chunk 长度，默认 16；单步实现忽略该参数（仅签名一致） |
+
+| 返回值 | 形状 | 说明 |
+|---|---|---|
+| out | (B, H, V) | 与 `v` 同 dtype |
+| next_state | (B, H, K, V) 或 None | 下一步 state，float32 |
+
+<a id="delta_net_recurrent-实现状态"></a>
+### delta_net_recurrent 实现状态
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ❌   | ❌     | ✅     |
+| JAX         | ❌   | ❌     | ✅     |
+| TensorFlow  | ❌   | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
+
+1. 当前仅提供纯 Keras ops 的 native 实现，五个后端均可用；Triton/CUDA/Pallas 加速内核将在后续阶段提供。
+2. 训练入口支持反向传播；推理与单步入口**没有梯度**。
+3. chunkwise 版本位于 `delta_net_chunk/`，见下节。
+
+<a id="delta_net_chunk-使用方法"></a>
+## delta_net_chunk 使用方法
+
+`delta_net_chunk` 提供**无门控 DeltaNet** 的分块并行（chunkwise）训练实现。与 `gdn_chunk` 的差别是没有 decay gate `g`：chunk 内衰减矩阵退化为下三角全 1 矩阵，跨 chunk 传递 state 时不做衰减。输入 layout 固定为 `[B, T, H, K/V]`。
+
+```python
+from rwkv_ops import delta_net_chunk
+
+out, final_state = delta_net_chunk(
+    q, k, v, beta,
+    initial_state=h0,
+    output_final_state=True,
+    chunk_size=16,
+)
+```
+
+<a id="函数接口说明-6"></a>
+### 函数接口说明
+
+<a id="delta_net_chunk"></a>
+#### `delta_net_chunk`
+
+| 参数 | 形状 | 说明 |
+|---|---|---|
+| q, k | (B, T, H, K) | 查询与键，内部先做 L2 归一化 |
+| v | (B, T, H, V) | 值 |
+| beta | (B, T, H) | 写入强度，需已在外部过 sigmoid，落在 (0, 1) |
+| initial_state | (B, H, K, V) 或 (1, H, K, V)，float32，可选 | 初始 recurrent state |
+| output_final_state | bool | 是否返回最终 state |
+| chunk_size | int | chunk 长度，默认 16；内部会 pad 到 chunk_size 整数倍 |
+
+| 返回值 | 形状 | 说明 |
+|---|---|---|
+| out | (B, T, H, V) | 与 `v` 同 dtype |
+| final_state | (B, H, K, V) 或 None | 最终 state，float32 |
+
+<a id="delta_net_chunk-实现状态"></a>
+### delta_net_chunk 实现状态
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ❌   | ❌     | ✅     |
+| JAX         | ❌   | ❌     | ✅     |
+| TensorFlow  | ❌   | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
+
+> 当前仅提供纯 Keras ops 的 native 实现，五个后端均可用，训练入口支持反向传播；Triton 加速内核将在后续阶段提供。
+
 <a id="分布式并行"></a>
 ## 分布式并行（JAX）
 
@@ -893,6 +1045,8 @@ from rwkv_ops import (
     get_gated_delta_net_chunk_sane,       # GDN chunkwise SANE
     get_gated_delta_net_recurrent,        # GDN recurrent（无 SANE）
     get_gated_delta_net_recurrent_sane,   # GDN recurrent SANE
+    get_delta_net_chunk,                  # DeltaNet chunkwise
+    get_delta_net_recurrent,              # DeltaNet recurrent
 )
 
 # RWKV-7 CUDA：HEAD_SIZE 与 chunk_size 均为编译期常量，必须在工厂指定
@@ -920,6 +1074,12 @@ gdn_recurrent = get_gated_delta_net_recurrent(KERNEL_TYPE="triton", chunk_size=3
 gdn_recurrent_sane = get_gated_delta_net_recurrent_sane(
     KERNEL_TYPE="triton", chunk_size=32
 )
+
+# DeltaNet chunkwise（当前仅 native，可在调用时传 chunk_size）
+dn_chunk = get_delta_net_chunk(KERNEL_TYPE="native", chunk_size=32)
+
+# DeltaNet recurrent（当前仅 native；chunk_size 仅签名一致，可忽略）
+dn_recurrent = get_delta_net_recurrent(KERNEL_TYPE="native", chunk_size=32)
 ```
 
 **注意：**
