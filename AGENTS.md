@@ -1517,3 +1517,64 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
 | `tests/conftest.py` | 共享 fixtures / 断言工具 / 自动清理钩子（不 import 后端） |
 | `pyproject.toml` | 包元数据（hatchling）、依赖、版本号 |
 | `MANIFEST.in` | 源码分发文件清单 |
+
+---
+
+## 14. DeltaNet（delta_rule，无门控）移植计划
+
+> 来源：flash-linear-attention 的 `fla/ops/delta_rule`。fla 的 delta_rule 与
+> gated_delta_rule 共用底层 kernel，唯一语义差别是**没有 `g` 衰减门**
+> （decay≡1）。核心递推：
+>
+> ```text
+> kv_mem_t = sum_K(state_{t-1} * k_t)
+> delta_t  = (v_t - kv_mem_t) * beta_t
+> state_t  = state_{t-1} + k_t ⊗ delta_t
+> y_t      = sum_K(state_t * q_t)
+> ```
+>
+> 输出乘 `scale = 1/sqrt(K)`；`q`/`k` 算子内部 L2 norm；`beta` 必须外部已
+> 过 sigmoid；state 形状 `[B, H, K, V]`，float32。以上约定与 gdn 完全一致。
+
+### 14.1 命名与 API
+
+新家族对仗 `gated_delta_net_*` → `delta_net_*`：
+
+| 目录 | 公开函数 |
+|---|---|
+| `rwkv_ops/delta_net_chunk/` | `delta_net_chunk` |
+| `rwkv_ops/delta_net_recurrent/` | `delta_net_recurrent` / `delta_net_recurrent_inference` / `delta_net_recurrent_single_step` + 仅 native 的 `delta_net_reference` |
+| `rwkv_ops/delta_net_chunk_sane/` | `delta_net_chunk_sane` |
+| `rwkv_ops/delta_net_recurrent_sane/` | `delta_net_recurrent_sane` / `..._inference` / `..._single_step` |
+
+签名与 gdn 完全一致、仅去掉 `g` 参数；SANE 版在 `beta` 后插入
+`tau [B, T//chunk_size, H]` 与 `mask=None [B, T//chunk_size]`。
+
+### 14.2 分阶段实施与验收
+
+分阶段实施，**不要一次性写完**。每阶段验收流程：测试全绿（分进程跑对应
+后端）→ 更新 AGENTS.md / README.md / ENREADME.md 支持矩阵 → git commit 验收
+后才进入下一阶段。
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| 1 | native 实现（chunk + recurrent 两家族）。重点是测试：`delta_net_chunk` / `delta_net_recurrent` / `delta_net_reference` 三方互拍对齐作为后续加速内核的基准，另做 g≡0 交叉验证（同输入喂 `gated_delta_net_*` 传 `g=zeros` 应一致）。测试覆盖全部五个后端 | 进行中 |
+| 2 | recurrent Triton（`triton_kernel.py` 共享 kernel + torch/jax 桥接），对照 `gdn_recurrent/` 的实现方式与 API 派生；训练/推理/单步三个算子都要有 Triton 入口 | 未开始 |
+| 3 | recurrent Pallas（jax）+ CUDA（torch 扩展 / jax FFI），对照阶段 2 的 Triton 逻辑。分发语义：torch 非 CPU 时 native 默认即 Triton；jax GPU/TPU 时 native 默认即 Pallas；cuda 需显式 `KERNEL_TYPE="cuda"` | 未开始 |
+| 4 | chunk Triton（torch/jax）。chunk 家族**只做 native + Triton**：Pallas 过于复杂不做；CUDA 不做（自研 SIMT gemm 打不过 `tl.dot`） | 未开始 |
+| 5 | SANE 变体（`delta_net_chunk_sane` / `delta_net_recurrent_sane`）。变化很小（约 95% 代码复用前四阶段产物），全部放最后做 | 未开始 |
+
+### 14.3 移植要点
+
+- native 从 `gdn_chunk/native_keras_op.py`、`gdn_recurrent/native_keras_op.py`
+  派生：recurrent 删 `state * exp(g_t)` 一行；chunk 删 cumsum、decay 矩阵
+  退化为下三角全 1（仍先 mask 上三角）。
+- Triton 从 `gdn_recurrent/triton_kernel.py`、`gdn_chunk/triton/` 去 g 派生；
+  注意 §9 陷阱 11-13（jax-triton 参数顺序、L2 norm 反向传原始 q/k、
+  autotune config 含显式 constexpr 值）。
+- recurrent CUDA 是逐步 SIMT 扫描（无 gemm），适合自研，照 `gdn_recurrent`
+  的 `torch_cuda_kernel/` / `jax_cuda_kernel/` 派生，按 `(K, V, chunk_size)`
+  懒编译；新 FFI 构建目录加进 `clean_build_artifacts._CLEAN_PATTERNS`。
+- 测试 fixture：根 `tests/conftest.py` 加 `delta_net_shape` /
+  `delta_net_inputs`（`gdn_inputs` 去掉 g）；容差沿用 GDN 惯例。
+- 版本号 bump 放到阶段 5 完成后统一做。
