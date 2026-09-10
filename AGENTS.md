@@ -194,7 +194,7 @@ MANIFEST.in                  # 源码分发清单
 | Framework | cuda | triton | native |
 |-----------|------|--------|--------|
 | PyTorch   | ✅   | ✅     | ✅     |
-| JAX       | ❌   | ✅     | ✅³    |
+| JAX       | ✅   | ✅     | ✅³    |
 | TensorFlow| ❌   | ❌     | ✅     |
 | NumPy     | ❌   | ❌     | ✅     |
 | OpenVINO  | ❌   | ❌     | ✅     |
@@ -203,6 +203,8 @@ MANIFEST.in                  # 源码分发清单
 > 与 CUDA kernel（训练含反向、推理、单步 RNN 三个入口，`torch_cuda_kernel/`）；
 > CUDA 版 `chunk_size` 作为编译期常量按 `(K, V, chunk_size)` 在首次调用时懒编译，
 > 调用时传入不同 `chunk_size` 会各自编译一次（不做工厂值校验）；
+> JAX 侧 `cuda` 为 FFI 实现（`jax_cuda_kernel/`，训练含反向、推理、单步 RNN 三个入口，
+> bf16/fp32 双实例化，同样按 `(K, V, chunk_size)` 懒编译）；
 > JAX 侧 `triton` 显式 `KERNEL_TYPE="triton"` 时启用 JAX-Triton 前向 kernel，
 > `native` 在 GPU/TPU 上为 Pallas 实现（`jax_pallas_kernel.py`），并覆盖训练/推理/单步
 > RNN 三个入口。
@@ -237,7 +239,7 @@ jax 侧所有加速算子都用 `custom_partitioning` + einsum 风格 `sharding_
 | rwkv7 cuda / triton / pallas | ✅ | ✅ |
 | rwkv7_sane cuda / triton / pallas | ✅ | ✅（含 1-device TP 结构测试） |
 | rwkv7 / rwkv7_sane 单步 cuda | ✅ | ✅ |
-| gdn_recurrent triton / pallas | ✅ | ✅ |
+| gdn_recurrent cuda / triton / pallas | ✅ | ✅ |
 | gdn_recurrent_sane triton / pallas | ✅ | ✅ |
 | gdn_chunk_sane triton | ✅ | ✅ |
 | rwkv6 cuda | ✅ | ❌（channel 融合为 `c`，head 维未暴露） |
@@ -1499,6 +1501,7 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
 | `rwkv_ops/gdn_recurrent/triton_kernel.py` | GDN recurrent 共享 Triton 内核 |
 | `rwkv_ops/gdn_recurrent/torch_triton_kernel.py` | GDN recurrent PyTorch Triton 桥接 |
 | `rwkv_ops/gdn_recurrent/torch_cuda_kernel/` | GDN recurrent PyTorch C++/CUDA 扩展（训练含反向 / 推理 / 单步） |
+| `rwkv_ops/gdn_recurrent/jax_cuda_kernel/` | GDN recurrent JAX FFI CUDA（训练含反向 / 推理 / 单步，按 (K,V,chunk) 懒编译） |
 | `rwkv_ops/rwkv6_kernel/ops_rwkv_kernel.py` | RWKV-6 数值 ground truth |
 | `rwkv_ops/rwkv6_kernel/native_keras_op.py` | RWKV-6 函数式原生封装 |
 | `rwkv_ops/mhc_kernel/native_op.py` | mHC 原生参考实现 |

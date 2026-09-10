@@ -546,7 +546,7 @@ Same interface as `gated_delta_net_recurrent`, but **does not compute gradients*
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
 | PyTorch     | ✅   | ✅     | ✅     |
-| JAX         | ❌   | ✅     | ✅¹    |
+| JAX         | ✅   | ✅     | ✅¹    |
 | TensorFlow  | ❌   | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 | OpenVINO    | ❌   | ❌     | ✅     |
@@ -554,7 +554,7 @@ Same interface as `gated_delta_net_recurrent`, but **does not compute gradients*
 > ¹ With the JAX backend, `native` on GPU/TPU uses the Pallas implementation (`jax_pallas_kernel.py`); `triton` is the JAX-Triton implementation when `KERNEL_TYPE="triton"` is set explicitly; elsewhere it falls back to pure Keras ops.
 
 1. The training entry point supports back-propagation; the inference and single-step entry points **do not support gradients**.
-2. With the PyTorch `cuda` backend, `chunk_size` is a compile-time constant and the kernel is lazily compiled per `(K, V, chunk_size)` on first use; different `chunk_size` values may be passed at call time (each compiles once).
+2. With the `cuda` backend, `chunk_size` is a compile-time constant and the kernel is lazily compiled per `(K, V, chunk_size)` on first use; different `chunk_size` values may be passed at call time (each compiles once). On the JAX side, `cuda` is an FFI implementation (`jax_cuda_kernel/`) covering the same training (with backward), inference, and single-step entry points.
 3. The chunkwise counterpart lives in `gdn_chunk/`, see below.
 
 <a id="usage-of-gdn_recurrent_sane"></a>
