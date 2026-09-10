@@ -860,13 +860,13 @@ Same interface as `delta_net_recurrent`, but **does not compute gradients** and 
 
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
-| PyTorch     | ❌   | ❌     | ✅     |
-| JAX         | ❌   | ❌     | ✅     |
+| PyTorch     | ❌   | ✅     | ✅     |
+| JAX         | ❌   | ✅     | ✅     |
 | TensorFlow  | ❌   | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 | OpenVINO    | ❌   | ❌     | ✅     |
 
-1. Currently only the pure Keras ops native implementation is provided, available on all five backends; Triton/CUDA/Pallas accelerated kernels will come in later phases.
+1. On the Torch backend, `native` defaults to the Triton implementation on non-CPU platforms; on the JAX side, `triton` requires explicit `KERNEL_TYPE="triton"` and the `jax-triton` package, while `native` is pure Keras ops. CUDA/Pallas accelerated kernels will come in later phases.
 2. The training entry point supports back-propagation; the inference and single-step entry points **do not support gradients**.
 3. The chunkwise counterpart lives in `delta_net_chunk/`, see below.
 
