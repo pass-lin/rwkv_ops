@@ -1,6 +1,6 @@
 """RWKV-OPS 包入口：解析环境变量并暴露全部算子 API。"""
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 import os
 
 KERNEL_TYPE = os.environ.get("KERNEL_TYPE", "cuda").lower()
