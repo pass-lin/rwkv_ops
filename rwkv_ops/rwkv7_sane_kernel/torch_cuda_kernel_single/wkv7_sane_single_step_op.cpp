@@ -4,15 +4,15 @@
 using bf = __nv_bfloat16;
 
 void cuda_forward_single_step_sane(int B, int H, bf *w, bf *q, bf *k, bf *v,
-                                 bf *a, bf *b, const float *tau,
-                                 const int8_t *do_sane, float *h0, bf *y,
-                                 float *h1);
+                                   bf *a, bf *b, const float *tau,
+                                   const int8_t *do_sane, float *h0, bf *y,
+                                   float *h1);
 
 void forward_single_step_sane(torch::Tensor w, torch::Tensor q, torch::Tensor k,
-                            torch::Tensor v, torch::Tensor a, torch::Tensor b,
-                            torch::Tensor tau, torch::Tensor do_sane,
-                            torch::Tensor h0, torch::Tensor y,
-                            torch::Tensor h1) {
+                              torch::Tensor v, torch::Tensor a, torch::Tensor b,
+                              torch::Tensor tau, torch::Tensor do_sane,
+                              torch::Tensor h0, torch::Tensor y,
+                              torch::Tensor h1) {
   TORCH_CHECK(w.device().is_cuda(), "All tensors must be CUDA");
   TORCH_CHECK(w.dtype() == torch::kBFloat16, "w/q/k/v/a/b must be bfloat16");
   TORCH_CHECK(h0.dtype() == torch::kFloat32, "h0/h1 must be float32");
@@ -36,10 +36,11 @@ void forward_single_step_sane(torch::Tensor w, torch::Tensor q, torch::Tensor k,
 }
 
 TORCH_LIBRARY(wind_backstepping_sane_single_step, m) {
-  m.def("forward_single_step_sane("
-        "Tensor w, Tensor q, Tensor k, Tensor v, Tensor a, Tensor b, "
-        "Tensor tau, Tensor do_sane, Tensor h0, Tensor(a!) y, Tensor(b!) h1) -> "
-        "()");
+  m.def(
+      "forward_single_step_sane("
+      "Tensor w, Tensor q, Tensor k, Tensor v, Tensor a, Tensor b, "
+      "Tensor tau, Tensor do_sane, Tensor h0, Tensor(a!) y, Tensor(b!) h1) -> "
+      "()");
 }
 
 TORCH_LIBRARY_IMPL(wind_backstepping_sane_single_step, CUDA, m) {

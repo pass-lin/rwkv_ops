@@ -35,9 +35,9 @@ typedef bf *__restrict__ F_;
 template <int C>
 __launch_bounds__(C, 2) __global__
     void forward_kernel_sane(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_,
-                           F_ b_, const float *__restrict__ tau_,
-                           const float *__restrict__ mask_, bf *y_, float *s_,
-                           float *sa_, float *h0_) {
+                             F_ b_, const float *__restrict__ tau_,
+                             const float *__restrict__ mask_, bf *y_, float *s_,
+                             float *sa_, float *h0_) {
   int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
   float state[C] = {0};
   __shared__ float q[C], k[C], w[C], a[C], b[C];
@@ -113,11 +113,11 @@ __launch_bounds__(C, 2) __global__
 template <int C>
 __launch_bounds__(C, 2) __global__
     void backward_kernel_sane(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_,
-                            F_ b_, const float *__restrict__ tau_,
-                            const float *__restrict__ mask_, F_ dy_, float *s_,
-                            float *sa_, float *dht_, float *dh0_, float *dtau_,
-                            bf *dw_, bf *dq_, bf *dk_, bf *dv_, bf *da_,
-                            bf *db_) {
+                              F_ b_, const float *__restrict__ tau_,
+                              const float *__restrict__ mask_, F_ dy_,
+                              float *s_, float *sa_, float *dht_, float *dh0_,
+                              float *dtau_, bf *dw_, bf *dq_, bf *dk_, bf *dv_,
+                              bf *da_, bf *db_) {
   int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
   float stateT[C] = {0}, dstate[C] = {0}, dstateT[C] = {0};
 
@@ -253,10 +253,10 @@ __launch_bounds__(C, 2) __global__
 template <int C>
 __launch_bounds__(C, 2) __global__
     void forward_inference_kernel_sane(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_,
-                                     F_ a_, F_ b_,
-                                     const float *__restrict__ tau_,
-                                     const float *__restrict__ mask_, bf *y_,
-                                     float *s_, float *h0_) {
+                                       F_ a_, F_ b_,
+                                       const float *__restrict__ tau_,
+                                       const float *__restrict__ mask_, bf *y_,
+                                       float *s_, float *h0_) {
   int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
   float state[C] = {0};
   __shared__ float q[C], k[C], w[C], a[C], b[C];
@@ -313,12 +313,12 @@ __launch_bounds__(C, 2) __global__
 // Host wrapper for forward_kernel_sane。
 static ffi::Error
 WKV7SaneFwdHost(cudaStream_t stream, ffi::Buffer<ffi::BF16> w,
-              ffi::Buffer<ffi::BF16> q, ffi::Buffer<ffi::BF16> k,
-              ffi::Buffer<ffi::BF16> v, ffi::Buffer<ffi::BF16> a,
-              ffi::Buffer<ffi::BF16> b, ffi::Buffer<ffi::F32> tau,
-              ffi::Buffer<ffi::F32> mask, ffi::Buffer<ffi::F32> h0,
-              ffi::ResultBuffer<ffi::BF16> y, ffi::ResultBuffer<ffi::F32> s,
-              ffi::ResultBuffer<ffi::F32> sa) {
+                ffi::Buffer<ffi::BF16> q, ffi::Buffer<ffi::BF16> k,
+                ffi::Buffer<ffi::BF16> v, ffi::Buffer<ffi::BF16> a,
+                ffi::Buffer<ffi::BF16> b, ffi::Buffer<ffi::F32> tau,
+                ffi::Buffer<ffi::F32> mask, ffi::Buffer<ffi::F32> h0,
+                ffi::ResultBuffer<ffi::BF16> y, ffi::ResultBuffer<ffi::F32> s,
+                ffi::ResultBuffer<ffi::F32> sa) {
   constexpr int C = _C_;
   auto dims = w.dimensions();
   int B = dims[0], T = dims[1], H = dims[2];
@@ -337,24 +337,24 @@ WKV7SaneFwdHost(cudaStream_t stream, ffi::Buffer<ffi::BF16> w,
 
   cudaError_t err = cudaGetLastError();
   if (err != cudaSuccess)
-    return ffi::Error::Internal(std::string("CUDA forward_kernel_sane error: ") +
-                                cudaGetErrorString(err));
+    return ffi::Error::Internal(
+        std::string("CUDA forward_kernel_sane error: ") +
+        cudaGetErrorString(err));
   return ffi::Error::Success();
 }
 
 // Host wrapper for backward_kernel_sane。
-static ffi::Error
-WKV7SaneBwdHost(cudaStream_t stream, ffi::Buffer<ffi::BF16> w,
-              ffi::Buffer<ffi::BF16> q, ffi::Buffer<ffi::BF16> k,
-              ffi::Buffer<ffi::BF16> v, ffi::Buffer<ffi::BF16> a,
-              ffi::Buffer<ffi::BF16> b, ffi::Buffer<ffi::F32> tau,
-              ffi::Buffer<ffi::F32> mask, ffi::Buffer<ffi::BF16> dy,
-              ffi::Buffer<ffi::F32> s, ffi::Buffer<ffi::F32> sa,
-              ffi::Buffer<ffi::F32> dht, ffi::ResultBuffer<ffi::F32> dh0,
-              ffi::ResultBuffer<ffi::F32> dtau, ffi::ResultBuffer<ffi::BF16> dw,
-              ffi::ResultBuffer<ffi::BF16> dq, ffi::ResultBuffer<ffi::BF16> dk,
-              ffi::ResultBuffer<ffi::BF16> dv, ffi::ResultBuffer<ffi::BF16> da,
-              ffi::ResultBuffer<ffi::BF16> db) {
+static ffi::Error WKV7SaneBwdHost(
+    cudaStream_t stream, ffi::Buffer<ffi::BF16> w, ffi::Buffer<ffi::BF16> q,
+    ffi::Buffer<ffi::BF16> k, ffi::Buffer<ffi::BF16> v,
+    ffi::Buffer<ffi::BF16> a, ffi::Buffer<ffi::BF16> b,
+    ffi::Buffer<ffi::F32> tau, ffi::Buffer<ffi::F32> mask,
+    ffi::Buffer<ffi::BF16> dy, ffi::Buffer<ffi::F32> s,
+    ffi::Buffer<ffi::F32> sa, ffi::Buffer<ffi::F32> dht,
+    ffi::ResultBuffer<ffi::F32> dh0, ffi::ResultBuffer<ffi::F32> dtau,
+    ffi::ResultBuffer<ffi::BF16> dw, ffi::ResultBuffer<ffi::BF16> dq,
+    ffi::ResultBuffer<ffi::BF16> dk, ffi::ResultBuffer<ffi::BF16> dv,
+    ffi::ResultBuffer<ffi::BF16> da, ffi::ResultBuffer<ffi::BF16> db) {
   auto dims = w.dimensions();
   int B = dims[0], T = dims[1], H = dims[2];
   constexpr int C = _C_;
@@ -379,20 +379,21 @@ WKV7SaneBwdHost(cudaStream_t stream, ffi::Buffer<ffi::BF16> w,
 
   cudaError_t err = cudaGetLastError();
   if (err != cudaSuccess)
-    return ffi::Error::Internal(std::string("CUDA backward_kernel_sane error: ") +
-                                cudaGetErrorString(err));
+    return ffi::Error::Internal(
+        std::string("CUDA backward_kernel_sane error: ") +
+        cudaGetErrorString(err));
   return ffi::Error::Success();
 }
 
 // Host wrapper for forward_inference_kernel_sane。
 static ffi::Error
 WKV7SaneInferenceHost(cudaStream_t stream, ffi::Buffer<ffi::BF16> w,
-                    ffi::Buffer<ffi::BF16> q, ffi::Buffer<ffi::BF16> k,
-                    ffi::Buffer<ffi::BF16> v, ffi::Buffer<ffi::BF16> a,
-                    ffi::Buffer<ffi::BF16> b, ffi::Buffer<ffi::F32> tau,
-                    ffi::Buffer<ffi::F32> mask, ffi::Buffer<ffi::F32> h0,
-                    ffi::ResultBuffer<ffi::BF16> y,
-                    ffi::ResultBuffer<ffi::F32> s) {
+                      ffi::Buffer<ffi::BF16> q, ffi::Buffer<ffi::BF16> k,
+                      ffi::Buffer<ffi::BF16> v, ffi::Buffer<ffi::BF16> a,
+                      ffi::Buffer<ffi::BF16> b, ffi::Buffer<ffi::F32> tau,
+                      ffi::Buffer<ffi::F32> mask, ffi::Buffer<ffi::F32> h0,
+                      ffi::ResultBuffer<ffi::BF16> y,
+                      ffi::ResultBuffer<ffi::F32> s) {
   constexpr int C = _C_;
   auto dims = w.dimensions();
   int B = dims[0], T = dims[1], H = dims[2];
@@ -424,8 +425,9 @@ WKV7SaneInferenceHost(cudaStream_t stream, ffi::Buffer<ffi::BF16> w,
 template <int C>
 __launch_bounds__(C, 2) __global__
     void forward_kernel_sane_no_mask(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_,
-                                   F_ a_, F_ b_, const float *__restrict__ tau_,
-                                   bf *y_, float *s_, float *sa_, float *h0_) {
+                                     F_ a_, F_ b_,
+                                     const float *__restrict__ tau_, bf *y_,
+                                     float *s_, float *sa_, float *h0_) {
   int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
   float state[C] = {0};
   __shared__ float q[C], k[C], w[C], a[C], b[C];
@@ -486,11 +488,12 @@ __launch_bounds__(C, 2) __global__
 template <int C>
 __launch_bounds__(C, 2) __global__
     void backward_kernel_sane_no_mask(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_,
-                                    F_ a_, F_ b_,
-                                    const float *__restrict__ tau_, F_ dy_,
-                                    float *s_, float *sa_, float *dht_,
-                                    float *dh0_, float *dtau_, bf *dw_, bf *dq_,
-                                    bf *dk_, bf *dv_, bf *da_, bf *db_) {
+                                      F_ a_, F_ b_,
+                                      const float *__restrict__ tau_, F_ dy_,
+                                      float *s_, float *sa_, float *dht_,
+                                      float *dh0_, float *dtau_, bf *dw_,
+                                      bf *dq_, bf *dk_, bf *dv_, bf *da_,
+                                      bf *db_) {
   int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
   float stateT[C] = {0}, dstate[C] = {0}, dstateT[C] = {0};
 
@@ -614,10 +617,10 @@ __launch_bounds__(C, 2) __global__
 // Args 与 forward_inference_kernel_sane 相同，但不读 mask。
 template <int C>
 __launch_bounds__(C, 2) __global__
-    void forward_inference_kernel_sane_no_mask(int T, int H, F_ w_, F_ q_, F_ k_,
-                                             F_ v_, F_ a_, F_ b_,
-                                             const float *__restrict__ tau_,
-                                             bf *y_, float *s_, float *h0_) {
+    void forward_inference_kernel_sane_no_mask(int T, int H, F_ w_, F_ q_,
+                                               F_ k_, F_ v_, F_ a_, F_ b_,
+                                               const float *__restrict__ tau_,
+                                               bf *y_, float *s_, float *h0_) {
   int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
   float state[C] = {0};
   __shared__ float q[C], k[C], w[C], a[C], b[C];
@@ -672,12 +675,12 @@ __launch_bounds__(C, 2) __global__
 // Host wrapper for forward_kernel_sane_no_mask。
 static ffi::Error
 WKV7SaneFwdNoMaskHost(cudaStream_t stream, ffi::Buffer<ffi::BF16> w,
-                    ffi::Buffer<ffi::BF16> q, ffi::Buffer<ffi::BF16> k,
-                    ffi::Buffer<ffi::BF16> v, ffi::Buffer<ffi::BF16> a,
-                    ffi::Buffer<ffi::BF16> b, ffi::Buffer<ffi::F32> tau,
-                    ffi::Buffer<ffi::F32> h0, ffi::ResultBuffer<ffi::BF16> y,
-                    ffi::ResultBuffer<ffi::F32> s,
-                    ffi::ResultBuffer<ffi::F32> sa) {
+                      ffi::Buffer<ffi::BF16> q, ffi::Buffer<ffi::BF16> k,
+                      ffi::Buffer<ffi::BF16> v, ffi::Buffer<ffi::BF16> a,
+                      ffi::Buffer<ffi::BF16> b, ffi::Buffer<ffi::F32> tau,
+                      ffi::Buffer<ffi::F32> h0, ffi::ResultBuffer<ffi::BF16> y,
+                      ffi::ResultBuffer<ffi::F32> s,
+                      ffi::ResultBuffer<ffi::F32> sa) {
   constexpr int C = _C_;
   auto dims = w.dimensions();
   int B = dims[0], T = dims[1], H = dims[2];
@@ -874,7 +877,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(Wkv7SaneBwdNoMask, WKV7SaneBwdNoMaskHost,
                                   .Ret<ffi::Buffer<ffi::BF16>>(),
                               {ffi::Traits::kCmdBufferCompatible});
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(Wkv7SaneInferenceNoMask, WKV7SaneInferenceNoMaskHost,
+XLA_FFI_DEFINE_HANDLER_SYMBOL(Wkv7SaneInferenceNoMask,
+                              WKV7SaneInferenceNoMaskHost,
                               ffi::Ffi::Bind()
                                   .Ctx<ffi::PlatformStream<cudaStream_t>>()
                                   .Arg<ffi::Buffer<ffi::BF16>>()

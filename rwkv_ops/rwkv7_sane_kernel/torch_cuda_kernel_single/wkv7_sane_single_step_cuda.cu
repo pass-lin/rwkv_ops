@@ -28,11 +28,11 @@ typedef bf *__restrict__ F_;
 // 编译期宏: _C_ 为 head_size。
 template <int C>
 __launch_bounds__(C, 2) __global__
-    void forward_single_step_sane_kernel(int B, int H, F_ w_, F_ q_, F_ k_, F_ v_,
-                                       F_ a_, F_ b_,
-                                       const float *__restrict__ tau_,
-                                       const int8_t *__restrict__ do_sane_,
-                                       float *h0_, bf *y_, float *h1_) {
+    void forward_single_step_sane_kernel(int B, int H, F_ w_, F_ q_, F_ k_,
+                                         F_ v_, F_ a_, F_ b_,
+                                         const float *__restrict__ tau_,
+                                         const int8_t *__restrict__ do_sane_,
+                                         float *h0_, bf *y_, float *h1_) {
   int bb = blockIdx.y;
   int hh = blockIdx.x;
   int i = threadIdx.x;
@@ -107,9 +107,9 @@ __launch_bounds__(C, 2) __global__
 //   y:  [B, H, C], bfloat16, row-major。输出 y。
 //   h1: [B, H, C, C], float32, row-major。输出状态。
 void cuda_forward_single_step_sane(int B, int H, bf *w, bf *q, bf *k, bf *v,
-                                 bf *a, bf *b, const float *tau,
-                                 const int8_t *do_sane, float *h0, bf *y,
-                                 float *h1) {
+                                   bf *a, bf *b, const float *tau,
+                                   const int8_t *do_sane, float *h0, bf *y,
+                                   float *h1) {
   constexpr int C = _C_;
   dim3 blocks(H, B);
   dim3 threads(C);

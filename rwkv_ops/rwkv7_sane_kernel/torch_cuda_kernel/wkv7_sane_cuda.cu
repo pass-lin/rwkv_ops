@@ -16,8 +16,8 @@ typedef bf *__restrict__ F_;
 // RWKV-7-SANE 带 mask 前向训练 kernel。
 //
 // 每个 block 处理一个 (batch, head)，顺序扫描 T 步；在每个 chunk 边界按 mask
-// 对 state 执行 State Anomaly Neutralization（state = tau * tanh(state / tau)）。
-// 输出始终基于 SANE 之前的 state。
+// 对 state 执行 State Anomaly Neutralization（state = tau * tanh(state /
+// tau)）。 输出始终基于 SANE 之前的 state。
 //
 // Args:
 //   w_, q_, k_, v_, a_, b_: [B, T, H, K], bfloat16, row-major。
@@ -38,9 +38,9 @@ typedef bf *__restrict__ F_;
 template <int C>
 __launch_bounds__(C, 2) __global__
     void forward_kernel_sane(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_,
-                           F_ b_, const float *__restrict__ tau_,
-                           const float *__restrict__ mask_, bf *y_, float *s_,
-                           float *sa_, float *h0_) {
+                             F_ b_, const float *__restrict__ tau_,
+                             const float *__restrict__ mask_, bf *y_, float *s_,
+                             float *sa_, float *h0_) {
   int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
   float state[C] = {0};
   __shared__ float q[C], k[C], w[C], a[C], b[C];
@@ -124,12 +124,13 @@ __launch_bounds__(C, 2) __global__
 template <int C>
 __launch_bounds__(C, 2) __global__
     void backward_kernel_sane(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_,
-                            F_ b_, const float *__restrict__ tau_,
-                            const float *__restrict__ mask_, F_ dy_,
-                            float *__restrict__ s_, float *__restrict__ sa_,
-                            float *__restrict__ dht_, float *__restrict__ dh0_,
-                            float *__restrict__ dtau_, bf *dw_, bf *dq_,
-                            bf *dk_, bf *dv_, bf *da_, bf *db_) {
+                              F_ b_, const float *__restrict__ tau_,
+                              const float *__restrict__ mask_, F_ dy_,
+                              float *__restrict__ s_, float *__restrict__ sa_,
+                              float *__restrict__ dht_,
+                              float *__restrict__ dh0_,
+                              float *__restrict__ dtau_, bf *dw_, bf *dq_,
+                              bf *dk_, bf *dv_, bf *da_, bf *db_) {
 
   int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
   float stateT[C] = {0}, dstate[C] = {0}, dstateT[C] = {0};
@@ -272,10 +273,10 @@ __launch_bounds__(C, 2) __global__
 template <int C>
 __launch_bounds__(C, 2) __global__
     void forward_inference_kernel_sane(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_,
-                                     F_ a_, F_ b_,
-                                     const float *__restrict__ tau_,
-                                     const float *__restrict__ mask_, bf *y_,
-                                     float *s_, float *h0_) {
+                                       F_ a_, F_ b_,
+                                       const float *__restrict__ tau_,
+                                       const float *__restrict__ mask_, bf *y_,
+                                       float *s_, float *h0_) {
   int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
   float state[C] = {0};
   __shared__ float q[C], k[C], w[C], a[C], b[C];
@@ -350,8 +351,9 @@ __launch_bounds__(C, 2) __global__
 template <int C>
 __launch_bounds__(C, 2) __global__
     void forward_kernel_sane_no_mask(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_,
-                                   F_ a_, F_ b_, const float *__restrict__ tau_,
-                                   bf *y_, float *s_, float *sa_, float *h0_) {
+                                     F_ a_, F_ b_,
+                                     const float *__restrict__ tau_, bf *y_,
+                                     float *s_, float *sa_, float *h0_) {
   int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
   float state[C] = {0};
   __shared__ float q[C], k[C], w[C], a[C], b[C];
@@ -572,10 +574,10 @@ __launch_bounds__(C, 2) __global__ void backward_kernel_sane_no_mask(
 //   _CHUNK_LEN_: chunk 长度，固定 16。
 template <int C>
 __launch_bounds__(C, 2) __global__
-    void forward_inference_kernel_sane_no_mask(int T, int H, F_ w_, F_ q_, F_ k_,
-                                             F_ v_, F_ a_, F_ b_,
-                                             const float *__restrict__ tau_,
-                                             bf *y_, float *s_, float *h0_) {
+    void forward_inference_kernel_sane_no_mask(int T, int H, F_ w_, F_ q_,
+                                               F_ k_, F_ v_, F_ a_, F_ b_,
+                                               const float *__restrict__ tau_,
+                                               bf *y_, float *s_, float *h0_) {
   int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
   float state[C] = {0};
   __shared__ float q[C], k[C], w[C], a[C], b[C];
@@ -636,8 +638,8 @@ __launch_bounds__(C, 2) __global__
 // 编译期宏:
 //   _C_: head_size；_CHUNK_LEN_: chunk 长度，固定 16。
 void cuda_forward_sane(int B, int T, int H, bf *w, bf *q, bf *k, bf *v, bf *a,
-                     bf *b, const float *tau, const float *mask, bf *y,
-                     float *s, float *sa, float *h0) {
+                       bf *b, const float *tau, const float *mask, bf *y,
+                       float *s, float *sa, float *h0) {
   constexpr int C = _C_;
   dim3 blocks(H, B);
   dim3 threads(C);
@@ -656,15 +658,16 @@ void cuda_forward_sane(int B, int T, int H, bf *w, bf *q, bf *k, bf *v, bf *a,
 // 编译期宏:
 //   _C_: head_size；_CHUNK_LEN_: chunk 长度，固定 16。
 void cuda_backward_sane(int B, int T, int H, bf *w, bf *q, bf *k, bf *v, bf *a,
-                      bf *b, const float *tau, const float *mask, bf *dy,
-                      float *s, float *sa, float *dht, float *dh0, float *dtau,
-                      bf *dw, bf *dq, bf *dk, bf *dv, bf *da, bf *db) {
+                        bf *b, const float *tau, const float *mask, bf *dy,
+                        float *s, float *sa, float *dht, float *dh0,
+                        float *dtau, bf *dw, bf *dq, bf *dk, bf *dv, bf *da,
+                        bf *db) {
   constexpr int C = _C_;
   dim3 blocks(H, B);
   dim3 threads(C);
-  backward_kernel_sane<C><<<blocks, threads>>>(T, H, w, q, k, v, a, b, tau, mask,
-                                             dy, s, sa, dht, dh0, dtau, dw, dq,
-                                             dk, dv, da, db);
+  backward_kernel_sane<C><<<blocks, threads>>>(T, H, w, q, k, v, a, b, tau,
+                                               mask, dy, s, sa, dht, dh0, dtau,
+                                               dw, dq, dk, dv, da, db);
 }
 
 // RWKV-7-SANE 带 mask 前向推理 host 包装函数。
@@ -676,9 +679,10 @@ void cuda_backward_sane(int B, int T, int H, bf *w, bf *q, bf *k, bf *v, bf *a,
 //
 // 编译期宏:
 //   _C_: head_size；_CHUNK_LEN_: chunk 长度，固定 16。
-void cuda_forward_inference_sane(int B, int T, int H, bf *w, bf *q, bf *k, bf *v,
-                               bf *a, bf *b, const float *tau,
-                               const float *mask, bf *y, float *s, float *h0) {
+void cuda_forward_inference_sane(int B, int T, int H, bf *w, bf *q, bf *k,
+                                 bf *v, bf *a, bf *b, const float *tau,
+                                 const float *mask, bf *y, float *s,
+                                 float *h0) {
   constexpr int C = _C_;
   dim3 blocks(H, B);
   dim3 threads(C);
@@ -696,8 +700,8 @@ void cuda_forward_inference_sane(int B, int T, int H, bf *w, bf *q, bf *k, bf *v
 // 编译期宏:
 //   _C_: head_size；_CHUNK_LEN_: chunk 长度，固定 16。
 void cuda_forward_sane_no_mask(int B, int T, int H, bf *w, bf *q, bf *k, bf *v,
-                             bf *a, bf *b, const float *tau, bf *y, float *s,
-                             float *sa, float *h0) {
+                               bf *a, bf *b, const float *tau, bf *y, float *s,
+                               float *sa, float *h0) {
   constexpr int C = _C_;
   dim3 blocks(H, B);
   dim3 threads(C);
@@ -716,9 +720,10 @@ void cuda_forward_sane_no_mask(int B, int T, int H, bf *w, bf *q, bf *k, bf *v,
 // 编译期宏:
 //   _C_: head_size；_CHUNK_LEN_: chunk 长度，固定 16。
 void cuda_backward_sane_no_mask(int B, int T, int H, bf *w, bf *q, bf *k, bf *v,
-                              bf *a, bf *b, const float *tau, bf *dy, float *s,
-                              float *sa, float *dht, float *dh0, float *dtau,
-                              bf *dw, bf *dq, bf *dk, bf *dv, bf *da, bf *db) {
+                                bf *a, bf *b, const float *tau, bf *dy,
+                                float *s, float *sa, float *dht, float *dh0,
+                                float *dtau, bf *dw, bf *dq, bf *dk, bf *dv,
+                                bf *da, bf *db) {
   constexpr int C = _C_;
   dim3 blocks(H, B);
   dim3 threads(C);
@@ -736,9 +741,10 @@ void cuda_backward_sane_no_mask(int B, int T, int H, bf *w, bf *q, bf *k, bf *v,
 //
 // 编译期宏:
 //   _C_: head_size；_CHUNK_LEN_: chunk 长度，固定 16。
-void cuda_forward_inference_sane_no_mask(int B, int T, int H, bf *w, bf *q, bf *k,
-                                       bf *v, bf *a, bf *b, const float *tau,
-                                       bf *y, float *s, float *h0) {
+void cuda_forward_inference_sane_no_mask(int B, int T, int H, bf *w, bf *q,
+                                         bf *k, bf *v, bf *a, bf *b,
+                                         const float *tau, bf *y, float *s,
+                                         float *h0) {
   constexpr int C = _C_;
   dim3 blocks(H, B);
   dim3 threads(C);
