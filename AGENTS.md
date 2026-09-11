@@ -100,7 +100,7 @@ MANIFEST.in                  # 源码分发清单
 
 `chunk_size` 不是环境变量，而是算子/工厂函数的参数，默认 16。不同后端对其处理不同：
 
-- **CUDA 后端**：`chunk_size` 是编译期常量（`-D_CHUNK_LEN_`），必须通过工厂函数指定；返回的算子仍带 `chunk_size` 参数，但传入与编译值不同的 `chunk_size` 会报错。不同 `chunk_size` 会各自编译一次，互不影响。涉及算子：`generalized_delta_rule`、`generalized_delta_rule_sane`、`gated_delta_net_chunk`、`gated_delta_net_chunk_sane`、`gated_delta_net_recurrent_sane`。
+- **CUDA 后端**：`chunk_size` 是编译期常量（`-D_CHUNK_LEN_`），必须通过工厂函数指定；返回的算子仍带 `chunk_size` 参数，但传入与编译值不同的 `chunk_size` 会报错。不同 `chunk_size` 会各自编译一次，互不影响。涉及算子：`generalized_delta_rule`、`generalized_delta_rule_sane`、`gated_delta_net_chunk`、`gated_delta_net_chunk_sane`、`gated_delta_net_recurrent_sane`、`delta_net_recurrent_sane`。
 - **Triton / Pallas / native 后端**：`chunk_size` 在每次调用时作为 `tl.constexpr` 或直接参数传入，无需工厂指定，可在调用时修改。
 
 `gated_delta_net_recurrent`（无 SANE）的 native/Triton 实现接受 `chunk_size` 但忽略，
@@ -277,13 +277,18 @@ MANIFEST.in                  # 源码分发清单
 
 | Framework | cuda | triton | native |
 |-----------|------|--------|--------|
-| PyTorch   | ❌   | ❌     | ✅     |
-| JAX       | ❌   | ❌     | ✅     |
+| PyTorch   | ✅   | ✅     | ✅     |
+| JAX       | ✅   | ✅     | ✅     |
 | TensorFlow| ❌   | ❌     | ✅     |
 | NumPy     | ❌   | ❌     | ✅     |
 | OpenVINO  | ❌   | ❌     | ✅     |
 
-> 当前仅提供纯 Keras ops 的 native 实现，加速内核在后续阶段补齐（见 §14）。
+> Torch 后端的 `native` 在非 CPU 平台默认为 Triton 实现；JAX 侧 `triton`
+> 需显式 `KERNEL_TYPE="triton"` 且安装 `jax-triton`，`native` 在 GPU/TPU 上为 Pallas 实现。
+> `cuda` 在 PyTorch（C++ 扩展）与 JAX（FFI，需 JAX >= 0.4.31）均提供训练（含反向含 `tau` 梯度）
+> /推理/单步三入口，`chunk_size` 作为编译期常量按 `(K, V, chunk_size)` 懒编译。
+> 训练反向的 `dtau` 由 `atomic_add` 累加，Triton autotune `pre_hook` / JAX `zeroed_outputs`
+> 保证其初值为零。
 
 #### DeltaNet chunkwise SANE `delta_net_chunk_sane`
 
@@ -314,6 +319,7 @@ jax 侧所有加速算子都用 `custom_partitioning` + einsum 风格 `sharding_
 | gdn_recurrent cuda / triton / pallas | ✅ | ✅ |
 | gdn_recurrent_sane cuda / triton / pallas | ✅ | ✅ |
 | delta_net_recurrent cuda / triton / pallas | ✅ | ✅ |
+| delta_net_recurrent_sane cuda / triton / pallas | ✅ | ✅ |
 | gdn_chunk_sane triton | ✅ | ✅ |
 | delta_net_chunk_sane triton | ✅ | ✅ |
 | rwkv6 cuda | ✅ | ❌（channel 融合为 `c`，head 维未暴露） |
@@ -1610,6 +1616,12 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
 | `rwkv_ops/delta_net_recurrent/torch_cuda_kernel/` | DeltaNet recurrent PyTorch C++/CUDA 扩展（训练含反向 / 推理 / 单步，按 (K,V,chunk) 懒编译） |
 | `rwkv_ops/delta_net_recurrent/jax_cuda_kernel/` | DeltaNet recurrent JAX FFI CUDA（训练含反向 / 推理 / 单步，按 (K,V,chunk) 懒编译） |
 | `rwkv_ops/delta_net_recurrent_sane/native_keras_op.py` | DeltaNet recurrent SANE 原生参考实现 |
+| `rwkv_ops/delta_net_recurrent_sane/triton_kernel.py` | DeltaNet recurrent SANE 共享 Triton 内核 |
+| `rwkv_ops/delta_net_recurrent_sane/torch_triton_kernel.py` | DeltaNet recurrent SANE PyTorch Triton 桥接 |
+| `rwkv_ops/delta_net_recurrent_sane/jax_triton_kernel.py` | DeltaNet recurrent SANE JAX-Triton 桥接 |
+| `rwkv_ops/delta_net_recurrent_sane/jax_pallas_kernel.py` | DeltaNet recurrent SANE Pallas 内核 |
+| `rwkv_ops/delta_net_recurrent_sane/torch_cuda_kernel/` | DeltaNet recurrent SANE PyTorch C++/CUDA 扩展（训练含反向含 dtau / 推理 / 单步） |
+| `rwkv_ops/delta_net_recurrent_sane/jax_cuda_kernel/` | DeltaNet recurrent SANE JAX FFI CUDA（训练含反向 / 推理 / 单步，按 (K,V,chunk) 懒编译） |
 | `rwkv_ops/rwkv6_kernel/ops_rwkv_kernel.py` | RWKV-6 数值 ground truth |
 | `rwkv_ops/rwkv6_kernel/native_keras_op.py` | RWKV-6 函数式原生封装 |
 | `rwkv_ops/mhc_kernel/native_op.py` | mHC 原生参考实现 |
@@ -1663,7 +1675,7 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
 | 2 | recurrent Triton（`triton_kernel.py` 共享 kernel + torch/jax 桥接），对照 `gdn_recurrent/` 的实现方式与 API 派生；训练/推理/单步三个算子都要有 Triton 入口 | 完成 |
 | 3 | chunk Triton（torch/jax）。chunk 家族**只做 native + Triton**：Pallas 过于复杂不做；CUDA 不做（自研 SIMT gemm 打不过 `tl.dot`） | 完成 |
 | 4 | recurrent Pallas（jax）+ CUDA（torch 扩展 / jax FFI），对照阶段 2 的 Triton 逻辑。分发语义：torch 非 CPU 时 native 默认即 Triton；jax GPU/TPU 时 native 默认即 Pallas；cuda 需显式 `KERNEL_TYPE="cuda"` | 完成 |
-| 5 | SANE 变体（`delta_net_chunk_sane` / `delta_net_recurrent_sane`）。变化很小（约 95% 代码复用前四阶段产物），全部放最后做 | 进行中（native + chunk Triton 已完成） |
+| 5 | SANE 变体（`delta_net_chunk_sane` / `delta_net_recurrent_sane`）。变化很小（约 95% 代码复用前四阶段产物），全部放最后做 | 完成 |
 
 ### 14.3 移植要点
 

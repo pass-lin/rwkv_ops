@@ -984,13 +984,15 @@ out, final_state = delta_net_recurrent_sane(
 
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
-| PyTorch     | ❌   | ❌     | ✅     |
-| JAX         | ❌   | ❌     | ✅     |
+| PyTorch     | ✅   | ✅     | ✅     |
+| JAX         | ✅   | ✅     | ✅     |
 | TensorFlow  | ❌   | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 | OpenVINO    | ❌   | ❌     | ✅     |
 
-> 当前仅提供纯 Keras ops 的 native 实现；加速内核在后续阶段补齐。
+1. Torch 后端的 `native` 在非 CPU 平台默认为 Triton 实现；JAX 侧 `triton` 需显式 `KERNEL_TYPE="triton"` 并安装 `jax-triton`，`native` 在 GPU/TPU 上为 Pallas 实现，其余为纯 Keras ops。`cuda` 在 PyTorch（C++ 扩展）与 JAX（FFI，需 JAX >= 0.4.31）均提供训练（含反向含 `tau` 梯度）/推理/单步三入口，`chunk_size` 作为编译期常量按 `(K, V, chunk_size)` 懒编译。
+2. 训练入口支持反向传播（含 `tau` 梯度）；推理与单步入口**没有梯度**。
+3. `mask=None` 时仍执行无条件 SANE；`output_final_state=False` 时同样走无条件 SANE。
 
 <a id="delta_net_chunk_sane-使用方法"></a>
 ## delta_net_chunk_sane 使用方法

@@ -1005,13 +1005,15 @@ Single-step RNN entry point (decode phase); additionally takes `do_sane`.
 
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
-| PyTorch     | ❌   | ❌     | ✅     |
-| JAX         | ❌   | ❌     | ✅     |
+| PyTorch     | ✅   | ✅     | ✅     |
+| JAX         | ✅   | ✅     | ✅     |
 | TensorFlow  | ❌   | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 | OpenVINO    | ❌   | ❌     | ✅     |
 
-> Only the pure Keras ops `native` implementation is available for now; accelerated kernels will follow in later phases.
+1. On the Torch backend, `native` defaults to the Triton implementation on non-CPU platforms; on the JAX side, `triton` requires explicit `KERNEL_TYPE="triton"` and the `jax-triton` package, while `native` is the Pallas implementation on GPU/TPU and pure Keras ops elsewhere. `cuda` provides the training (with backward including the `tau` gradient) / inference / single-step entry points on both PyTorch (C++ extension) and JAX (FFI, requires JAX >= 0.4.31); `chunk_size` is a compile-time constant, lazily compiled per `(K, V, chunk_size)`.
+2. The training entry point supports back-propagation (including the `tau` gradient); the inference and single-step entry points **do not support gradients**.
+3. `mask=None` still applies unconditional SANE; `output_final_state=False` also takes the unconditional-SANE path.
 
 <a id="usage-of-delta_net_chunk_sane"></a>
 ## Usage of `delta_net_chunk_sane`
