@@ -60,13 +60,13 @@ constexpr int kJBlock = (_K_) < 64 ? (_K_) : 64;
 //   _V_: value head size，不超过 1024。
 //   _CHUNK_LEN_: chunk 长度，默认 16，T 必须被其整除。
 template <typename ET>
-__global__ __launch_bounds__(kBlockThreads) void delta_net_recurrent_sane_fwd_kernel(
+__global__
+__launch_bounds__(kBlockThreads) void delta_net_recurrent_sane_fwd_kernel(
     int T, int H, float scale, const ET *__restrict__ q_,
     const ET *__restrict__ k_, const ET *__restrict__ v_,
-    const float *__restrict__ beta_,
-    const float *__restrict__ tau_, const float *__restrict__ mask_,
-    const float *__restrict__ h0_, ET *__restrict__ o_,
-    float *__restrict__ kv_mem_, float *__restrict__ chkp_,
+    const float *__restrict__ beta_, const float *__restrict__ tau_,
+    const float *__restrict__ mask_, const float *__restrict__ h0_,
+    ET *__restrict__ o_, float *__restrict__ kv_mem_, float *__restrict__ chkp_,
     float *__restrict__ inv_q_, float *__restrict__ inv_k_,
     float *__restrict__ ht_) {
   const int bb = blockIdx.y, hh = blockIdx.x, v = threadIdx.x;
@@ -214,17 +214,18 @@ __global__ __launch_bounds__(kBlockThreads) void delta_net_recurrent_sane_fwd_ke
 //   _V_: value head size，不超过 1024。
 //   _CHUNK_LEN_: chunk 长度，默认 16，T 必须被其整除。
 template <typename ET>
-__global__ __launch_bounds__(kBlockThreads) void delta_net_recurrent_sane_bwd_kernel(
+__global__
+__launch_bounds__(kBlockThreads) void delta_net_recurrent_sane_bwd_kernel(
     int T, int H, float scale, const ET *__restrict__ q_,
     const ET *__restrict__ k_, const ET *__restrict__ v_,
-    const float *__restrict__ beta_,
-    const float *__restrict__ tau_, const float *__restrict__ mask_,
-    const ET *__restrict__ do_, const float *__restrict__ dht_,
-    const float *__restrict__ kv_mem_, const float *__restrict__ inv_q_,
-    const float *__restrict__ inv_k_, const float *__restrict__ chkp_,
-    float *__restrict__ dq_, float *__restrict__ dk_, float *__restrict__ dv_,
-    float *__restrict__ dbeta_,
-    float *__restrict__ dtau_, float *__restrict__ dh0_) {
+    const float *__restrict__ beta_, const float *__restrict__ tau_,
+    const float *__restrict__ mask_, const ET *__restrict__ do_,
+    const float *__restrict__ dht_, const float *__restrict__ kv_mem_,
+    const float *__restrict__ inv_q_, const float *__restrict__ inv_k_,
+    const float *__restrict__ chkp_, float *__restrict__ dq_,
+    float *__restrict__ dk_, float *__restrict__ dv_,
+    float *__restrict__ dbeta_, float *__restrict__ dtau_,
+    float *__restrict__ dh0_) {
   __shared__ float sh_q[_K_], sh_k[_K_], sh_khat[_K_], sh_qt[_K_];
   __shared__ float sh_dkhat[_K_], sh_dqhat[_K_];
   __shared__ float sh_do[_V_], sh_delta[_V_], sh_dkv[_V_];
@@ -450,10 +451,9 @@ __global__
 __launch_bounds__(kBlockThreads) void delta_net_recurrent_sane_inference_kernel(
     int T, int H, float scale, const ET *__restrict__ q_,
     const ET *__restrict__ k_, const ET *__restrict__ v_,
-    const float *__restrict__ beta_,
-    const float *__restrict__ tau_, const float *__restrict__ mask_,
-    const float *__restrict__ h0_, ET *__restrict__ o_,
-    float *__restrict__ ht_) {
+    const float *__restrict__ beta_, const float *__restrict__ tau_,
+    const float *__restrict__ mask_, const float *__restrict__ h0_,
+    ET *__restrict__ o_, float *__restrict__ ht_) {
   const int bb = blockIdx.y, hh = blockIdx.x, v = threadIdx.x;
   const bool active = v < _V_;
   const int64_t bh = (int64_t)bb * H + hh;
@@ -570,10 +570,10 @@ template <typename ET>
 __global__
 __launch_bounds__(kBlockThreads) void delta_net_recurrent_sane_single_step_kernel(
     int H, float scale, const ET *__restrict__ q_, const ET *__restrict__ k_,
-    const ET *__restrict__ v_,
-    const float *__restrict__ beta_, const float *__restrict__ tau_,
-    const float *__restrict__ do_sane_, const float *__restrict__ h0_,
-    ET *__restrict__ o_, float *__restrict__ ht_) {
+    const ET *__restrict__ v_, const float *__restrict__ beta_,
+    const float *__restrict__ tau_, const float *__restrict__ do_sane_,
+    const float *__restrict__ h0_, ET *__restrict__ o_,
+    float *__restrict__ ht_) {
   const int bb = blockIdx.y, hh = blockIdx.x, v = threadIdx.x;
   const bool active = v < _V_;
   const int64_t bh = (int64_t)bb * H + hh;
@@ -640,25 +640,23 @@ __launch_bounds__(kBlockThreads) void delta_net_recurrent_sane_single_step_kerne
 
 template <typename ET>
 void cuda_dn_sane_forward(int B, int T, int H, float scale, const ET *q,
-                           const ET *k, const ET *v,
-                           const float *beta, const float *tau,
-                           const float *mask, const float *h0, ET *o,
-                           float *kv_mem, float *chkp, float *inv_q,
-                           float *inv_k, float *ht) {
+                          const ET *k, const ET *v, const float *beta,
+                          const float *tau, const float *mask, const float *h0,
+                          ET *o, float *kv_mem, float *chkp, float *inv_q,
+                          float *inv_k, float *ht) {
   delta_net_recurrent_sane_fwd_kernel<ET>
-      <<<dim3(H, B), kBlockThreads>>>(T, H, scale, q, k, v, beta, tau, mask,
-                                      h0, o, kv_mem, chkp, inv_q, inv_k, ht);
+      <<<dim3(H, B), kBlockThreads>>>(T, H, scale, q, k, v, beta, tau, mask, h0,
+                                      o, kv_mem, chkp, inv_q, inv_k, ht);
 }
 
 template <typename ET>
 void cuda_dn_sane_backward(int B, int T, int H, float scale, const ET *q,
-                            const ET *k, const ET *v,
-                            const float *beta, const float *tau,
-                            const float *mask, const ET *dout, const float *dht,
-                            const float *kv_mem, const float *inv_q,
-                            const float *inv_k, const float *chkp, float *dq,
-                            float *dk, float *dv, float *dbeta,
-                            float *dtau, float *dh0) {
+                           const ET *k, const ET *v, const float *beta,
+                           const float *tau, const float *mask, const ET *dout,
+                           const float *dht, const float *kv_mem,
+                           const float *inv_q, const float *inv_k,
+                           const float *chkp, float *dq, float *dk, float *dv,
+                           float *dbeta, float *dtau, float *dh0) {
   delta_net_recurrent_sane_bwd_kernel<ET><<<dim3(H, B), kBlockThreads>>>(
       T, H, scale, q, k, v, beta, tau, mask, dout, dht, kv_mem, inv_q, inv_k,
       chkp, dq, dk, dv, dbeta, dtau, dh0);
@@ -666,61 +664,62 @@ void cuda_dn_sane_backward(int B, int T, int H, float scale, const ET *q,
 
 template <typename ET>
 void cuda_dn_sane_forward_inference(int B, int T, int H, float scale,
-                                     const ET *q, const ET *k, const ET *v,
-                                     const float *beta,
-                                     const float *tau, const float *mask,
-                                     const float *h0, ET *o, float *ht) {
+                                    const ET *q, const ET *k, const ET *v,
+                                    const float *beta, const float *tau,
+                                    const float *mask, const float *h0, ET *o,
+                                    float *ht) {
   delta_net_recurrent_sane_inference_kernel<ET><<<dim3(H, B), kBlockThreads>>>(
       T, H, scale, q, k, v, beta, tau, mask, h0, o, ht);
 }
 
 template <typename ET>
 void cuda_dn_sane_single_step(int B, int H, float scale, const ET *q,
-                               const ET *k, const ET *v,
-                               const float *beta, const float *tau,
-                               const float *do_sane, const float *h0, ET *o,
-                               float *ht) {
-  delta_net_recurrent_sane_single_step_kernel<ET><<<dim3(H, B), kBlockThreads>>>(
-      H, scale, q, k, v, beta, tau, do_sane, h0, o, ht);
+                              const ET *k, const ET *v, const float *beta,
+                              const float *tau, const float *do_sane,
+                              const float *h0, ET *o, float *ht) {
+  delta_net_recurrent_sane_single_step_kernel<ET>
+      <<<dim3(H, B), kBlockThreads>>>(H, scale, q, k, v, beta, tau, do_sane, h0,
+                                      o, ht);
 }
 
 // 显式实例化 bfloat16 与 float32 两个版本，供 .cpp 侧按输入 dtype 分发。
 template void cuda_dn_sane_forward<bf>(int, int, int, float, const bf *,
-                                        const bf *, const bf *, 
-                                        const float *, const float *,
-                                        const float *, const float *, bf *,
-                                        float *, float *, float *, float *,
-                                        float *);
-template void cuda_dn_sane_forward<float>(int, int, int, float, 
-                                           const float *, const float *,
-                                           const float *, const float *,
-                                           const float *, const float *,
-                                           const float *, float *, float *,
-                                           float *, float *, float *, float *);
+                                       const bf *, const bf *, const float *,
+                                       const float *, const float *,
+                                       const float *, bf *, float *, float *,
+                                       float *, float *, float *);
+template void cuda_dn_sane_forward<float>(int, int, int, float, const float *,
+                                          const float *, const float *,
+                                          const float *, const float *,
+                                          const float *, const float *, float *,
+                                          float *, float *, float *, float *,
+                                          float *);
 template void cuda_dn_sane_backward<bf>(
-    int, int, int, float, const bf *, const bf *, const bf *, 
-    const float *, const float *, const float *, const bf *, const float *,
-    const float *, const float *, const float *, const float *, float *,
-    float *, float *, float *, float *, float *, float *);
+    int, int, int, float, const bf *, const bf *, const bf *, const float *,
+    const float *, const float *, const bf *, const float *, const float *,
+    const float *, const float *, const float *, float *, float *, float *,
+    float *, float *, float *);
 template void cuda_dn_sane_backward<float>(
-    int, int, int, float,  const float *, const float *,
+    int, int, int, float, const float *, const float *, const float *,
     const float *, const float *, const float *, const float *, const float *,
-    const float *, const float *, const float *, const float *, const float *,
-    float *, float *, float *, float *, float *, float *, float *);
-template void cuda_dn_sane_forward_inference<bf>(
-    int, int, int, float, const bf *, const bf *, const bf *, 
-    const float *, const float *, const float *, const float *, bf *, float *);
+    const float *, const float *, const float *, const float *, float *,
+    float *, float *, float *, float *, float *);
+template void cuda_dn_sane_forward_inference<bf>(int, int, int, float,
+                                                 const bf *, const bf *,
+                                                 const bf *, const float *,
+                                                 const float *, const float *,
+                                                 const float *, bf *, float *);
 template void cuda_dn_sane_forward_inference<float>(
-    int, int, int, float,  const float *, const float *,
-    const float *, const float *, const float *, const float *, const float *,
-    float *, float *);
+    int, int, int, float, const float *, const float *, const float *,
+    const float *, const float *, const float *, const float *, float *,
+    float *);
 template void cuda_dn_sane_single_step<bf>(int, int, float, const bf *,
-                                            const bf *, const bf *,
-                                             const float *,
-                                            const float *, const float *,
-                                            const float *, bf *, float *);
-template void cuda_dn_sane_single_step<float>(int, int, float, 
-                                               const float *, const float *,
-                                               const float *, const float *,
-                                               const float *, const float *,
-                                               const float *, float *, float *);
+                                           const bf *, const bf *,
+                                           const float *, const float *,
+                                           const float *, const float *, bf *,
+                                           float *);
+template void cuda_dn_sane_single_step<float>(int, int, float, const float *,
+                                              const float *, const float *,
+                                              const float *, const float *,
+                                              const float *, const float *,
+                                              float *, float *);

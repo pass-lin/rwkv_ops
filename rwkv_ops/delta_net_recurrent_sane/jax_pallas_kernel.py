@@ -543,7 +543,7 @@ def _delta_net_recurrent_sane_fwd_warmup(q, k, v, beta, tau, mask, h0, chunk_siz
     )
 
 
-@functools.partial(custom_partitioning, static_argnums=(8,))
+@functools.partial(custom_partitioning, static_argnums=(7,))
 def _delta_net_recurrent_sane_fwd_spmd(q, k, v, beta, tau, mask, h0, chunk_size: int):
     return _delta_net_recurrent_sane_fwd_pallas_call(
         q, k, v, beta, tau, mask, h0, chunk_size
@@ -654,7 +654,7 @@ def _delta_net_recurrent_sane_bwd_warmup(
     )
 
 
-@functools.partial(custom_partitioning, static_argnums=(14,))
+@functools.partial(custom_partitioning, static_argnums=(13,))
 def _delta_net_recurrent_sane_bwd_spmd(
     q,
     k,
@@ -812,7 +812,7 @@ def _delta_net_recurrent_sane_inf_warmup(q, k, v, beta, tau, mask, h0, chunk_siz
     )
 
 
-@functools.partial(custom_partitioning, static_argnums=(8,))
+@functools.partial(custom_partitioning, static_argnums=(7,))
 def _delta_net_recurrent_sane_inf_spmd(q, k, v, beta, tau, mask, h0, chunk_size: int):
     return _delta_net_recurrent_sane_inf_pallas_call(
         q, k, v, beta, tau, mask, h0, chunk_size

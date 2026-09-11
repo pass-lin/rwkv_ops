@@ -55,9 +55,9 @@ def _dn_sane_grads(fn, q, k, v, beta, tau, mask, h0, head_first=None):
     return q.grad, k.grad, v.grad, beta.grad, tau.grad, h0.grad
 
 
-def _make_chunk_size_8_tau_mask(B, H, T, rng):
-    """为 chunk_size=8 生成与 tests/conftest.py 同分布的 tau 与 mask。"""
-    chunk_num = T // 8
+def _make_chunk_size_32_tau_mask(B, H, T, rng):
+    """为 chunk_size=32 生成与 tests/conftest.py 同分布的 tau 与 mask。"""
+    chunk_num = T // 32
     x = rng.standard_normal((B, chunk_num, H), dtype=np.float32) * 0.5 + 7.0
     tau = np.log1p(np.exp(x)) + 1.0
     mask = rng.integers(0, 2, (B, chunk_num)).astype(np.float32)
@@ -508,10 +508,10 @@ def test_dn_sane_cuda_recurrent_head_first(delta_net_sane_inputs, dn_sane_cuda_d
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_dn_sane_cuda_recurrent_chunk_size_8_matches_native(
+def test_dn_sane_cuda_recurrent_chunk_size_32_matches_native(
     delta_net_sane_inputs, dn_sane_cuda_device
 ):
-    """chunk_size=8 时 CUDA recurrent SANE 训练算子前向与 native 参考对齐。"""
+    """chunk_size=32 时 CUDA recurrent SANE 训练算子前向与 native 参考对齐。"""
     q = _to_cuda_tensor(delta_net_sane_inputs["q"], dn_sane_cuda_device)
     k = _to_cuda_tensor(delta_net_sane_inputs["k"], dn_sane_cuda_device)
     v = _to_cuda_tensor(delta_net_sane_inputs["v"], dn_sane_cuda_device)
@@ -519,34 +519,34 @@ def test_dn_sane_cuda_recurrent_chunk_size_8_matches_native(
     h0 = _to_cuda_tensor(delta_net_sane_inputs["h0"], dn_sane_cuda_device)
 
     B, T, H, _ = q.shape
-    tau8, mask8 = _make_chunk_size_8_tau_mask(B, H, T, np.random.default_rng(42))
-    tau8 = _to_cuda_tensor(tau8, dn_sane_cuda_device)
-    mask8 = _to_cuda_tensor(mask8, dn_sane_cuda_device)
+    tau32, mask32 = _make_chunk_size_32_tau_mask(B, H, T, np.random.default_rng(42))
+    tau32 = _to_cuda_tensor(tau32, dn_sane_cuda_device)
+    mask32 = _to_cuda_tensor(mask32, dn_sane_cuda_device)
 
-    op_cuda = get_delta_net_recurrent_sane(KERNEL_TYPE="cuda", chunk_size=8)
+    op_cuda = get_delta_net_recurrent_sane(KERNEL_TYPE="cuda", chunk_size=32)
 
     out_cuda, state_cuda = op_cuda(
-        q, k, v, beta, tau8, mask=mask8, initial_state=h0, output_final_state=True
+        q, k, v, beta, tau32, mask=mask32, initial_state=h0, output_final_state=True
     )
     out_ref, state_ref = dn_native_recurrent(
         q,
         k,
         v,
         beta,
-        tau8,
-        mask=mask8,
+        tau32,
+        mask=mask32,
         initial_state=h0,
         output_final_state=True,
-        chunk_size=8,
+        chunk_size=32,
     )
 
     assert_allclose_with_stats(
-        out_ref, out_cuda, "chunk_size=8 cuda vs native output", atol=1e-4, rtol=1e-3
+        out_ref, out_cuda, "chunk_size=32 cuda vs native output", atol=1e-4, rtol=1e-3
     )
     assert_allclose_with_stats(
         state_ref,
         state_cuda,
-        "chunk_size=8 cuda vs native state",
+        "chunk_size=32 cuda vs native state",
         atol=1e-4,
         rtol=1e-3,
     )
@@ -554,10 +554,10 @@ def test_dn_sane_cuda_recurrent_chunk_size_8_matches_native(
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_dn_sane_cuda_bwd_chunk_size_8_matches_native(
+def test_dn_sane_cuda_bwd_chunk_size_32_matches_native(
     delta_net_sane_inputs, dn_sane_cuda_device
 ):
-    """chunk_size=8 时 CUDA recurrent SANE 反向梯度与 native Keras autograd 对齐。"""
+    """chunk_size=32 时 CUDA recurrent SANE 反向梯度与 native Keras autograd 对齐。"""
     q = _to_cuda_tensor(delta_net_sane_inputs["q"], dn_sane_cuda_device)
     k = _to_cuda_tensor(delta_net_sane_inputs["k"], dn_sane_cuda_device)
     v = _to_cuda_tensor(delta_net_sane_inputs["v"], dn_sane_cuda_device)
@@ -565,17 +565,17 @@ def test_dn_sane_cuda_bwd_chunk_size_8_matches_native(
     h0 = _to_cuda_tensor(delta_net_sane_inputs["h0"], dn_sane_cuda_device)
 
     B, T, H, _ = q.shape
-    tau8, mask8 = _make_chunk_size_8_tau_mask(B, H, T, np.random.default_rng(42))
-    tau8 = _to_cuda_tensor(tau8, dn_sane_cuda_device)
-    mask8 = _to_cuda_tensor(mask8, dn_sane_cuda_device)
+    tau32, mask32 = _make_chunk_size_32_tau_mask(B, H, T, np.random.default_rng(42))
+    tau32 = _to_cuda_tensor(tau32, dn_sane_cuda_device)
+    mask32 = _to_cuda_tensor(mask32, dn_sane_cuda_device)
 
-    op_cuda = get_delta_net_recurrent_sane(KERNEL_TYPE="cuda", chunk_size=8)
+    op_cuda = get_delta_net_recurrent_sane(KERNEL_TYPE="cuda", chunk_size=32)
 
     def op_ref(*args, **kwargs):
-        return dn_native_recurrent(*args, **kwargs, chunk_size=8)
+        return dn_native_recurrent(*args, **kwargs, chunk_size=32)
 
-    grads_cuda = _dn_sane_grads(op_cuda, q, k, v, beta, tau8, mask8, h0)
-    grads_ref = _dn_sane_grads(op_ref, q, k, v, beta, tau8, mask8, h0)
+    grads_cuda = _dn_sane_grads(op_cuda, q, k, v, beta, tau32, mask32, h0)
+    grads_ref = _dn_sane_grads(op_ref, q, k, v, beta, tau32, mask32, h0)
 
     names = ["q", "k", "v", "beta", "tau", "h0"]
     for name, ref, tgt in zip(names, grads_ref, grads_cuda):
@@ -584,7 +584,7 @@ def test_dn_sane_cuda_bwd_chunk_size_8_matches_native(
         assert_allclose_with_stats(
             ref,
             tgt,
-            f"chunk_size=8 bwd {name}",
+            f"chunk_size=32 bwd {name}",
             atol=7e-3,
             rtol=1e-3,
         )
@@ -592,10 +592,10 @@ def test_dn_sane_cuda_bwd_chunk_size_8_matches_native(
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_dn_sane_cuda_inference_chunk_size_8_matches_native(
+def test_dn_sane_cuda_inference_chunk_size_32_matches_native(
     delta_net_sane_inputs, dn_sane_cuda_device
 ):
-    """chunk_size=8 时 CUDA recurrent SANE 推理算子前向与 native 参考对齐。"""
+    """chunk_size=32 时 CUDA recurrent SANE 推理算子前向与 native 参考对齐。"""
     q = _to_cuda_tensor(delta_net_sane_inputs["q"], dn_sane_cuda_device)
     k = _to_cuda_tensor(delta_net_sane_inputs["k"], dn_sane_cuda_device)
     v = _to_cuda_tensor(delta_net_sane_inputs["v"], dn_sane_cuda_device)
@@ -603,38 +603,38 @@ def test_dn_sane_cuda_inference_chunk_size_8_matches_native(
     h0 = _to_cuda_tensor(delta_net_sane_inputs["h0"], dn_sane_cuda_device)
 
     B, T, H, _ = q.shape
-    tau8, mask8 = _make_chunk_size_8_tau_mask(B, H, T, np.random.default_rng(42))
-    tau8 = _to_cuda_tensor(tau8, dn_sane_cuda_device)
-    mask8 = _to_cuda_tensor(mask8, dn_sane_cuda_device)
+    tau32, mask32 = _make_chunk_size_32_tau_mask(B, H, T, np.random.default_rng(42))
+    tau32 = _to_cuda_tensor(tau32, dn_sane_cuda_device)
+    mask32 = _to_cuda_tensor(mask32, dn_sane_cuda_device)
 
-    op_cuda = get_delta_net_recurrent_sane_inference(KERNEL_TYPE="cuda", chunk_size=8)
+    op_cuda = get_delta_net_recurrent_sane_inference(KERNEL_TYPE="cuda", chunk_size=32)
 
     out_cuda, state_cuda = op_cuda(
-        q, k, v, beta, tau8, mask=mask8, initial_state=h0, output_final_state=True
+        q, k, v, beta, tau32, mask=mask32, initial_state=h0, output_final_state=True
     )
     out_ref, state_ref = dn_native_inference(
         q,
         k,
         v,
         beta,
-        tau8,
-        mask=mask8,
+        tau32,
+        mask=mask32,
         initial_state=h0,
         output_final_state=True,
-        chunk_size=8,
+        chunk_size=32,
     )
 
     assert_allclose_with_stats(
         out_ref,
         out_cuda,
-        "chunk_size=8 cuda inference vs native output",
+        "chunk_size=32 cuda inference vs native output",
         atol=1e-4,
         rtol=1e-3,
     )
     assert_allclose_with_stats(
         state_ref,
         state_cuda,
-        "chunk_size=8 cuda inference vs native state",
+        "chunk_size=32 cuda inference vs native state",
         atol=1e-4,
         rtol=1e-3,
     )
@@ -642,27 +642,27 @@ def test_dn_sane_cuda_inference_chunk_size_8_matches_native(
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_dn_sane_cuda_no_final_state_chunk_size_8(
+def test_dn_sane_cuda_no_final_state_chunk_size_32(
     delta_net_sane_inputs, dn_sane_cuda_device
 ):
-    """chunk_size=8 时 output_final_state=False 不返回最终 state。"""
+    """chunk_size=32 时 output_final_state=False 不返回最终 state。"""
     q = _to_cuda_tensor(delta_net_sane_inputs["q"], dn_sane_cuda_device)
     k = _to_cuda_tensor(delta_net_sane_inputs["k"], dn_sane_cuda_device)
     v = _to_cuda_tensor(delta_net_sane_inputs["v"], dn_sane_cuda_device)
     beta = _to_cuda_tensor(delta_net_sane_inputs["beta"], dn_sane_cuda_device)
 
     B, T, H, _ = q.shape
-    tau8, mask8 = _make_chunk_size_8_tau_mask(B, H, T, np.random.default_rng(42))
-    tau8 = _to_cuda_tensor(tau8, dn_sane_cuda_device)
-    mask8 = _to_cuda_tensor(mask8, dn_sane_cuda_device)
+    tau32, mask32 = _make_chunk_size_32_tau_mask(B, H, T, np.random.default_rng(42))
+    tau32 = _to_cuda_tensor(tau32, dn_sane_cuda_device)
+    mask32 = _to_cuda_tensor(mask32, dn_sane_cuda_device)
 
-    op_cuda = get_delta_net_recurrent_sane(KERNEL_TYPE="cuda", chunk_size=8)
+    op_cuda = get_delta_net_recurrent_sane(KERNEL_TYPE="cuda", chunk_size=32)
 
     out_cuda, state_cuda = op_cuda(
-        q, k, v, beta, tau8, mask=mask8, output_final_state=False
+        q, k, v, beta, tau32, mask=mask32, output_final_state=False
     )
     out_ref, state_ref = dn_native_recurrent(
-        q, k, v, beta, tau8, mask=mask8, output_final_state=False, chunk_size=8
+        q, k, v, beta, tau32, mask=mask32, output_final_state=False, chunk_size=32
     )
 
     assert state_cuda is None
@@ -670,7 +670,7 @@ def test_dn_sane_cuda_no_final_state_chunk_size_8(
     assert_allclose_with_stats(
         out_ref,
         out_cuda,
-        "chunk_size=8 no-state cuda vs native output",
+        "chunk_size=32 no-state cuda vs native output",
         atol=1e-4,
         rtol=1e-3,
     )
@@ -678,10 +678,10 @@ def test_dn_sane_cuda_no_final_state_chunk_size_8(
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_dn_sane_cuda_mask_all_ones_matches_no_mask_chunk_size_8(
+def test_dn_sane_cuda_mask_all_ones_matches_no_mask_chunk_size_32(
     delta_net_sane_inputs, dn_sane_cuda_device
 ):
-    """chunk_size=8 时 mask=None 与 mask 全 1 输出一致，但 final_state 为 None 并报警告。"""
+    """chunk_size=32 时 mask=None 与 mask 全 1 输出一致，但 final_state 为 None 并报警告。"""
     q = _to_cuda_tensor(delta_net_sane_inputs["q"], dn_sane_cuda_device)
     k = _to_cuda_tensor(delta_net_sane_inputs["k"], dn_sane_cuda_device)
     v = _to_cuda_tensor(delta_net_sane_inputs["v"], dn_sane_cuda_device)
@@ -689,32 +689,32 @@ def test_dn_sane_cuda_mask_all_ones_matches_no_mask_chunk_size_8(
     h0 = _to_cuda_tensor(delta_net_sane_inputs["h0"], dn_sane_cuda_device)
 
     B, T, H, _ = q.shape
-    tau8, _ = _make_chunk_size_8_tau_mask(B, H, T, np.random.default_rng(42))
-    tau8 = _to_cuda_tensor(tau8, dn_sane_cuda_device)
-    mask8_ones = torch.ones(B, T // 8, dtype=torch.float32, device=dn_sane_cuda_device)
+    tau32, _ = _make_chunk_size_32_tau_mask(B, H, T, np.random.default_rng(42))
+    tau32 = _to_cuda_tensor(tau32, dn_sane_cuda_device)
+    mask32_ones = torch.ones(B, T // 8, dtype=torch.float32, device=dn_sane_cuda_device)
 
-    op_cuda = get_delta_net_recurrent_sane(KERNEL_TYPE="cuda", chunk_size=8)
+    op_cuda = get_delta_net_recurrent_sane(KERNEL_TYPE="cuda", chunk_size=32)
 
     out_masked, state_masked = op_cuda(
         q,
         k,
         v,
         beta,
-        tau8,
-        mask=mask8_ones,
+        tau32,
+        mask=mask32_ones,
         initial_state=h0,
         output_final_state=True,
     )
     with pytest.warns(UserWarning, match="mask is None"):
         out_uncond, state_uncond = op_cuda(
-            q, k, v, beta, tau8, mask=None, initial_state=h0, output_final_state=True
+            q, k, v, beta, tau32, mask=None, initial_state=h0, output_final_state=True
         )
 
     assert state_uncond is None
     assert_allclose_with_stats(
         out_uncond,
         out_masked,
-        "chunk_size=8 masked(ones) vs uncond output",
+        "chunk_size=32 masked(ones) vs uncond output",
         atol=1e-4,
         rtol=1e-3,
     )
@@ -723,10 +723,10 @@ def test_dn_sane_cuda_mask_all_ones_matches_no_mask_chunk_size_8(
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_dn_sane_cuda_mask_all_zeros_matches_original_gdn_chunk_size_8(
+def test_dn_sane_cuda_mask_all_zeros_matches_original_gdn_chunk_size_32(
     delta_net_sane_inputs, dn_sane_cuda_device
 ):
-    """chunk_size=8 时 mask 全 0 应跳过 SANE，输出与原 GDN recurrent 一致。"""
+    """chunk_size=32 时 mask 全 0 应跳过 SANE，输出与原 GDN recurrent 一致。"""
     q = _to_cuda_tensor(delta_net_sane_inputs["q"], dn_sane_cuda_device)
     k = _to_cuda_tensor(delta_net_sane_inputs["k"], dn_sane_cuda_device)
     v = _to_cuda_tensor(delta_net_sane_inputs["v"], dn_sane_cuda_device)
@@ -734,21 +734,21 @@ def test_dn_sane_cuda_mask_all_zeros_matches_original_gdn_chunk_size_8(
     h0 = _to_cuda_tensor(delta_net_sane_inputs["h0"], dn_sane_cuda_device)
 
     B, T, H, _ = q.shape
-    tau8, _ = _make_chunk_size_8_tau_mask(B, H, T, np.random.default_rng(42))
-    tau8 = _to_cuda_tensor(tau8, dn_sane_cuda_device)
-    mask8_zeros = torch.zeros(
+    tau32, _ = _make_chunk_size_32_tau_mask(B, H, T, np.random.default_rng(42))
+    tau32 = _to_cuda_tensor(tau32, dn_sane_cuda_device)
+    mask32_zeros = torch.zeros(
         B, T // 8, dtype=torch.float32, device=dn_sane_cuda_device
     )
 
-    op_cuda = get_delta_net_recurrent_sane(KERNEL_TYPE="cuda", chunk_size=8)
+    op_cuda = get_delta_net_recurrent_sane(KERNEL_TYPE="cuda", chunk_size=32)
 
     out_sane, state_sane = op_cuda(
         q,
         k,
         v,
         beta,
-        tau8,
-        mask=mask8_zeros,
+        tau32,
+        mask=mask32_zeros,
         initial_state=h0,
         output_final_state=True,
     )
@@ -759,14 +759,14 @@ def test_dn_sane_cuda_mask_all_zeros_matches_original_gdn_chunk_size_8(
     assert_allclose_with_stats(
         out_ref,
         out_sane,
-        "chunk_size=8 mask=0 vs original GDN output",
+        "chunk_size=32 mask=0 vs original GDN output",
         atol=1e-4,
         rtol=1e-3,
     )
     assert_allclose_with_stats(
         state_ref,
         state_sane,
-        "chunk_size=8 mask=0 vs original GDN state",
+        "chunk_size=32 mask=0 vs original GDN state",
         atol=1e-4,
         rtol=1e-3,
     )
@@ -774,8 +774,10 @@ def test_dn_sane_cuda_mask_all_zeros_matches_original_gdn_chunk_size_8(
 
 @pytest.mark.torch
 @pytest.mark.slow
-def test_dn_sane_cuda_bfloat16_chunk_size_8(delta_net_sane_inputs, dn_sane_cuda_device):
-    """chunk_size=8 时 bfloat16 I/O 下 CUDA 结果仍与 native float32 参考一致。"""
+def test_dn_sane_cuda_bfloat16_chunk_size_32(
+    delta_net_sane_inputs, dn_sane_cuda_device
+):
+    """chunk_size=32 时 bfloat16 I/O 下 CUDA 结果仍与 native float32 参考一致。"""
     q = _to_cuda_tensor(
         delta_net_sane_inputs["q"], dn_sane_cuda_device, dtype=torch.bfloat16
     )
@@ -789,38 +791,38 @@ def test_dn_sane_cuda_bfloat16_chunk_size_8(delta_net_sane_inputs, dn_sane_cuda_
     h0 = _to_cuda_tensor(delta_net_sane_inputs["h0"], dn_sane_cuda_device)
 
     B, T, H, _ = q.shape
-    tau8, mask8 = _make_chunk_size_8_tau_mask(B, H, T, np.random.default_rng(42))
-    tau8 = _to_cuda_tensor(tau8, dn_sane_cuda_device)
-    mask8 = _to_cuda_tensor(mask8, dn_sane_cuda_device)
+    tau32, mask32 = _make_chunk_size_32_tau_mask(B, H, T, np.random.default_rng(42))
+    tau32 = _to_cuda_tensor(tau32, dn_sane_cuda_device)
+    mask32 = _to_cuda_tensor(mask32, dn_sane_cuda_device)
 
-    op_cuda = get_delta_net_recurrent_sane(KERNEL_TYPE="cuda", chunk_size=8)
+    op_cuda = get_delta_net_recurrent_sane(KERNEL_TYPE="cuda", chunk_size=32)
 
     out_cuda, state_cuda = op_cuda(
-        q, k, v, beta, tau8, mask=mask8, initial_state=h0, output_final_state=True
+        q, k, v, beta, tau32, mask=mask32, initial_state=h0, output_final_state=True
     )
     out_ref, state_ref = dn_native_recurrent(
         q,
         k,
         v,
         beta,
-        tau8,
-        mask=mask8,
+        tau32,
+        mask=mask32,
         initial_state=h0,
         output_final_state=True,
-        chunk_size=8,
+        chunk_size=32,
     )
 
     assert_allclose_with_stats(
         out_ref,
         out_cuda,
-        "chunk_size=8 bf16 cuda vs native output",
+        "chunk_size=32 bf16 cuda vs native output",
         atol=1e-2,
         rtol=1e-2,
     )
     assert_allclose_with_stats(
         state_ref,
         state_cuda,
-        "chunk_size=8 bf16 cuda vs native state",
+        "chunk_size=32 bf16 cuda vs native state",
         atol=1e-2,
         rtol=1e-2,
     )

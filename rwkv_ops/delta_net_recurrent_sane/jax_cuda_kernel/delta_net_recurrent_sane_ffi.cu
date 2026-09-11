@@ -65,13 +65,13 @@ constexpr int kJBlock = (_K_) < 64 ? (_K_) : 64;
 //   _V_: value head size，不超过 1024。
 //   _CHUNK_LEN_: chunk 长度，默认 16，T 必须被其整除。
 template <typename ET>
-__global__ __launch_bounds__(kBlockThreads) void delta_net_recurrent_sane_fwd_kernel(
+__global__
+__launch_bounds__(kBlockThreads) void delta_net_recurrent_sane_fwd_kernel(
     int T, int H, float scale, const ET *__restrict__ q_,
     const ET *__restrict__ k_, const ET *__restrict__ v_,
-    const float *__restrict__ beta_,
-    const float *__restrict__ tau_, const float *__restrict__ mask_,
-    const float *__restrict__ h0_, ET *__restrict__ o_,
-    float *__restrict__ kv_mem_, float *__restrict__ chkp_,
+    const float *__restrict__ beta_, const float *__restrict__ tau_,
+    const float *__restrict__ mask_, const float *__restrict__ h0_,
+    ET *__restrict__ o_, float *__restrict__ kv_mem_, float *__restrict__ chkp_,
     float *__restrict__ inv_q_, float *__restrict__ inv_k_,
     float *__restrict__ ht_) {
   const int bb = blockIdx.y, hh = blockIdx.x, v = threadIdx.x;
@@ -101,7 +101,7 @@ __global__ __launch_bounds__(kBlockThreads) void delta_net_recurrent_sane_fwd_ke
       sh_k[v] = to_float(k_[qk_base + v]);
     }
     const float v_val = active ? to_float(v_[vo_base + v]) : 0.f;
-      const float beta_t = beta_[bh * T + t];
+    const float beta_t = beta_[bh * T + t];
     __syncthreads();
 
     if (v < _K_) {
@@ -219,16 +219,16 @@ __global__ __launch_bounds__(kBlockThreads) void delta_net_recurrent_sane_fwd_ke
 //   _V_: value head size，不超过 1024。
 //   _CHUNK_LEN_: chunk 长度，默认 16，T 必须被其整除。
 template <typename ET>
-__global__ __launch_bounds__(kBlockThreads) void delta_net_recurrent_sane_bwd_kernel(
+__global__
+__launch_bounds__(kBlockThreads) void delta_net_recurrent_sane_bwd_kernel(
     int T, int H, float scale, const ET *__restrict__ q_,
     const ET *__restrict__ k_, const ET *__restrict__ v_,
-    const float *__restrict__ beta_,
-    const ET *__restrict__ do_, const float *__restrict__ dht_,
-    const float *__restrict__ kv_mem_, const float *__restrict__ inv_q_,
-    const float *__restrict__ inv_k_, const float *__restrict__ chkp_,
-    const float *__restrict__ tau_, const float *__restrict__ mask_,
-    ET *__restrict__ dq_, ET *__restrict__ dk_, float *__restrict__ dv_,
-    float *__restrict__ dbeta_,
+    const float *__restrict__ beta_, const ET *__restrict__ do_,
+    const float *__restrict__ dht_, const float *__restrict__ kv_mem_,
+    const float *__restrict__ inv_q_, const float *__restrict__ inv_k_,
+    const float *__restrict__ chkp_, const float *__restrict__ tau_,
+    const float *__restrict__ mask_, ET *__restrict__ dq_, ET *__restrict__ dk_,
+    float *__restrict__ dv_, float *__restrict__ dbeta_,
     float *__restrict__ dh0_, float *__restrict__ dtau_) {
   __shared__ float sh_q[_K_], sh_k[_K_], sh_khat[_K_], sh_qt[_K_];
   __shared__ float sh_dkhat[_K_], sh_dqhat[_K_];
@@ -292,7 +292,7 @@ __global__ __launch_bounds__(kBlockThreads) void delta_net_recurrent_sane_bwd_ke
 
     const int64_t qk_base = (bh * T + t) * _K_;
     const int64_t vo_base = (bh * T + t) * _V_;
-      const float beta_t = beta_[bh * T + t];
+    const float beta_t = beta_[bh * T + t];
     const float iq = inv_q_[bh * T + t];
     const float ik = inv_k_[bh * T + t];
 
@@ -458,10 +458,9 @@ __global__
 __launch_bounds__(kBlockThreads) void delta_net_recurrent_sane_inference_kernel(
     int T, int H, float scale, const ET *__restrict__ q_,
     const ET *__restrict__ k_, const ET *__restrict__ v_,
-    const float *__restrict__ beta_,
-    const float *__restrict__ tau_, const float *__restrict__ mask_,
-    const float *__restrict__ h0_, ET *__restrict__ o_,
-    float *__restrict__ ht_) {
+    const float *__restrict__ beta_, const float *__restrict__ tau_,
+    const float *__restrict__ mask_, const float *__restrict__ h0_,
+    ET *__restrict__ o_, float *__restrict__ ht_) {
   const int bb = blockIdx.y, hh = blockIdx.x, v = threadIdx.x;
   const bool active = v < _V_;
   const int64_t bh = (int64_t)bb * H + hh;
@@ -489,7 +488,7 @@ __launch_bounds__(kBlockThreads) void delta_net_recurrent_sane_inference_kernel(
       sh_k[v] = to_float(k_[qk_base + v]);
     }
     const float v_val = active ? to_float(v_[vo_base + v]) : 0.f;
-      const float beta_t = beta_[bh * T + t];
+    const float beta_t = beta_[bh * T + t];
     __syncthreads();
 
     if (v < _K_) {
@@ -578,10 +577,10 @@ template <typename ET>
 __global__
 __launch_bounds__(kBlockThreads) void delta_net_recurrent_sane_single_step_kernel(
     int H, float scale, const ET *__restrict__ q_, const ET *__restrict__ k_,
-    const ET *__restrict__ v_,
-    const float *__restrict__ beta_, const float *__restrict__ tau_,
-    const float *__restrict__ do_sane_, const float *__restrict__ h0_,
-    ET *__restrict__ o_, float *__restrict__ ht_) {
+    const ET *__restrict__ v_, const float *__restrict__ beta_,
+    const float *__restrict__ tau_, const float *__restrict__ do_sane_,
+    const float *__restrict__ h0_, ET *__restrict__ o_,
+    float *__restrict__ ht_) {
   const int bb = blockIdx.y, hh = blockIdx.x, v = threadIdx.x;
   const bool active = v < _V_;
   const int64_t bh = (int64_t)bb * H + hh;
@@ -649,71 +648,74 @@ __launch_bounds__(kBlockThreads) void delta_net_recurrent_sane_single_step_kerne
 template <typename ET, ffi::DataType DT>
 static ffi::Error DeltaNetSaneFwdHost(
     cudaStream_t stream, ffi::Buffer<DT> q, ffi::Buffer<DT> k,
-    ffi::Buffer<DT> v, ffi::Buffer<ffi::F32> beta,
-    ffi::Buffer<ffi::F32> tau, ffi::Buffer<ffi::F32> mask,
-    ffi::Buffer<ffi::F32> h0, ffi::ResultBuffer<DT> o,
-    ffi::ResultBuffer<ffi::F32> kv_mem, ffi::ResultBuffer<ffi::F32> chkp,
-    ffi::ResultBuffer<ffi::F32> inv_q, ffi::ResultBuffer<ffi::F32> inv_k,
-    ffi::ResultBuffer<ffi::F32> ht) {
+    ffi::Buffer<DT> v, ffi::Buffer<ffi::F32> beta, ffi::Buffer<ffi::F32> tau,
+    ffi::Buffer<ffi::F32> mask, ffi::Buffer<ffi::F32> h0,
+    ffi::ResultBuffer<DT> o, ffi::ResultBuffer<ffi::F32> kv_mem,
+    ffi::ResultBuffer<ffi::F32> chkp, ffi::ResultBuffer<ffi::F32> inv_q,
+    ffi::ResultBuffer<ffi::F32> inv_k, ffi::ResultBuffer<ffi::F32> ht) {
   auto dims = q.dimensions();
   int B = dims[0], H = dims[1], T = dims[2];
   const float scale = 1.0f / sqrtf((float)_K_);
 
-  delta_net_recurrent_sane_fwd_kernel<ET><<<dim3(H, B), kBlockThreads, 0, stream>>>(
-      T, H, scale, reinterpret_cast<const ET *>(q.typed_data()),
-      reinterpret_cast<const ET *>(k.typed_data()),
-      reinterpret_cast<const ET *>(v.typed_data()),       beta.typed_data(), tau.typed_data(), mask.typed_data(), h0.typed_data(),
-      reinterpret_cast<ET *>(o->typed_data()), kv_mem->typed_data(),
-      chkp->typed_data(), inv_q->typed_data(), inv_k->typed_data(),
-      ht->typed_data());
+  delta_net_recurrent_sane_fwd_kernel<ET>
+      <<<dim3(H, B), kBlockThreads, 0, stream>>>(
+          T, H, scale, reinterpret_cast<const ET *>(q.typed_data()),
+          reinterpret_cast<const ET *>(k.typed_data()),
+          reinterpret_cast<const ET *>(v.typed_data()), beta.typed_data(),
+          tau.typed_data(), mask.typed_data(), h0.typed_data(),
+          reinterpret_cast<ET *>(o->typed_data()), kv_mem->typed_data(),
+          chkp->typed_data(), inv_q->typed_data(), inv_k->typed_data(),
+          ht->typed_data());
 
   cudaError_t err = cudaGetLastError();
   if (err != cudaSuccess)
-    return ffi::Error::Internal(std::string("delta_net_recurrent_sane_fwd error: ") +
-                                cudaGetErrorString(err));
+    return ffi::Error::Internal(
+        std::string("delta_net_recurrent_sane_fwd error: ") +
+        cudaGetErrorString(err));
   return ffi::Error::Success();
 }
 
 template <typename ET, ffi::DataType DT>
 static ffi::Error DeltaNetSaneBwdHost(
     cudaStream_t stream, ffi::Buffer<DT> q, ffi::Buffer<DT> k,
-    ffi::Buffer<DT> v, ffi::Buffer<ffi::F32> beta,
-    ffi::Buffer<DT> dy, ffi::Buffer<ffi::F32> dht, ffi::Buffer<ffi::F32> kv_mem,
+    ffi::Buffer<DT> v, ffi::Buffer<ffi::F32> beta, ffi::Buffer<DT> dy,
+    ffi::Buffer<ffi::F32> dht, ffi::Buffer<ffi::F32> kv_mem,
     ffi::Buffer<ffi::F32> inv_q, ffi::Buffer<ffi::F32> inv_k,
     ffi::Buffer<ffi::F32> chkp, ffi::Buffer<ffi::F32> tau,
     ffi::Buffer<ffi::F32> mask, ffi::ResultBuffer<DT> dq,
     ffi::ResultBuffer<DT> dk, ffi::ResultBuffer<ffi::F32> dv,
-    ffi::ResultBuffer<ffi::F32> dbeta,
-    ffi::ResultBuffer<ffi::F32> dh0, ffi::ResultBuffer<ffi::F32> dtau) {
+    ffi::ResultBuffer<ffi::F32> dbeta, ffi::ResultBuffer<ffi::F32> dh0,
+    ffi::ResultBuffer<ffi::F32> dtau) {
   auto dims = q.dimensions();
   int B = dims[0], H = dims[1], T = dims[2];
   const float scale = 1.0f / sqrtf((float)_K_);
 
-  delta_net_recurrent_sane_bwd_kernel<ET><<<dim3(H, B), kBlockThreads, 0, stream>>>(
-      T, H, scale, reinterpret_cast<const ET *>(q.typed_data()),
-      reinterpret_cast<const ET *>(k.typed_data()),
-      reinterpret_cast<const ET *>(v.typed_data()),       beta.typed_data(), reinterpret_cast<const ET *>(dy.typed_data()),
-      dht.typed_data(), kv_mem.typed_data(), inv_q.typed_data(),
-      inv_k.typed_data(), chkp.typed_data(), tau.typed_data(),
-      mask.typed_data(), reinterpret_cast<ET *>(dq->typed_data()),
-      reinterpret_cast<ET *>(dk->typed_data()), dv->typed_data(),
-      dbeta->typed_data(), dh0->typed_data(),
-      dtau->typed_data());
+  delta_net_recurrent_sane_bwd_kernel<ET>
+      <<<dim3(H, B), kBlockThreads, 0, stream>>>(
+          T, H, scale, reinterpret_cast<const ET *>(q.typed_data()),
+          reinterpret_cast<const ET *>(k.typed_data()),
+          reinterpret_cast<const ET *>(v.typed_data()), beta.typed_data(),
+          reinterpret_cast<const ET *>(dy.typed_data()), dht.typed_data(),
+          kv_mem.typed_data(), inv_q.typed_data(), inv_k.typed_data(),
+          chkp.typed_data(), tau.typed_data(), mask.typed_data(),
+          reinterpret_cast<ET *>(dq->typed_data()),
+          reinterpret_cast<ET *>(dk->typed_data()), dv->typed_data(),
+          dbeta->typed_data(), dh0->typed_data(), dtau->typed_data());
 
   cudaError_t err = cudaGetLastError();
   if (err != cudaSuccess)
-    return ffi::Error::Internal(std::string("delta_net_recurrent_sane_bwd error: ") +
-                                cudaGetErrorString(err));
+    return ffi::Error::Internal(
+        std::string("delta_net_recurrent_sane_bwd error: ") +
+        cudaGetErrorString(err));
   return ffi::Error::Success();
 }
 
 template <typename ET, ffi::DataType DT>
-static ffi::Error
-DeltaNetSaneInferenceHost(cudaStream_t stream, ffi::Buffer<DT> q, ffi::Buffer<DT> k,
-                     ffi::Buffer<DT> v,
-                     ffi::Buffer<ffi::F32> beta, ffi::Buffer<ffi::F32> tau,
-                     ffi::Buffer<ffi::F32> mask, ffi::Buffer<ffi::F32> h0,
-                     ffi::ResultBuffer<DT> o, ffi::ResultBuffer<ffi::F32> ht) {
+static ffi::Error DeltaNetSaneInferenceHost(
+    cudaStream_t stream, ffi::Buffer<DT> q, ffi::Buffer<DT> k,
+    ffi::Buffer<DT> v, ffi::Buffer<ffi::F32> beta, ffi::Buffer<ffi::F32> tau,
+    ffi::Buffer<ffi::F32> mask, ffi::Buffer<ffi::F32> h0,
+    ffi::ResultBuffer<DT> o, ffi::ResultBuffer<ffi::F32> ht) {
   auto dims = q.dimensions();
   int B = dims[0], H = dims[1], T = dims[2];
   const float scale = 1.0f / sqrtf((float)_K_);
@@ -722,9 +724,9 @@ DeltaNetSaneInferenceHost(cudaStream_t stream, ffi::Buffer<DT> q, ffi::Buffer<DT
       <<<dim3(H, B), kBlockThreads, 0, stream>>>(
           T, H, scale, reinterpret_cast<const ET *>(q.typed_data()),
           reinterpret_cast<const ET *>(k.typed_data()),
-          reinterpret_cast<const ET *>(v.typed_data()),           beta.typed_data(), tau.typed_data(), mask.typed_data(),
-          h0.typed_data(), reinterpret_cast<ET *>(o->typed_data()),
-          ht->typed_data());
+          reinterpret_cast<const ET *>(v.typed_data()), beta.typed_data(),
+          tau.typed_data(), mask.typed_data(), h0.typed_data(),
+          reinterpret_cast<ET *>(o->typed_data()), ht->typed_data());
 
   cudaError_t err = cudaGetLastError();
   if (err != cudaSuccess)
@@ -735,12 +737,11 @@ DeltaNetSaneInferenceHost(cudaStream_t stream, ffi::Buffer<DT> q, ffi::Buffer<DT
 }
 
 template <typename ET, ffi::DataType DT>
-static ffi::Error
-DeltaNetSaneSingleStepHost(cudaStream_t stream, ffi::Buffer<DT> q, ffi::Buffer<DT> k,
-                      ffi::Buffer<DT> v,
-                      ffi::Buffer<ffi::F32> beta, ffi::Buffer<ffi::F32> tau,
-                      ffi::Buffer<ffi::F32> do_sane, ffi::Buffer<ffi::F32> h0,
-                      ffi::ResultBuffer<DT> o, ffi::ResultBuffer<ffi::F32> ht) {
+static ffi::Error DeltaNetSaneSingleStepHost(
+    cudaStream_t stream, ffi::Buffer<DT> q, ffi::Buffer<DT> k,
+    ffi::Buffer<DT> v, ffi::Buffer<ffi::F32> beta, ffi::Buffer<ffi::F32> tau,
+    ffi::Buffer<ffi::F32> do_sane, ffi::Buffer<ffi::F32> h0,
+    ffi::ResultBuffer<DT> o, ffi::ResultBuffer<ffi::F32> ht) {
   auto dims = q.dimensions();
   int B = dims[0], H = dims[1];
   const float scale = 1.0f / sqrtf((float)_K_);
@@ -749,9 +750,9 @@ DeltaNetSaneSingleStepHost(cudaStream_t stream, ffi::Buffer<DT> q, ffi::Buffer<D
       <<<dim3(H, B), kBlockThreads, 0, stream>>>(
           H, scale, reinterpret_cast<const ET *>(q.typed_data()),
           reinterpret_cast<const ET *>(k.typed_data()),
-          reinterpret_cast<const ET *>(v.typed_data()),           beta.typed_data(), tau.typed_data(), do_sane.typed_data(),
-          h0.typed_data(), reinterpret_cast<ET *>(o->typed_data()),
-          ht->typed_data());
+          reinterpret_cast<const ET *>(v.typed_data()), beta.typed_data(),
+          tau.typed_data(), do_sane.typed_data(), h0.typed_data(),
+          reinterpret_cast<ET *>(o->typed_data()), ht->typed_data());
 
   cudaError_t err = cudaGetLastError();
   if (err != cudaSuccess)
@@ -763,8 +764,8 @@ DeltaNetSaneSingleStepHost(cudaStream_t stream, ffi::Buffer<DT> q, ffi::Buffer<D
 
 // FFI 注册（bf16 / f32 各一套）
 
-#define DN_SANE_DEFINE_FWD_HANDLER(SYMBOL, ET, DT)                            \
-  XLA_FFI_DEFINE_HANDLER_SYMBOL(SYMBOL, (DeltaNetSaneFwdHost<ET, DT>),              \
+#define DN_SANE_DEFINE_FWD_HANDLER(SYMBOL, ET, DT)                             \
+  XLA_FFI_DEFINE_HANDLER_SYMBOL(SYMBOL, (DeltaNetSaneFwdHost<ET, DT>),         \
                                 ffi::Ffi::Bind()                               \
                                     .Ctx<ffi::PlatformStream<cudaStream_t>>()  \
                                     .Arg<ffi::Buffer<DT>>()       /* q */      \
@@ -782,8 +783,8 @@ DeltaNetSaneSingleStepHost(cudaStream_t stream, ffi::Buffer<DT> q, ffi::Buffer<D
                                     .Ret<ffi::Buffer<ffi::F32>>() /* ht */,    \
                                 {ffi::Traits::kCmdBufferCompatible})
 
-#define DN_SANE_DEFINE_BWD_HANDLER(SYMBOL, ET, DT)                            \
-  XLA_FFI_DEFINE_HANDLER_SYMBOL(SYMBOL, (DeltaNetSaneBwdHost<ET, DT>),              \
+#define DN_SANE_DEFINE_BWD_HANDLER(SYMBOL, ET, DT)                             \
+  XLA_FFI_DEFINE_HANDLER_SYMBOL(SYMBOL, (DeltaNetSaneBwdHost<ET, DT>),         \
                                 ffi::Ffi::Bind()                               \
                                     .Ctx<ffi::PlatformStream<cudaStream_t>>()  \
                                     .Arg<ffi::Buffer<DT>>()       /* q */      \
@@ -806,8 +807,8 @@ DeltaNetSaneSingleStepHost(cudaStream_t stream, ffi::Buffer<DT> q, ffi::Buffer<D
                                     .Ret<ffi::Buffer<ffi::F32>>() /* dtau */,  \
                                 {ffi::Traits::kCmdBufferCompatible})
 
-#define DN_SANE_DEFINE_INF_HANDLER(SYMBOL, ET, DT)                            \
-  XLA_FFI_DEFINE_HANDLER_SYMBOL(SYMBOL, (DeltaNetSaneInferenceHost<ET, DT>),        \
+#define DN_SANE_DEFINE_INF_HANDLER(SYMBOL, ET, DT)                             \
+  XLA_FFI_DEFINE_HANDLER_SYMBOL(SYMBOL, (DeltaNetSaneInferenceHost<ET, DT>),   \
                                 ffi::Ffi::Bind()                               \
                                     .Ctx<ffi::PlatformStream<cudaStream_t>>()  \
                                     .Arg<ffi::Buffer<DT>>()       /* q */      \
@@ -821,9 +822,9 @@ DeltaNetSaneSingleStepHost(cudaStream_t stream, ffi::Buffer<DT> q, ffi::Buffer<D
                                     .Ret<ffi::Buffer<ffi::F32>>() /* ht */,    \
                                 {ffi::Traits::kCmdBufferCompatible})
 
-#define DN_SANE_DEFINE_SINGLE_HANDLER(SYMBOL, ET, DT)                         \
+#define DN_SANE_DEFINE_SINGLE_HANDLER(SYMBOL, ET, DT)                          \
   XLA_FFI_DEFINE_HANDLER_SYMBOL(                                               \
-      SYMBOL, (DeltaNetSaneSingleStepHost<ET, DT>),                                 \
+      SYMBOL, (DeltaNetSaneSingleStepHost<ET, DT>),                            \
       ffi::Ffi::Bind()                                                         \
           .Ctx<ffi::PlatformStream<cudaStream_t>>()                            \
           .Arg<ffi::Buffer<DT>>()       /* q */                                \
@@ -840,9 +841,11 @@ DeltaNetSaneSingleStepHost(cudaStream_t stream, ffi::Buffer<DT> q, ffi::Buffer<D
 DN_SANE_DEFINE_FWD_HANDLER(DeltaNetRecurrentSaneFwdBf16, bf, ffi::BF16);
 DN_SANE_DEFINE_BWD_HANDLER(DeltaNetRecurrentSaneBwdBf16, bf, ffi::BF16);
 DN_SANE_DEFINE_INF_HANDLER(DeltaNetRecurrentSaneInferenceBf16, bf, ffi::BF16);
-DN_SANE_DEFINE_SINGLE_HANDLER(DeltaNetRecurrentSaneSingleStepBf16, bf, ffi::BF16);
+DN_SANE_DEFINE_SINGLE_HANDLER(DeltaNetRecurrentSaneSingleStepBf16, bf,
+                              ffi::BF16);
 
 DN_SANE_DEFINE_FWD_HANDLER(DeltaNetRecurrentSaneFwdF32, float, ffi::F32);
 DN_SANE_DEFINE_BWD_HANDLER(DeltaNetRecurrentSaneBwdF32, float, ffi::F32);
 DN_SANE_DEFINE_INF_HANDLER(DeltaNetRecurrentSaneInferenceF32, float, ffi::F32);
-DN_SANE_DEFINE_SINGLE_HANDLER(DeltaNetRecurrentSaneSingleStepF32, float, ffi::F32);
+DN_SANE_DEFINE_SINGLE_HANDLER(DeltaNetRecurrentSaneSingleStepF32, float,
+                              ffi::F32);

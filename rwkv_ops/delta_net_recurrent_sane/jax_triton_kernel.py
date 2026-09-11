@@ -280,7 +280,7 @@ def _delta_net_recurrent_sane_fwd_spmd_impl(
 
 
 _delta_net_recurrent_sane_fwd_spmd = custom_partitioning(
-    _delta_net_recurrent_sane_fwd_spmd_impl, static_argnums=(8, 9)
+    _delta_net_recurrent_sane_fwd_spmd_impl, static_argnums=(7, 8)
 )
 _delta_net_recurrent_sane_fwd_spmd.def_partition(
     infer_sharding_from_operands=_fwd_infer_sharding,
@@ -396,7 +396,7 @@ def _delta_net_recurrent_sane_bwd_spmd_impl(
 
 
 _delta_net_recurrent_sane_bwd_spmd = custom_partitioning(
-    _delta_net_recurrent_sane_bwd_spmd_impl, static_argnums=(14, 15)
+    _delta_net_recurrent_sane_bwd_spmd_impl, static_argnums=(13, 14)
 )
 _delta_net_recurrent_sane_bwd_spmd.def_partition(
     infer_sharding_from_operands=_bwd_infer_sharding,
@@ -542,7 +542,7 @@ def _delta_net_recurrent_sane_inf_spmd_impl(
 
 
 _delta_net_recurrent_sane_inf_spmd = custom_partitioning(
-    _delta_net_recurrent_sane_inf_spmd_impl, static_argnums=(8, 9)
+    _delta_net_recurrent_sane_inf_spmd_impl, static_argnums=(7, 8)
 )
 _delta_net_recurrent_sane_inf_spmd.def_partition(
     infer_sharding_from_operands=_inf_infer_sharding,

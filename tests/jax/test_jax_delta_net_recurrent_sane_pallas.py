@@ -598,14 +598,14 @@ def test_dn_pallas_sane_forward_chunk_size(delta_net_sane_inputs, dn_sane_jax_de
     assert_allclose_with_stats(
         out_ref,
         out_pallas,
-        "pallas sane chunk_size=8 vs native output",
+        "pallas sane chunk_size=32 vs native output",
         atol=3e-4,
         rtol=1e-3,
     )
     assert_allclose_with_stats(
         state_ref,
         state_pallas,
-        "pallas sane chunk_size=8 vs native state",
+        "pallas sane chunk_size=32 vs native state",
         atol=3e-4,
         rtol=1e-3,
     )
@@ -642,7 +642,7 @@ def test_dn_pallas_sane_backward_chunk_size(delta_net_sane_inputs, dn_sane_jax_d
         assert_allclose_with_stats(
             gr,
             gp,
-            f"grad_{name} pallas sane chunk_size=8 vs native",
+            f"grad_{name} pallas sane chunk_size=32 vs native",
             atol=7e-3,
             rtol=1e-3,
         )
@@ -685,14 +685,14 @@ def test_dn_pallas_sane_inference_chunk_size(delta_net_sane_inputs, dn_sane_jax_
     assert_allclose_with_stats(
         out_ref,
         out_pallas,
-        "pallas sane inference chunk_size=8 vs native output",
+        "pallas sane inference chunk_size=32 vs native output",
         atol=1e-4,
         rtol=1e-3,
     )
     assert_allclose_with_stats(
         state_ref,
         state_pallas,
-        "pallas sane inference chunk_size=8 vs native state",
+        "pallas sane inference chunk_size=32 vs native state",
         atol=1e-4,
         rtol=1e-3,
     )

@@ -508,14 +508,14 @@ def test_dn_triton_sane_forward_chunk_size(
     assert_allclose_with_stats(
         out_ref,
         out_triton,
-        "triton sane chunk_size=8 vs native output",
+        "triton sane chunk_size=32 vs native output",
         atol=1e-4,
         rtol=1e-3,
     )
     assert_allclose_with_stats(
         state_ref,
         state_triton,
-        "triton sane chunk_size=8 vs native state",
+        "triton sane chunk_size=32 vs native state",
         atol=1e-4,
         rtol=1e-3,
     )
@@ -562,7 +562,7 @@ def test_dn_triton_sane_backward_chunk_size(
         assert_allclose_with_stats(
             gr,
             gt,
-            f"grad_{name} triton sane chunk_size=8 vs native",
+            f"grad_{name} triton sane chunk_size=32 vs native",
             atol=7e-3,
             rtol=1e-3,
         )
@@ -607,14 +607,14 @@ def test_dn_triton_sane_inference_chunk_size(
     assert_allclose_with_stats(
         out_ref,
         out_triton,
-        "triton sane inference chunk_size=8 vs native output",
+        "triton sane inference chunk_size=32 vs native output",
         atol=1e-4,
         rtol=1e-3,
     )
     assert_allclose_with_stats(
         state_ref,
         state_triton,
-        "triton sane inference chunk_size=8 vs native state",
+        "triton sane inference chunk_size=32 vs native state",
         atol=1e-4,
         rtol=1e-3,
     )

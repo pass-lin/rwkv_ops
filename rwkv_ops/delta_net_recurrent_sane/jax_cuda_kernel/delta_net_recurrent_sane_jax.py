@@ -305,7 +305,7 @@ def _delta_net_recurrent_sane_fwd_ffi_call(
     )(q, k, v, beta, tau, mask, h0)
 
 
-@functools.partial(custom_partitioning, static_argnums=(8,))
+@functools.partial(custom_partitioning, static_argnums=(7,))
 def _delta_net_recurrent_sane_fwd_spmd(q, k, v, beta, tau, mask, h0, chunk_size: int):
     return _delta_net_recurrent_sane_fwd_ffi_call(
         q, k, v, beta, tau, mask, h0, chunk_size
@@ -348,7 +348,7 @@ def _delta_net_recurrent_sane_bwd_ffi_call(
     )(q, k, v, beta, dy, dht, kv_mem, inv_q, inv_k, chkp, tau, mask)
 
 
-@functools.partial(custom_partitioning, static_argnums=(13,))
+@functools.partial(custom_partitioning, static_argnums=(12,))
 def _delta_net_recurrent_sane_bwd_spmd(
     q, k, v, beta, dy, dht, kv_mem, inv_q, inv_k, chkp, tau, mask, chunk_size: int
 ):
@@ -435,7 +435,7 @@ def _delta_net_recurrent_sane_inf_ffi_call(
     )(q, k, v, beta, tau, mask, h0)
 
 
-@functools.partial(custom_partitioning, static_argnums=(8,))
+@functools.partial(custom_partitioning, static_argnums=(7,))
 def _delta_net_recurrent_sane_inf_spmd(q, k, v, beta, tau, mask, h0, chunk_size: int):
     return _delta_net_recurrent_sane_inf_ffi_call(
         q, k, v, beta, tau, mask, h0, chunk_size
@@ -473,7 +473,7 @@ def _delta_net_recurrent_sane_single_step_ffi_call(
     )(q, k, v, beta, tau, do_sane, h0)
 
 
-@functools.partial(custom_partitioning, static_argnums=(8,))
+@functools.partial(custom_partitioning, static_argnums=(7,))
 def _delta_net_recurrent_sane_single_step_spmd(
     q, k, v, beta, tau, do_sane, h0, chunk_size: int
 ):

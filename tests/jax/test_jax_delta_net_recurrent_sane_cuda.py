@@ -491,14 +491,14 @@ def test_dn_cuda_sane_forward_chunk_size(
     assert_allclose_with_stats(
         out_ref,
         out_cuda,
-        "cuda sane chunk_size=8 vs native output",
+        "cuda sane chunk_size=32 vs native output",
         atol=1e-2,
         rtol=1e-2,
     )
     assert_allclose_with_stats(
         state_ref,
         state_cuda,
-        "cuda sane chunk_size=8 vs native state",
+        "cuda sane chunk_size=32 vs native state",
         atol=1e-2,
         rtol=1e-2,
     )
@@ -537,7 +537,7 @@ def test_dn_cuda_sane_backward_chunk_size(
         assert_allclose_with_stats(
             gr,
             gc,
-            f"grad_{name} cuda sane chunk_size=8 vs native",
+            f"grad_{name} cuda sane chunk_size=32 vs native",
             atol=1e-2,
             rtol=1e-2,
         )
@@ -582,14 +582,14 @@ def test_dn_cuda_sane_inference_chunk_size(
     assert_allclose_with_stats(
         out_ref,
         out_cuda,
-        "cuda sane inference chunk_size=8 vs native output",
+        "cuda sane inference chunk_size=32 vs native output",
         atol=1e-2,
         rtol=1e-2,
     )
     assert_allclose_with_stats(
         state_ref,
         state_cuda,
-        "cuda sane inference chunk_size=8 vs native state",
+        "cuda sane inference chunk_size=32 vs native state",
         atol=1e-2,
         rtol=1e-2,
     )
