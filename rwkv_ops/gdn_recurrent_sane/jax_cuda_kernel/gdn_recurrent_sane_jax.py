@@ -42,6 +42,20 @@ INF_RULE = (
 )
 SINGLE_RULE = "b n k, b n k, b n v, b n, b n, b n, b, b n k v -> b n v, b n k v"
 
+# 无 mask 版本规则：去掉 mask 的 `b c` 项，chunk 边界无条件 SANE。
+FWD_RULE_NO_MASK = (
+    "b n t k, b n t k, b n t v, b n t, b n t, b n c, b n k v -> "
+    "b n t v, b n t v, b n c k v, b n t, b n t, b n k v"
+)
+BWD_RULE_NO_MASK = (
+    "b n t k, b n t k, b n t v, b n t, b n t, b n t v, b n k v, "
+    "b n t v, b n t, b n t, b n c k v, b n c -> "
+    "b n t k, b n t k, b n t v, b n t, b n t, b n k v, b n c"
+)
+INF_RULE_NO_MASK = (
+    "b n t k, b n t k, b n t v, b n t, b n t, b n c, b n k v -> b n t v, b n k v"
+)
+
 # FFI target 名后缀与 .so 内导出符号的对应关系。
 _FFI_SYMBOLS = {
     "fwd": ("GdnRecurrentSaneFwdBf16", "GdnRecurrentSaneFwdF32"),
@@ -50,6 +64,18 @@ _FFI_SYMBOLS = {
     "single_step": (
         "GdnRecurrentSaneSingleStepBf16",
         "GdnRecurrentSaneSingleStepF32",
+    ),
+    "fwd_no_mask": (
+        "GdnRecurrentSaneFwdNoMaskBf16",
+        "GdnRecurrentSaneFwdNoMaskF32",
+    ),
+    "bwd_no_mask": (
+        "GdnRecurrentSaneBwdNoMaskBf16",
+        "GdnRecurrentSaneBwdNoMaskF32",
+    ),
+    "inference_no_mask": (
+        "GdnRecurrentSaneInferenceNoMaskBf16",
+        "GdnRecurrentSaneInferenceNoMaskF32",
     ),
 }
 
@@ -310,6 +336,33 @@ _gdn_recurrent_sane_fwd_spmd.def_partition(
 )
 
 
+def _gdn_recurrent_sane_fwd_ffi_call_no_mask(
+    q, k, v, g, beta, tau, h0, chunk_size: int
+):
+    """无 mask 的训练前向 FFI 调用，chunk 边界无条件 SANE。"""
+    _, _, _, K = q.shape
+    V = v.shape[-1]
+    return jax.ffi.ffi_call(
+        _target_name("fwd_no_mask", q.dtype, K, V, chunk_size),
+        _fwd_out_shape(q, v, chunk_size),
+        vmap_method="broadcast_all",
+    )(q, k, v, g, beta, tau, h0)
+
+
+@functools.partial(custom_partitioning, static_argnums=(7,))
+def _gdn_recurrent_sane_fwd_spmd_no_mask(q, k, v, g, beta, tau, h0, chunk_size: int):
+    return _gdn_recurrent_sane_fwd_ffi_call_no_mask(
+        q, k, v, g, beta, tau, h0, chunk_size
+    )
+
+
+_gdn_recurrent_sane_fwd_spmd_no_mask.def_partition(
+    infer_sharding_from_operands=_fwd_infer_sharding,
+    sharding_rule=FWD_RULE_NO_MASK,
+    partition=create_partition(_gdn_recurrent_sane_fwd_ffi_call_no_mask),
+)
+
+
 # 训练反向
 
 
@@ -403,6 +456,82 @@ def _gdn_train_bwd(chunk_size: int, res, grads):
 _gdn_recurrent_sane_train.defvjp(_gdn_train_fwd, _gdn_train_bwd)
 
 
+def _gdn_recurrent_sane_bwd_ffi_call_no_mask(
+    q, k, v, g, beta, dy, dht, kv_mem, inv_q, inv_k, chkp, tau, chunk_size: int
+):
+    """无 mask 的训练反向 FFI 调用，chunk 边界无条件回传 SANE 梯度。"""
+    _, _, _, K = q.shape
+    V = v.shape[-1]
+    return jax.ffi.ffi_call(
+        _target_name("bwd_no_mask", q.dtype, K, V, chunk_size),
+        _bwd_out_shape(q, v, chunk_size),
+        vmap_method="broadcast_all",
+    )(q, k, v, g, beta, dy, dht, kv_mem, inv_q, inv_k, chkp, tau)
+
+
+@functools.partial(custom_partitioning, static_argnums=(12,))
+def _gdn_recurrent_sane_bwd_spmd_no_mask(
+    q, k, v, g, beta, dy, dht, kv_mem, inv_q, inv_k, chkp, tau, chunk_size: int
+):
+    return _gdn_recurrent_sane_bwd_ffi_call_no_mask(
+        q, k, v, g, beta, dy, dht, kv_mem, inv_q, inv_k, chkp, tau, chunk_size
+    )
+
+
+_gdn_recurrent_sane_bwd_spmd_no_mask.def_partition(
+    infer_sharding_from_operands=_bwd_infer_sharding,
+    sharding_rule=BWD_RULE_NO_MASK,
+    partition=create_partition(_gdn_recurrent_sane_bwd_ffi_call_no_mask),
+)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(7,))
+def _gdn_recurrent_sane_train_no_mask(q, k, v, g, beta, tau, h0, chunk_size: int):
+    out, _, _, _, _, ht = _gdn_recurrent_sane_fwd_spmd_no_mask(
+        q, k, v, g, beta, tau, h0, chunk_size
+    )
+    return out, ht
+
+
+def _gdn_train_fwd_no_mask(q, k, v, g, beta, tau, h0, chunk_size: int):
+    out, kv_mem, state_chkp, inv_q, inv_k, ht = _gdn_recurrent_sane_fwd_spmd_no_mask(
+        q, k, v, g, beta, tau, h0, chunk_size
+    )
+    return (out, ht), (q, k, v, g, beta, tau, kv_mem, inv_q, inv_k, state_chkp)
+
+
+def _gdn_train_bwd_no_mask(chunk_size: int, res, grads):
+    q, k, v, g, beta, tau, kv_mem, inv_q, inv_k, state_chkp = res
+    dy, dht = grads
+    dy = jnp.asarray(dy, q.dtype)
+    if dht is None:
+        B, N, _, K = q.shape
+        V = v.shape[-1]
+        dht = jnp.zeros((B, N, K, V), dtype=jnp.float32)
+    else:
+        dht = jnp.asarray(dht, jnp.float32)
+
+    dq, dk, dv, dg, dbeta, dh0, dtau = _gdn_recurrent_sane_bwd_spmd_no_mask(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        dy,
+        dht,
+        kv_mem,
+        inv_q,
+        inv_k,
+        state_chkp,
+        tau,
+        chunk_size,
+    )
+    return dq, dk, dv, dg, dbeta, dtau, dh0
+
+
+_gdn_recurrent_sane_train_no_mask.defvjp(_gdn_train_fwd_no_mask, _gdn_train_bwd_no_mask)
+
+
 # 推理前向
 
 
@@ -434,6 +563,33 @@ _gdn_recurrent_sane_inf_spmd.def_partition(
     infer_sharding_from_operands=_inf_infer_sharding,
     sharding_rule=INF_RULE,
     partition=create_partition(_gdn_recurrent_sane_inf_ffi_call),
+)
+
+
+def _gdn_recurrent_sane_inf_ffi_call_no_mask(
+    q, k, v, g, beta, tau, h0, chunk_size: int
+):
+    """无 mask 的推理前向 FFI 调用，chunk 边界无条件 SANE。"""
+    _, _, _, K = q.shape
+    V = v.shape[-1]
+    return jax.ffi.ffi_call(
+        _target_name("inference_no_mask", q.dtype, K, V, chunk_size),
+        _inf_out_shape(q, v),
+        vmap_method="broadcast_all",
+    )(q, k, v, g, beta, tau, h0)
+
+
+@functools.partial(custom_partitioning, static_argnums=(7,))
+def _gdn_recurrent_sane_inf_spmd_no_mask(q, k, v, g, beta, tau, h0, chunk_size: int):
+    return _gdn_recurrent_sane_inf_ffi_call_no_mask(
+        q, k, v, g, beta, tau, h0, chunk_size
+    )
+
+
+_gdn_recurrent_sane_inf_spmd_no_mask.def_partition(
+    infer_sharding_from_operands=_inf_infer_sharding,
+    sharding_rule=INF_RULE_NO_MASK,
+    partition=create_partition(_gdn_recurrent_sane_inf_ffi_call_no_mask),
 )
 
 
@@ -555,15 +711,19 @@ def gated_delta_net_recurrent_sane(
             raise ValueError(
                 f"mask shape {mask_arr.shape} must match (B, T//chunk_size) = ({B}, {C})"
             )
-    else:
-        mask_arr = jnp.ones((B, C), dtype=jnp.float32)
 
     _get_lib(K, V, chunk_size)
     h0 = _prepare_h0(initial_state, B, N, K, V)
 
-    out, final_state = _gdn_recurrent_sane_train(
-        q, k, v, g, beta, tau, mask_arr, h0, chunk_size
-    )
+    if use_mask:
+        out, final_state = _gdn_recurrent_sane_train(
+            q, k, v, g, beta, tau, mask_arr, h0, chunk_size
+        )
+    else:
+        # 无 mask 路径：chunk 边界无条件执行 SANE，不构造占位 mask。
+        out, final_state = _gdn_recurrent_sane_train_no_mask(
+            q, k, v, g, beta, tau, h0, chunk_size
+        )
 
     out = jnp.transpose(out, (0, 2, 1, 3))
     out = jnp.asarray(out, dtype)
@@ -656,15 +816,19 @@ def gated_delta_net_recurrent_sane_inference(
             raise ValueError(
                 f"mask shape {mask_arr.shape} must match (B, T//chunk_size) = ({B}, {C})"
             )
-    else:
-        mask_arr = jnp.ones((B, C), dtype=jnp.float32)
 
     _get_lib(K, V, chunk_size)
     h0 = _prepare_h0(initial_state, B, N, K, V)
 
-    out, final_state = _gdn_recurrent_sane_inf_spmd(
-        q, k, v, g, beta, tau, mask_arr, h0, chunk_size
-    )
+    if use_mask:
+        out, final_state = _gdn_recurrent_sane_inf_spmd(
+            q, k, v, g, beta, tau, mask_arr, h0, chunk_size
+        )
+    else:
+        # 无 mask 路径：chunk 边界无条件执行 SANE，不构造占位 mask。
+        out, final_state = _gdn_recurrent_sane_inf_spmd_no_mask(
+            q, k, v, g, beta, tau, h0, chunk_size
+        )
 
     out = jnp.transpose(out, (0, 2, 1, 3))
     out = jnp.asarray(out, dtype)

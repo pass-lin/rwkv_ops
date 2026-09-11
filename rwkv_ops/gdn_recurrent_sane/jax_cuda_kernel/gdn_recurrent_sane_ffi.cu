@@ -871,3 +871,675 @@ GDN_SANE_DEFINE_FWD_HANDLER(GdnRecurrentSaneFwdF32, float, ffi::F32);
 GDN_SANE_DEFINE_BWD_HANDLER(GdnRecurrentSaneBwdF32, float, ffi::F32);
 GDN_SANE_DEFINE_INF_HANDLER(GdnRecurrentSaneInferenceF32, float, ffi::F32);
 GDN_SANE_DEFINE_SINGLE_HANDLER(GdnRecurrentSaneSingleStepF32, float, ffi::F32);
+
+// Gated DeltaNet recurrent SANE 训练前向 kernel（无 mask）。
+//
+// 与带 mask 版本数学一致，但 chunk 边界无条件执行 SANE，全程不读取 mask。
+//
+// Args:
+//   q_, k_: [B, N, T, K], bfloat16 或 float32, row-major。
+//   v_, o_: [B, N, T, V], bfloat16 或 float32, row-major。v 为输入，o 为输出。
+//   g_, beta_: [B, N, T], float32, row-major。
+//   tau_: [B, N, T//_CHUNK_LEN_], float32, row-major。SANE 阈值。
+//   h0_: [B, N, K, V], float32, row-major。初始 state。
+//   kv_mem_: [B, N, T, V], float32, row-major。
+//   chkp_: [B, N, T//_CHUNK_LEN_, K, V], float32, row-major。
+//   inv_q_, inv_k_: [B, N, T], float32, row-major。
+//   ht_: [B, N, K, V], float32, row-major。最终 state。
+//   scale: query 缩放系数（1/sqrt(K)）。
+//
+// Grid / Block:
+//   grid (N, B)，每个 block 对应一个 (head, batch)。
+//   block (kBlockThreads,)，线程 v < _V_ 持有 state 第 v 列。
+//
+// 编译期宏:
+//   _K_: key head size，不超过 1024。
+//   _V_: value head size，不超过 1024。
+//   _CHUNK_LEN_: chunk 长度，默认 16，T 必须被其整除。
+template <typename ET>
+__global__ __launch_bounds__(kBlockThreads) void
+gdn_recurrent_sane_fwd_kernel_no_mask(
+    int T, int H, float scale, const ET *__restrict__ q_,
+    const ET *__restrict__ k_, const ET *__restrict__ v_,
+    const float *__restrict__ g_, const float *__restrict__ beta_,
+    const float *__restrict__ tau_, const float *__restrict__ h0_,
+    ET *__restrict__ o_, float *__restrict__ kv_mem_,
+    float *__restrict__ chkp_, float *__restrict__ inv_q_,
+    float *__restrict__ inv_k_, float *__restrict__ ht_) {
+  const int bb = blockIdx.y, hh = blockIdx.x, v = threadIdx.x;
+  const bool active = v < _V_;
+  const int64_t bh = (int64_t)bb * H + hh;
+  const int num_chunks = T / _CHUNK_LEN_;
+
+  float state[_K_];
+  if (active) {
+    const int64_t h0_base = bh * _K_ * _V_ + v;
+#pragma unroll
+    for (int j = 0; j < _K_; j++)
+      state[j] = h0_[h0_base + (int64_t)j * _V_];
+  }
+
+  __shared__ float sh_q[_K_], sh_k[_K_], sh_khat[_K_], sh_qt[_K_];
+  __shared__ float sh_red[2][_K_];
+  __shared__ float sh_iq, sh_ik;
+
+  for (int t = 0; t < T; t++) {
+    const int64_t qk_base = (bh * T + t) * _K_;
+    const int64_t vo_base = (bh * T + t) * _V_;
+
+    __syncthreads();
+    if (v < _K_) {
+      sh_q[v] = to_float(q_[qk_base + v]);
+      sh_k[v] = to_float(k_[qk_base + v]);
+    }
+    const float v_val = active ? to_float(v_[vo_base + v]) : 0.f;
+    const float g_t = g_[bh * T + t];
+    const float beta_t = beta_[bh * T + t];
+    __syncthreads();
+
+    if (v < _K_) {
+      sh_red[0][v] = sh_q[v] * sh_q[v];
+      sh_red[1][v] = sh_k[v] * sh_k[v];
+    }
+    __syncthreads();
+    if (v == 0) {
+      float sq = 0.f, sk = 0.f;
+      for (int j = 0; j < _K_; j++) {
+        sq += sh_red[0][j];
+        sk += sh_red[1][j];
+      }
+      sh_iq = rsqrtf(sq + 1e-6f);
+      sh_ik = rsqrtf(sk + 1e-6f);
+    }
+    __syncthreads();
+
+    const float iq = sh_iq, ik = sh_ik;
+    if (v < _K_) {
+      sh_khat[v] = sh_k[v] * ik;
+      sh_qt[v] = sh_q[v] * iq * scale;
+    }
+    if (v == 0) {
+      inv_q_[bh * T + t] = iq;
+      inv_k_[bh * T + t] = ik;
+    }
+    __syncthreads();
+
+    if (active) {
+      const float exp_g = expf(g_t);
+      float kvm = 0.f;
+#pragma unroll
+      for (int j = 0; j < _K_; j++) {
+        state[j] *= exp_g;
+        kvm += state[j] * sh_khat[j];
+      }
+      kv_mem_[vo_base + v] = kvm;
+
+      const float delta = beta_t * (v_val - kvm);
+      float out = 0.f;
+#pragma unroll
+      for (int j = 0; j < _K_; j++) {
+        state[j] += sh_khat[j] * delta;
+        out += state[j] * sh_qt[j];
+      }
+      o_[vo_base + v] = from_float<ET>(out);
+
+      if ((t + 1) % _CHUNK_LEN_ == 0) {
+        const int c = t / _CHUNK_LEN_;
+        const int64_t cbase = (bh * num_chunks + c) * _K_ * _V_ + v;
+#pragma unroll
+        for (int j = 0; j < _K_; j++)
+          chkp_[cbase + (int64_t)j * _V_] = state[j];
+
+        const float tau_safe = fmaxf(tau_[bh * num_chunks + c], 1e-6f);
+#pragma unroll
+        for (int j = 0; j < _K_; j++) {
+          const float th = tanhf(state[j] / tau_safe);
+          state[j] = tau_safe * th;
+        }
+      }
+    }
+  }
+
+  if (active) {
+    const int64_t sbase = bh * _K_ * _V_ + v;
+#pragma unroll
+    for (int j = 0; j < _K_; j++)
+      ht_[sbase + (int64_t)j * _V_] = state[j];
+  }
+}
+
+// Gated DeltaNet recurrent SANE 训练反向 kernel（无 mask）。
+//
+// 与带 mask 版本数学一致，但 chunk 边界无条件累加 dtau 并把下游梯度乘
+// sech2，全程不读取 mask。
+//
+// Args:
+//   q_, k_: [B, N, T, K], bfloat16 或 float32, row-major。
+//   v_, do_: [B, N, T, V], bfloat16 或 float32, row-major。do 为输出梯度。
+//   g_, beta_: [B, N, T], float32, row-major。
+//   dht_: [B, N, K, V], float32, row-major。最终 state 梯度。
+//   kv_mem_: [B, N, T, V], float32, row-major。
+//   inv_q_, inv_k_: [B, N, T], float32, row-major。
+//   chkp_: [B, N, T//_CHUNK_LEN_, K, V], float32, row-major。
+//   tau_: [B, N, T//_CHUNK_LEN_], float32, row-major。SANE 阈值。
+//   dq_, dk_: [B, N, T, K]，输出梯度，与输入同 dtype。
+//   dv_, dg_, dbeta_, dh0_, dtau_: 输出梯度，float32。
+//   scale: query 缩放系数（1/sqrt(K)）。
+//
+// Grid / Block:
+//   grid (N, B)，每个 block 对应一个 (head, batch)。
+//   block (kBlockThreads,)，线程 v < _V_ 持有 state/dstate 第 v 列。
+//
+// 编译期宏:
+//   _K_: key head size，不超过 1024。
+//   _V_: value head size，不超过 1024。
+//   _CHUNK_LEN_: chunk 长度，默认 16，T 必须被其整除。
+template <typename ET>
+__global__ __launch_bounds__(kBlockThreads) void
+gdn_recurrent_sane_bwd_kernel_no_mask(
+    int T, int H, float scale, const ET *__restrict__ q_,
+    const ET *__restrict__ k_, const ET *__restrict__ v_,
+    const float *__restrict__ g_, const float *__restrict__ beta_,
+    const ET *__restrict__ do_, const float *__restrict__ dht_,
+    const float *__restrict__ kv_mem_, const float *__restrict__ inv_q_,
+    const float *__restrict__ inv_k_, const float *__restrict__ chkp_,
+    const float *__restrict__ tau_, ET *__restrict__ dq_,
+    ET *__restrict__ dk_, float *__restrict__ dv_, float *__restrict__ dg_,
+    float *__restrict__ dbeta_, float *__restrict__ dh0_,
+    float *__restrict__ dtau_) {
+  __shared__ float sh_q[_K_], sh_k[_K_], sh_khat[_K_], sh_qt[_K_];
+  __shared__ float sh_dkhat[_K_], sh_dqhat[_K_];
+  __shared__ float sh_do[_V_], sh_delta[_V_], sh_dkv[_V_];
+  __shared__ float sh_red[4][_V_];
+  __shared__ float sh_scalar[6];
+  // 跨线程归约的 warp 部分和缓冲，按 j 分块复用，占用与 V 无关。
+  __shared__ float warp_part[3][kJBlock * kNumWarps];
+  // dtau 跨 warp 部分和缓冲。
+  __shared__ float dtau_part[kNumWarps];
+
+  const int bb = blockIdx.y, hh = blockIdx.x, v = threadIdx.x;
+  const bool active = v < _V_;
+  const int warp = v >> 5, lane = v & 31;
+  const int64_t bh = (int64_t)bb * H + hh;
+  const int num_chunks = T / _CHUNK_LEN_;
+
+  float state[_K_], carry[_K_];
+
+  if (active) {
+    const int64_t dht_base = bh * _K_ * _V_ + v;
+#pragma unroll
+    for (int j = 0; j < _K_; j++)
+      carry[j] = dht_[dht_base + (int64_t)j * _V_];
+  }
+
+  for (int t = T - 1; t >= 0; t--) {
+    const int tp1 = t + 1;
+    // chkp 最后一项即 S_T，chunk 边界一律从 checkpoint 重载 S_{t+1}。
+    if (tp1 % _CHUNK_LEN_ == 0) {
+      const int c = tp1 / _CHUNK_LEN_ - 1;
+      const float tau_safe = fmaxf(tau_[bh * num_chunks + c], 1e-6f);
+      float dtau_p = 0.f;
+      if (active) {
+        const int64_t cbase = (bh * num_chunks + c) * _K_ * _V_ + v;
+#pragma unroll
+        for (int j = 0; j < _K_; j++) {
+          state[j] = chkp_[cbase + (int64_t)j * _V_];
+          const float u = state[j] / tau_safe;
+          const float th = tanhf(u);
+          const float sech2 = 1.f - th * th;
+          dtau_p += carry[j] * (th - u * sech2);
+          carry[j] *= sech2;
+        }
+      }
+      // 非活跃线程以 0 参与 shuffle，保证全 warp 归约正确。
+#pragma unroll
+      for (int off = 16; off > 0; off >>= 1)
+        dtau_p += __shfl_xor_sync(0xffffffffu, dtau_p, off);
+      if (lane == 0)
+        dtau_part[warp] = dtau_p;
+      __syncthreads();
+      if (v == 0) {
+        float s = 0.f;
+        for (int w2 = 0; w2 < kNumWarps; w2++)
+          s += dtau_part[w2];
+        dtau_[bh * num_chunks + c] = s;
+      }
+    }
+
+    const int64_t qk_base = (bh * T + t) * _K_;
+    const int64_t vo_base = (bh * T + t) * _V_;
+    const float g_t = g_[bh * T + t];
+    const float beta_t = beta_[bh * T + t];
+    const float iq = inv_q_[bh * T + t];
+    const float ik = inv_k_[bh * T + t];
+
+    __syncthreads();
+    if (v < _K_) {
+      sh_q[v] = to_float(q_[qk_base + v]);
+      sh_k[v] = to_float(k_[qk_base + v]);
+    }
+    float do_v = 0.f, v_val = 0.f, kvm = 0.f;
+    if (active) {
+      do_v = to_float(do_[vo_base + v]);
+      v_val = to_float(v_[vo_base + v]);
+      kvm = kv_mem_[vo_base + v];
+    }
+    __syncthreads();
+    if (v < _K_) {
+      sh_khat[v] = sh_k[v] * ik;
+      sh_qt[v] = sh_q[v] * iq * scale;
+    }
+    __syncthreads();
+
+    float delta_v = 0.f, dkv_v = 0.f;
+    if (active) {
+      delta_v = beta_t * (v_val - kvm);
+      float d_delta = 0.f;
+#pragma unroll
+      for (int j = 0; j < _K_; j++)
+        d_delta += (carry[j] + sh_qt[j] * do_v) * sh_khat[j];
+      dv_[vo_base + v] = beta_t * d_delta;
+      dkv_v = -beta_t * d_delta;
+
+      float p_dg = 0.f;
+#pragma unroll
+      for (int j = 0; j < _K_; j++) {
+        const float dnew = carry[j] + sh_qt[j] * do_v;
+        const float sdec = state[j] - sh_khat[j] * delta_v;
+        p_dg += sdec * (dnew + sh_khat[j] * dkv_v);
+      }
+
+      sh_do[v] = do_v;
+      sh_delta[v] = delta_v;
+      sh_dkv[v] = dkv_v;
+      sh_red[0][v] = (v_val - kvm) * d_delta;
+      sh_red[1][v] = p_dg;
+      sh_red[2][v] = do_v * delta_v;
+      sh_red[3][v] = delta_v * dkv_v;
+    }
+    __syncthreads();
+
+    if (v < 4) {
+      float s = 0.f;
+      for (int j = 0; j < _V_; j++)
+        s += sh_red[v][j];
+      sh_scalar[v] = s;
+    }
+
+    // 沿 V 方向对 state/dstate 列加权求和得 t1/t2/t3，再由线性分解合成
+    // d_k_hat：sum(dstate_new * delta) = t1 + q_tilde * sum(do * delta)，
+    // sum(state_decay * d_kv_mem) = t2 - k_hat * sum(delta * d_kv_mem)。
+    // 非活跃线程的贡献必须为 0，且不能读取未初始化的寄存器参与运算。
+    float t1 = 0.f, t2 = 0.f, t3 = 0.f;
+    for (int jb = 0; jb < _K_; jb += kJBlock) {
+      const int jn = min(kJBlock, _K_ - jb);
+      __syncthreads();
+      for (int jj = 0; jj < jn; jj++) {
+        const int j = jb + jj;
+        float c1 = active ? carry[j] * delta_v : 0.f;
+        float c2 = active ? state[j] * dkv_v : 0.f;
+        float c3 = active ? state[j] * do_v : 0.f;
+#pragma unroll
+        for (int off = 16; off > 0; off >>= 1) {
+          c1 += __shfl_xor_sync(0xffffffffu, c1, off);
+          c2 += __shfl_xor_sync(0xffffffffu, c2, off);
+          c3 += __shfl_xor_sync(0xffffffffu, c3, off);
+        }
+        if (lane == 0) {
+          warp_part[0][jj * kNumWarps + warp] = c1;
+          warp_part[1][jj * kNumWarps + warp] = c2;
+          warp_part[2][jj * kNumWarps + warp] = c3;
+        }
+      }
+      __syncthreads();
+      if (v >= jb && v < jb + jn) {
+        const int jj = v - jb;
+        for (int w2 = 0; w2 < kNumWarps; w2++) {
+          t1 += warp_part[0][jj * kNumWarps + w2];
+          t2 += warp_part[1][jj * kNumWarps + w2];
+          t3 += warp_part[2][jj * kNumWarps + w2];
+        }
+      }
+    }
+    __syncthreads();
+
+    if (v < _K_) {
+      sh_dkhat[v] =
+          t1 + sh_qt[v] * sh_scalar[2] + t2 - sh_khat[v] * sh_scalar[3];
+      sh_dqhat[v] = scale * t3;
+    }
+    __syncthreads();
+
+    if (v == 0) {
+      float qd = 0.f, kd = 0.f;
+      for (int j = 0; j < _K_; j++) {
+        qd += sh_q[j] * iq * sh_dqhat[j];
+        kd += sh_khat[j] * sh_dkhat[j];
+      }
+      sh_scalar[4] = qd;
+      sh_scalar[5] = kd;
+    }
+    __syncthreads();
+
+    if (v < _K_) {
+      dq_[qk_base + v] =
+          from_float<ET>(iq * (sh_dqhat[v] - sh_q[v] * iq * sh_scalar[4]));
+      dk_[qk_base + v] =
+          from_float<ET>(ik * (sh_dkhat[v] - sh_khat[v] * sh_scalar[5]));
+    }
+    if (v == 0) {
+      dg_[bh * T + t] = sh_scalar[1];
+      dbeta_[bh * T + t] = sh_scalar[0];
+    }
+
+    if (active) {
+      const float exp_g = expf(g_t);
+#pragma unroll
+      for (int j = 0; j < _K_; j++) {
+        const float dnew = carry[j] + sh_qt[j] * do_v;
+        const float sdec = state[j] - sh_khat[j] * delta_v;
+        state[j] = sdec / exp_g;
+        carry[j] = exp_g * (dnew + sh_khat[j] * dkv_v);
+      }
+    }
+  }
+
+  if (active) {
+    const int64_t dh0_base = bh * _K_ * _V_ + v;
+#pragma unroll
+    for (int j = 0; j < _K_; j++)
+      dh0_[dh0_base + (int64_t)j * _V_] = carry[j];
+  }
+}
+
+// Gated DeltaNet recurrent SANE 推理前向 kernel（无 mask）。
+//
+// 与带 mask 版本数学一致，但 chunk 边界无条件执行 SANE，不读取 mask。
+// 支持任意 T：只在满 chunk 的边界执行 SANE，末尾不足 chunk 的余数步不执行。
+//
+// Args:
+//   q_, k_: [B, N, T, K], bfloat16 或 float32, row-major。
+//   v_, o_: [B, N, T, V], bfloat16 或 float32, row-major。v 为输入，o 为输出。
+//   g_, beta_: [B, N, T], float32, row-major。
+//   tau_: [B, N, T//_CHUNK_LEN_], float32, row-major。SANE 阈值。
+//   h0_: [B, N, K, V], float32, row-major。初始 state。
+//   ht_: [B, N, K, V], float32, row-major。最终 state。
+//   scale: query 缩放系数（1/sqrt(K)）。
+//
+// Grid / Block:
+//   grid (N, B)，每个 block 对应一个 (head, batch)。
+//   block (kBlockThreads,)，线程 v < _V_ 持有 state 第 v 列。
+//
+// 编译期宏:
+//   _K_: key head size，不超过 1024。
+//   _V_: value head size，不超过 1024。
+//   _CHUNK_LEN_: chunk 长度，默认 16。
+template <typename ET>
+__global__ __launch_bounds__(kBlockThreads) void
+gdn_recurrent_sane_inference_kernel_no_mask(
+    int T, int H, float scale, const ET *__restrict__ q_,
+    const ET *__restrict__ k_, const ET *__restrict__ v_,
+    const float *__restrict__ g_, const float *__restrict__ beta_,
+    const float *__restrict__ tau_, const float *__restrict__ h0_,
+    ET *__restrict__ o_, float *__restrict__ ht_) {
+  const int bb = blockIdx.y, hh = blockIdx.x, v = threadIdx.x;
+  const bool active = v < _V_;
+  const int64_t bh = (int64_t)bb * H + hh;
+  const int num_chunks = T / _CHUNK_LEN_;
+
+  float state[_K_];
+  if (active) {
+    const int64_t h0_base = bh * _K_ * _V_ + v;
+#pragma unroll
+    for (int j = 0; j < _K_; j++)
+      state[j] = h0_[h0_base + (int64_t)j * _V_];
+  }
+
+  __shared__ float sh_q[_K_], sh_k[_K_], sh_khat[_K_], sh_qt[_K_];
+  __shared__ float sh_red[2][_K_];
+  __shared__ float sh_iq, sh_ik;
+
+  for (int t = 0; t < T; t++) {
+    const int64_t qk_base = (bh * T + t) * _K_;
+    const int64_t vo_base = (bh * T + t) * _V_;
+
+    __syncthreads();
+    if (v < _K_) {
+      sh_q[v] = to_float(q_[qk_base + v]);
+      sh_k[v] = to_float(k_[qk_base + v]);
+    }
+    const float v_val = active ? to_float(v_[vo_base + v]) : 0.f;
+    const float g_t = g_[bh * T + t];
+    const float beta_t = beta_[bh * T + t];
+    __syncthreads();
+
+    if (v < _K_) {
+      sh_red[0][v] = sh_q[v] * sh_q[v];
+      sh_red[1][v] = sh_k[v] * sh_k[v];
+    }
+    __syncthreads();
+    if (v == 0) {
+      float sq = 0.f, sk = 0.f;
+      for (int j = 0; j < _K_; j++) {
+        sq += sh_red[0][j];
+        sk += sh_red[1][j];
+      }
+      sh_iq = rsqrtf(sq + 1e-6f);
+      sh_ik = rsqrtf(sk + 1e-6f);
+    }
+    __syncthreads();
+
+    if (v < _K_) {
+      sh_khat[v] = sh_k[v] * sh_ik;
+      sh_qt[v] = sh_q[v] * sh_iq * scale;
+    }
+    __syncthreads();
+
+    if (active) {
+      const float exp_g = expf(g_t);
+      float kvm = 0.f;
+#pragma unroll
+      for (int j = 0; j < _K_; j++) {
+        state[j] *= exp_g;
+        kvm += state[j] * sh_khat[j];
+      }
+      const float delta = beta_t * (v_val - kvm);
+      float out = 0.f;
+#pragma unroll
+      for (int j = 0; j < _K_; j++) {
+        state[j] += sh_khat[j] * delta;
+        out += state[j] * sh_qt[j];
+      }
+      o_[vo_base + v] = from_float<ET>(out);
+
+      if ((t + 1) % _CHUNK_LEN_ == 0) {
+        const int c = t / _CHUNK_LEN_;
+        const float tau_safe = fmaxf(tau_[bh * num_chunks + c], 1e-6f);
+#pragma unroll
+        for (int j = 0; j < _K_; j++) {
+          const float th = tanhf(state[j] / tau_safe);
+          state[j] = tau_safe * th;
+        }
+      }
+    }
+  }
+
+  if (active) {
+    const int64_t sbase = bh * _K_ * _V_ + v;
+#pragma unroll
+    for (int j = 0; j < _K_; j++)
+      ht_[sbase + (int64_t)j * _V_] = state[j];
+  }
+}
+
+
+
+// 无 mask 版本的 FFI host 启动函数
+
+template <typename ET, ffi::DataType DT>
+static ffi::Error GdnSaneFwdHostNoMask(
+    cudaStream_t stream, ffi::Buffer<DT> q, ffi::Buffer<DT> k,
+    ffi::Buffer<DT> v, ffi::Buffer<ffi::F32> g, ffi::Buffer<ffi::F32> beta,
+    ffi::Buffer<ffi::F32> tau, ffi::Buffer<ffi::F32> h0,
+    ffi::ResultBuffer<DT> o, ffi::ResultBuffer<ffi::F32> kv_mem,
+    ffi::ResultBuffer<ffi::F32> chkp, ffi::ResultBuffer<ffi::F32> inv_q,
+    ffi::ResultBuffer<ffi::F32> inv_k, ffi::ResultBuffer<ffi::F32> ht) {
+  auto dims = q.dimensions();
+  int B = dims[0], H = dims[1], T = dims[2];
+  const float scale = 1.0f / sqrtf((float)_K_);
+
+  gdn_recurrent_sane_fwd_kernel_no_mask<ET>
+      <<<dim3(H, B), kBlockThreads, 0, stream>>>(
+          T, H, scale, reinterpret_cast<const ET *>(q.typed_data()),
+          reinterpret_cast<const ET *>(k.typed_data()),
+          reinterpret_cast<const ET *>(v.typed_data()), g.typed_data(),
+          beta.typed_data(), tau.typed_data(), h0.typed_data(),
+          reinterpret_cast<ET *>(o->typed_data()), kv_mem->typed_data(),
+          chkp->typed_data(), inv_q->typed_data(), inv_k->typed_data(),
+          ht->typed_data());
+
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess)
+    return ffi::Error::Internal(
+        std::string("gdn_recurrent_sane_fwd_no_mask error: ") +
+        cudaGetErrorString(err));
+  return ffi::Error::Success();
+}
+
+template <typename ET, ffi::DataType DT>
+static ffi::Error GdnSaneBwdHostNoMask(
+    cudaStream_t stream, ffi::Buffer<DT> q, ffi::Buffer<DT> k,
+    ffi::Buffer<DT> v, ffi::Buffer<ffi::F32> g, ffi::Buffer<ffi::F32> beta,
+    ffi::Buffer<DT> dy, ffi::Buffer<ffi::F32> dht, ffi::Buffer<ffi::F32> kv_mem,
+    ffi::Buffer<ffi::F32> inv_q, ffi::Buffer<ffi::F32> inv_k,
+    ffi::Buffer<ffi::F32> chkp, ffi::Buffer<ffi::F32> tau,
+    ffi::ResultBuffer<DT> dq, ffi::ResultBuffer<DT> dk,
+    ffi::ResultBuffer<ffi::F32> dv, ffi::ResultBuffer<ffi::F32> dg,
+    ffi::ResultBuffer<ffi::F32> dbeta, ffi::ResultBuffer<ffi::F32> dh0,
+    ffi::ResultBuffer<ffi::F32> dtau) {
+  auto dims = q.dimensions();
+  int B = dims[0], H = dims[1], T = dims[2];
+  const float scale = 1.0f / sqrtf((float)_K_);
+
+  gdn_recurrent_sane_bwd_kernel_no_mask<ET>
+      <<<dim3(H, B), kBlockThreads, 0, stream>>>(
+          T, H, scale, reinterpret_cast<const ET *>(q.typed_data()),
+          reinterpret_cast<const ET *>(k.typed_data()),
+          reinterpret_cast<const ET *>(v.typed_data()), g.typed_data(),
+          beta.typed_data(), reinterpret_cast<const ET *>(dy.typed_data()),
+          dht.typed_data(), kv_mem.typed_data(), inv_q.typed_data(),
+          inv_k.typed_data(), chkp.typed_data(), tau.typed_data(),
+          reinterpret_cast<ET *>(dq->typed_data()),
+          reinterpret_cast<ET *>(dk->typed_data()), dv->typed_data(),
+          dg->typed_data(), dbeta->typed_data(), dh0->typed_data(),
+          dtau->typed_data());
+
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess)
+    return ffi::Error::Internal(
+        std::string("gdn_recurrent_sane_bwd_no_mask error: ") +
+        cudaGetErrorString(err));
+  return ffi::Error::Success();
+}
+
+template <typename ET, ffi::DataType DT>
+static ffi::Error GdnSaneInferenceHostNoMask(
+    cudaStream_t stream, ffi::Buffer<DT> q, ffi::Buffer<DT> k,
+    ffi::Buffer<DT> v, ffi::Buffer<ffi::F32> g, ffi::Buffer<ffi::F32> beta,
+    ffi::Buffer<ffi::F32> tau, ffi::Buffer<ffi::F32> h0,
+    ffi::ResultBuffer<DT> o, ffi::ResultBuffer<ffi::F32> ht) {
+  auto dims = q.dimensions();
+  int B = dims[0], H = dims[1], T = dims[2];
+  const float scale = 1.0f / sqrtf((float)_K_);
+
+  gdn_recurrent_sane_inference_kernel_no_mask<ET>
+      <<<dim3(H, B), kBlockThreads, 0, stream>>>(
+          T, H, scale, reinterpret_cast<const ET *>(q.typed_data()),
+          reinterpret_cast<const ET *>(k.typed_data()),
+          reinterpret_cast<const ET *>(v.typed_data()), g.typed_data(),
+          beta.typed_data(), tau.typed_data(), h0.typed_data(),
+          reinterpret_cast<ET *>(o->typed_data()), ht->typed_data());
+
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess)
+    return ffi::Error::Internal(
+        std::string("gdn_recurrent_sane_inference_no_mask error: ") +
+        cudaGetErrorString(err));
+  return ffi::Error::Success();
+}
+
+// 无 mask 版本的 FFI 注册宏与符号
+
+#define GDN_SANE_DEFINE_FWD_NO_MASK_HANDLER(SYMBOL, ET, DT)                    \
+  XLA_FFI_DEFINE_HANDLER_SYMBOL(SYMBOL, (GdnSaneFwdHostNoMask<ET, DT>),        \
+                                ffi::Ffi::Bind()                               \
+                                    .Ctx<ffi::PlatformStream<cudaStream_t>>()  \
+                                    .Arg<ffi::Buffer<DT>>()       /* q */      \
+                                    .Arg<ffi::Buffer<DT>>()       /* k */      \
+                                    .Arg<ffi::Buffer<DT>>()       /* v */      \
+                                    .Arg<ffi::Buffer<ffi::F32>>() /* g */      \
+                                    .Arg<ffi::Buffer<ffi::F32>>() /* beta */   \
+                                    .Arg<ffi::Buffer<ffi::F32>>() /* tau */    \
+                                    .Arg<ffi::Buffer<ffi::F32>>() /* h0 */     \
+                                    .Ret<ffi::Buffer<DT>>()       /* o */      \
+                                    .Ret<ffi::Buffer<ffi::F32>>() /* kv_mem */ \
+                                    .Ret<ffi::Buffer<ffi::F32>>() /* chkp */   \
+                                    .Ret<ffi::Buffer<ffi::F32>>() /* inv_q */  \
+                                    .Ret<ffi::Buffer<ffi::F32>>() /* inv_k */  \
+                                    .Ret<ffi::Buffer<ffi::F32>>() /* ht */,    \
+                                {ffi::Traits::kCmdBufferCompatible})
+
+#define GDN_SANE_DEFINE_BWD_NO_MASK_HANDLER(SYMBOL, ET, DT)                    \
+  XLA_FFI_DEFINE_HANDLER_SYMBOL(SYMBOL, (GdnSaneBwdHostNoMask<ET, DT>),        \
+                                ffi::Ffi::Bind()                               \
+                                    .Ctx<ffi::PlatformStream<cudaStream_t>>()  \
+                                    .Arg<ffi::Buffer<DT>>()       /* q */      \
+                                    .Arg<ffi::Buffer<DT>>()       /* k */      \
+                                    .Arg<ffi::Buffer<DT>>()       /* v */      \
+                                    .Arg<ffi::Buffer<ffi::F32>>() /* g */      \
+                                    .Arg<ffi::Buffer<ffi::F32>>() /* beta */   \
+                                    .Arg<ffi::Buffer<DT>>()       /* dy */     \
+                                    .Arg<ffi::Buffer<ffi::F32>>() /* dht */    \
+                                    .Arg<ffi::Buffer<ffi::F32>>() /* kv_mem */ \
+                                    .Arg<ffi::Buffer<ffi::F32>>() /* inv_q */  \
+                                    .Arg<ffi::Buffer<ffi::F32>>() /* inv_k */  \
+                                    .Arg<ffi::Buffer<ffi::F32>>() /* chkp */   \
+                                    .Arg<ffi::Buffer<ffi::F32>>() /* tau */    \
+                                    .Ret<ffi::Buffer<DT>>()       /* dq */     \
+                                    .Ret<ffi::Buffer<DT>>()       /* dk */     \
+                                    .Ret<ffi::Buffer<ffi::F32>>() /* dv */     \
+                                    .Ret<ffi::Buffer<ffi::F32>>() /* dg */     \
+                                    .Ret<ffi::Buffer<ffi::F32>>() /* dbeta */  \
+                                    .Ret<ffi::Buffer<ffi::F32>>() /* dh0 */    \
+                                    .Ret<ffi::Buffer<ffi::F32>>() /* dtau */,  \
+                                {ffi::Traits::kCmdBufferCompatible})
+
+#define GDN_SANE_DEFINE_INF_NO_MASK_HANDLER(SYMBOL, ET, DT)                    \
+  XLA_FFI_DEFINE_HANDLER_SYMBOL(SYMBOL, (GdnSaneInferenceHostNoMask<ET, DT>),  \
+                                ffi::Ffi::Bind()                               \
+                                    .Ctx<ffi::PlatformStream<cudaStream_t>>()  \
+                                    .Arg<ffi::Buffer<DT>>()       /* q */      \
+                                    .Arg<ffi::Buffer<DT>>()       /* k */      \
+                                    .Arg<ffi::Buffer<DT>>()       /* v */      \
+                                    .Arg<ffi::Buffer<ffi::F32>>() /* g */      \
+                                    .Arg<ffi::Buffer<ffi::F32>>() /* beta */   \
+                                    .Arg<ffi::Buffer<ffi::F32>>() /* tau */    \
+                                    .Arg<ffi::Buffer<ffi::F32>>() /* h0 */     \
+                                    .Ret<ffi::Buffer<DT>>()       /* o */      \
+                                    .Ret<ffi::Buffer<ffi::F32>>() /* ht */,    \
+                                {ffi::Traits::kCmdBufferCompatible})
+
+GDN_SANE_DEFINE_FWD_NO_MASK_HANDLER(GdnRecurrentSaneFwdNoMaskBf16, bf,
+                                    ffi::BF16);
+GDN_SANE_DEFINE_BWD_NO_MASK_HANDLER(GdnRecurrentSaneBwdNoMaskBf16, bf,
+                                    ffi::BF16);
+GDN_SANE_DEFINE_INF_NO_MASK_HANDLER(GdnRecurrentSaneInferenceNoMaskBf16, bf,
+                                    ffi::BF16);
+
+GDN_SANE_DEFINE_FWD_NO_MASK_HANDLER(GdnRecurrentSaneFwdNoMaskF32, float,
+                                    ffi::F32);
+GDN_SANE_DEFINE_BWD_NO_MASK_HANDLER(GdnRecurrentSaneBwdNoMaskF32, float,
+                                    ffi::F32);
+GDN_SANE_DEFINE_INF_NO_MASK_HANDLER(GdnRecurrentSaneInferenceNoMaskF32, float,
+                                    ffi::F32);
+
