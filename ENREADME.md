@@ -66,6 +66,16 @@
   - [API Reference](#api-reference-6)
     - [`delta_net_chunk`](#delta_net_chunk)
   - [Implementation Status of `delta_net_chunk`](#implementation-status-of-delta_net_chunk)
+- [Usage of `delta_net_recurrent_sane`](#usage-of-delta_net_recurrent_sane)
+  - [API Reference](#api-reference-7)
+    - [`delta_net_recurrent_sane`](#delta_net_recurrent_sane)
+    - [`delta_net_recurrent_sane_inference`](#delta_net_recurrent_sane_inference)
+    - [`delta_net_recurrent_sane_single_step`](#delta_net_recurrent_sane_single_step)
+  - [Implementation Status of `delta_net_recurrent_sane`](#implementation-status-of-delta_net_recurrent_sane)
+- [Usage of `delta_net_chunk_sane`](#usage-of-delta_net_chunk_sane)
+  - [API Reference](#api-reference-8)
+    - [`delta_net_chunk_sane`](#delta_net_chunk_sane)
+  - [Implementation Status of `delta_net_chunk_sane`](#implementation-status-of-delta_net_chunk_sane)
 - [Usage of `rwkv6op`](#usage-of-rwkv6op)
 - [Factory functions and custom parameters](#factory-functions-and-custom-parameters)
 - [Distributed Parallelism (JAX)](#distributed-parallelism)
@@ -922,6 +932,141 @@ out, final_state = delta_net_chunk(
 
 ---
 
+<a id="usage-of-delta_net_recurrent_sane"></a>
+## Usage of `delta_net_recurrent_sane`
+
+`delta_net_recurrent_sane` adds **State Anomaly Neutralization (SANE)** on top of `delta_net_recurrent`: at each chunk boundary the state is softly clipped as `state = tau * tanh(state / tau)` gated by `mask`, and the output is always computed from the pre-SANE state. Its only difference from `gdn_recurrent_sane` is the absence of the decay gate `g`. The input layout is fixed to `[B, T, H, K/V]`.
+
+```python
+from rwkv_ops import (
+    delta_net_recurrent_sane,
+    delta_net_recurrent_sane_inference,
+    delta_net_recurrent_sane_single_step,
+)
+
+out, final_state = delta_net_recurrent_sane(
+    q, k, v, beta, tau,
+    mask=mask,                 # [B, T//chunk_size], optional
+    initial_state=h0,
+    output_final_state=True,
+)
+```
+
+<a id="api-reference-7"></a>
+### API Reference
+
+<a id="delta_net_recurrent_sane"></a>
+#### `delta_net_recurrent_sane`
+
+| Argument | Shape | Description |
+|---|---|---|
+| q, k | (B, T, H, K) | Query and key; L2-normalized inside the operator |
+| v | (B, T, H, V) | Value |
+| beta | (B, T, H) | Write strength; must have already passed through sigmoid, i.e. in (0, 1) |
+| tau | (B, T//chunk_size, H) | SANE threshold, must be > 1, float32 |
+| mask | (B, T//chunk_size), optional | Chunk boundaries with value > 0 apply SANE; None means unconditional SANE |
+| initial_state | (B, H, K, V) or (1, H, K, V), float32, optional | Initial recurrent state |
+| output_final_state | bool | Whether to return the final state; forced to None with a warning when mask is None |
+| chunk_size | int | SANE chunk length, default 16 |
+
+| Return | Shape | Description |
+|---|---|---|
+| out | (B, T, H, V) | Same dtype as `v` |
+| final_state | (B, H, K, V) or None | Final state, float32; None when mask is None |
+
+<a id="delta_net_recurrent_sane_inference"></a>
+#### `delta_net_recurrent_sane_inference`
+
+Same interface as `delta_net_recurrent_sane`, but **does not compute gradients** and does not save the intermediates needed for the backward pass, thus using less memory. Supports arbitrary `T`.
+
+<a id="delta_net_recurrent_sane_single_step"></a>
+#### `delta_net_recurrent_sane_single_step`
+
+Single-step RNN entry point (decode phase); additionally takes `do_sane`.
+
+| Argument | Shape | Description |
+|---|---|---|
+| q, k | (B, H, K) | Query and key |
+| v | (B, H, V) | Value |
+| beta | (B, H) | Write strength; must have already passed through sigmoid |
+| tau | (B, H) | SANE threshold, float32, must be > 1 |
+| do_sane | (B,) | bool, whether to apply SANE at this step |
+| initial_state | (B, H, K, V) or (1, H, K, V), float32, optional | Current state |
+| output_final_state | bool | Whether to return the next state |
+| chunk_size | int | Chunk length, default 16; ignored by the single-step implementation (signature consistency only) |
+
+| Return | Shape | Description |
+|---|---|---|
+| out | (B, H, V) | Same dtype as `v` |
+| next_state | (B, H, K, V) or None | Next state, float32 |
+
+<a id="implementation-status-of-delta_net_recurrent_sane"></a>
+### Implementation Status of `delta_net_recurrent_sane`
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ❌   | ❌     | ✅     |
+| JAX         | ❌   | ❌     | ✅     |
+| TensorFlow  | ❌   | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
+
+> Only the pure Keras ops `native` implementation is available for now; accelerated kernels will follow in later phases.
+
+<a id="usage-of-delta_net_chunk_sane"></a>
+## Usage of `delta_net_chunk_sane`
+
+`delta_net_chunk_sane` adds SANE on top of `delta_net_chunk`: at every chunk boundary the cross-chunk state is softly clipped as `state = tau * tanh(state / tau)` and gated by `mask`. Its difference from `gdn_chunk_sane` is the absence of the decay gate `g`. The input layout is fixed to `[B, T, H, K/V]`.
+
+```python
+from rwkv_ops import delta_net_chunk_sane
+
+out, final_state = delta_net_chunk_sane(
+    q, k, v, beta, tau,
+    mask=mask,                 # [B, T//chunk_size], optional
+    initial_state=h0,
+    output_final_state=True,
+    chunk_size=16,
+)
+```
+
+<a id="api-reference-8"></a>
+### API Reference
+
+<a id="delta_net_chunk_sane"></a>
+#### `delta_net_chunk_sane`
+
+| Argument | Shape | Description |
+|---|---|---|
+| q, k | (B, T, H, K) | Query and key; L2-normalized inside the operator |
+| v | (B, T, H, V) | Value |
+| beta | (B, T, H) | Write strength; must have already passed through sigmoid, i.e. in (0, 1) |
+| tau | (B, T//chunk_size, H) | SANE threshold, must be > 1, float32 |
+| mask | (B, T//chunk_size), optional | Chunk boundaries with value > 0 apply SANE; None means unconditional SANE |
+| initial_state | (B, H, K, V) or (1, H, K, V), float32, optional | Initial recurrent state |
+| output_final_state | bool | Whether to return the final state; forced to None with a warning when mask is None |
+| chunk_size | int | Chunk length, default 16; the sequence is padded internally to a multiple of chunk_size |
+
+| Return | Shape | Description |
+|---|---|---|
+| out | (B, T, H, V) | Same dtype as `v` |
+| final_state | (B, H, K, V) or None | Final state, float32; None when mask is None |
+
+<a id="implementation-status-of-delta_net_chunk_sane"></a>
+### Implementation Status of `delta_net_chunk_sane`
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ❌   | ❌     | ✅     |
+| JAX         | ❌   | ❌     | ✅     |
+| TensorFlow  | ❌   | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
+
+> Only the pure Keras ops `native` implementation is available for now; accelerated kernels will follow in later phases.
+
+---
+
 <a id="distributed-parallelism"></a>
 ## Distributed Parallelism (JAX)
 
@@ -1075,7 +1220,9 @@ from rwkv_ops import (
     get_gated_delta_net_recurrent,        # GDN recurrent (non-SANE)
     get_gated_delta_net_recurrent_sane,   # GDN recurrent SANE
     get_delta_net_chunk,                  # DeltaNet chunkwise
+    get_delta_net_chunk_sane,             # DeltaNet chunkwise SANE
     get_delta_net_recurrent,              # DeltaNet recurrent
+    get_delta_net_recurrent_sane,         # DeltaNet recurrent SANE
 )
 
 # RWKV-7 CUDA: HEAD_SIZE and chunk_size are compile-time constants and must be set in the factory
@@ -1107,8 +1254,14 @@ gdn_recurrent_sane = get_gated_delta_net_recurrent_sane(
 # DeltaNet chunkwise (currently native only; chunk_size can be passed at call time)
 dn_chunk = get_delta_net_chunk(KERNEL_TYPE="native", chunk_size=32)
 
+# DeltaNet chunkwise SANE (currently native only; chunk_size can be passed at call time)
+dn_chunk_sane = get_delta_net_chunk_sane(KERNEL_TYPE="native", chunk_size=32)
+
 # DeltaNet recurrent (currently native only; chunk_size is ignored, kept only for signature consistency)
 dn_recurrent = get_delta_net_recurrent(KERNEL_TYPE="native", chunk_size=32)
+
+# DeltaNet recurrent SANE (currently native only; chunk_size is ignored, kept only for signature consistency)
+dn_recurrent_sane = get_delta_net_recurrent_sane(KERNEL_TYPE="native", chunk_size=32)
 ```
 
 **Notes:**

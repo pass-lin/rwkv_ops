@@ -49,6 +49,12 @@ from .delta_net_recurrent import (  # noqa: E402
     get_delta_net_recurrent_single_step,
 )
 from .delta_net_chunk import get_delta_net_chunk  # noqa: E402
+from .delta_net_chunk_sane import get_delta_net_chunk_sane  # noqa: E402
+from .delta_net_recurrent_sane import (  # noqa: E402
+    get_delta_net_recurrent_sane,
+    get_delta_net_recurrent_sane_inference,
+    get_delta_net_recurrent_sane_single_step,
+)
 
 generalized_delta_rule, generalized_delta_rule_inference = get_generalized_delta_rule(
     KERNEL_TYPE=KERNEL_TYPE
@@ -83,6 +89,15 @@ delta_net_recurrent_single_step = get_delta_net_recurrent_single_step(
     KERNEL_TYPE=KERNEL_TYPE
 )
 delta_net_chunk = get_delta_net_chunk(KERNEL_TYPE=KERNEL_TYPE)
+
+delta_net_recurrent_sane = get_delta_net_recurrent_sane(KERNEL_TYPE=KERNEL_TYPE)
+delta_net_recurrent_sane_inference = get_delta_net_recurrent_sane_inference(
+    KERNEL_TYPE=KERNEL_TYPE
+)
+delta_net_recurrent_sane_single_step = get_delta_net_recurrent_sane_single_step(
+    KERNEL_TYPE=KERNEL_TYPE
+)
+delta_net_chunk_sane = get_delta_net_chunk_sane(KERNEL_TYPE=KERNEL_TYPE)
 
 rwkv7_op = generalized_delta_rule
 rwkv7_op_inference = generalized_delta_rule_inference

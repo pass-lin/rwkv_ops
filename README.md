@@ -68,6 +68,16 @@
   - [函数接口说明](#函数接口说明-6)
     - [`delta_net_chunk`](#delta_net_chunk)
   - [delta_net_chunk 实现状态](#delta_net_chunk-实现状态)
+- [delta_net_recurrent_sane 使用方法](#delta_net_recurrent_sane-使用方法)
+  - [函数接口说明](#函数接口说明-7)
+    - [`delta_net_recurrent_sane`](#delta_net_recurrent_sane)
+    - [`delta_net_recurrent_sane_inference`](#delta_net_recurrent_sane_inference)
+    - [`delta_net_recurrent_sane_single_step`](#delta_net_recurrent_sane_single_step)
+  - [delta_net_recurrent_sane 实现状态](#delta_net_recurrent_sane-实现状态)
+- [delta_net_chunk_sane 使用方法](#delta_net_chunk_sane-使用方法)
+  - [函数接口说明](#函数接口说明-8)
+    - [`delta_net_chunk_sane`](#delta_net_chunk_sane)
+  - [delta_net_chunk_sane 实现状态](#delta_net_chunk_sane-实现状态)
 - [rwkv6op 使用方法](#rwkv6op-使用方法)
 - [分布式并行（JAX）](#分布式并行)
   - [PyTorch 使用注意事项](#pytorch-使用注意事项)
@@ -901,6 +911,139 @@ out, final_state = delta_net_chunk(
 > Torch 后端的 `native` 在非 CPU 平台默认为 Triton 实现；JAX 侧 `triton` 需显式 `KERNEL_TYPE="triton"` 并安装 `jax-triton`，`native` 为纯 Keras ops。训练入口支持反向传播。chunk 家族只做 native + Triton，不做 CUDA/Pallas。
 > 注意：Triton 实现要求 `T % chunk_size == 0` 且 `chunk_size >= 16`，不做内部 padding。
 
+<a id="delta_net_recurrent_sane-使用方法"></a>
+## delta_net_recurrent_sane 使用方法
+
+`delta_net_recurrent_sane` 在 `delta_net_recurrent` 基础上加入 **State Anomaly Neutralization（SANE）**：在 chunk 边界按 `mask` 对 state 执行 `state = tau * tanh(state / tau)`，输出始终基于 SANE 之前的 state。它与 `gdn_recurrent_sane` 的唯一差别是没有 decay gate `g`。输入 layout 固定为 `[B, T, H, K/V]`。
+
+```python
+from rwkv_ops import (
+    delta_net_recurrent_sane,
+    delta_net_recurrent_sane_inference,
+    delta_net_recurrent_sane_single_step,
+)
+
+out, final_state = delta_net_recurrent_sane(
+    q, k, v, beta, tau,
+    mask=mask,                 # [B, T//chunk_size]，可选
+    initial_state=h0,
+    output_final_state=True,
+)
+```
+
+<a id="函数接口说明-7"></a>
+### 函数接口说明
+
+<a id="delta_net_recurrent_sane"></a>
+#### `delta_net_recurrent_sane`
+
+| 参数 | 形状 | 说明 |
+|---|---|---|
+| q, k | (B, T, H, K) | 查询与键，内部先做 L2 归一化 |
+| v | (B, T, H, V) | 值 |
+| beta | (B, T, H) | 写入强度，需已在外部过 sigmoid，落在 (0, 1) |
+| tau | (B, T//chunk_size, H) | SANE 阈值，必须 > 1，float32 |
+| mask | (B, T//chunk_size)，可选 | >0 的 chunk 边界执行 SANE；为 None 时无条件 SANE |
+| initial_state | (B, H, K, V) 或 (1, H, K, V)，float32，可选 | 初始 recurrent state |
+| output_final_state | bool | 是否返回最终 state；mask=None 时强制为 None 并发出警告 |
+| chunk_size | int | SANE chunk 长度，默认 16 |
+
+| 返回值 | 形状 | 说明 |
+|---|---|---|
+| out | (B, T, H, V) | 与 `v` 同 dtype |
+| final_state | (B, H, K, V) 或 None | 最终 state，float32；mask=None 时为 None |
+
+<a id="delta_net_recurrent_sane_inference"></a>
+#### `delta_net_recurrent_sane_inference`
+
+接口与 `delta_net_recurrent_sane` 一致，但**不计算梯度**，不保存反向所需的中间量，显存占用更低。支持任意长度 `T`。
+
+<a id="delta_net_recurrent_sane_single_step"></a>
+#### `delta_net_recurrent_sane_single_step`
+
+单步 RNN（decode 阶段）入口，额外接收 `do_sane` 控制本步是否执行 SANE。
+
+| 参数 | 形状 | 说明 |
+|---|---|---|
+| q, k | (B, H, K) | 查询与键 |
+| v | (B, H, V) | 值 |
+| beta | (B, H) | 写入强度，需已过 sigmoid |
+| tau | (B, H) | SANE 阈值，float32，必须 > 1 |
+| do_sane | (B,) | bool，是否在该步执行 SANE |
+| initial_state | (B, H, K, V) 或 (1, H, K, V)，float32，可选 | 当前 state |
+| output_final_state | bool | 是否返回下一步 state |
+| chunk_size | int | chunk 长度，默认 16；单步实现忽略该参数（仅签名一致） |
+
+| 返回值 | 形状 | 说明 |
+|---|---|---|
+| out | (B, H, V) | 与 `v` 同 dtype |
+| next_state | (B, H, K, V) 或 None | 下一步 state，float32 |
+
+<a id="delta_net_recurrent_sane-实现状态"></a>
+### delta_net_recurrent_sane 实现状态
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ❌   | ❌     | ✅     |
+| JAX         | ❌   | ❌     | ✅     |
+| TensorFlow  | ❌   | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
+
+> 当前仅提供纯 Keras ops 的 native 实现；加速内核在后续阶段补齐。
+
+<a id="delta_net_chunk_sane-使用方法"></a>
+## delta_net_chunk_sane 使用方法
+
+`delta_net_chunk_sane` 在 `delta_net_chunk` 基础上加入 SANE：在每个 chunk 边界对跨 chunk 传递的 state 执行 `state = tau * tanh(state / tau)`，并按 `mask` 选择是否生效。与 `gdn_chunk_sane` 的差别是没有 decay gate `g`。输入 layout 固定为 `[B, T, H, K/V]`。
+
+```python
+from rwkv_ops import delta_net_chunk_sane
+
+out, final_state = delta_net_chunk_sane(
+    q, k, v, beta, tau,
+    mask=mask,                 # [B, T//chunk_size]，可选
+    initial_state=h0,
+    output_final_state=True,
+    chunk_size=16,
+)
+```
+
+<a id="函数接口说明-8"></a>
+### 函数接口说明
+
+<a id="delta_net_chunk_sane"></a>
+#### `delta_net_chunk_sane`
+
+| 参数 | 形状 | 说明 |
+|---|---|---|
+| q, k | (B, T, H, K) | 查询与键，内部先做 L2 归一化 |
+| v | (B, T, H, V) | 值 |
+| beta | (B, T, H) | 写入强度，需已在外部过 sigmoid，落在 (0, 1) |
+| tau | (B, T//chunk_size, H) | SANE 阈值，必须 > 1，float32 |
+| mask | (B, T//chunk_size)，可选 | >0 的 chunk 边界执行 SANE；为 None 时无条件 SANE |
+| initial_state | (B, H, K, V) 或 (1, H, K, V)，float32，可选 | 初始 recurrent state |
+| output_final_state | bool | 是否返回最终 state；mask=None 时强制为 None 并发出警告 |
+| chunk_size | int | chunk 长度，默认 16；内部会 pad 到 chunk_size 整数倍 |
+
+| 返回值 | 形状 | 说明 |
+|---|---|---|
+| out | (B, T, H, V) | 与 `v` 同 dtype |
+| final_state | (B, H, K, V) 或 None | 最终 state，float32；mask=None 时为 None |
+
+<a id="delta_net_chunk_sane-实现状态"></a>
+### delta_net_chunk_sane 实现状态
+
+| Framework   | cuda | triton | native |
+|-------------|------|--------|--------|
+| PyTorch     | ❌   | ❌     | ✅     |
+| JAX         | ❌   | ❌     | ✅     |
+| TensorFlow  | ❌   | ❌     | ✅     |
+| NumPy       | ❌   | ❌     | ✅     |
+| OpenVINO    | ❌   | ❌     | ✅     |
+
+> 当前仅提供纯 Keras ops 的 native 实现；加速内核在后续阶段补齐。
+
 <a id="分布式并行"></a>
 ## 分布式并行（JAX）
 
@@ -1047,7 +1190,9 @@ from rwkv_ops import (
     get_gated_delta_net_recurrent,        # GDN recurrent（无 SANE）
     get_gated_delta_net_recurrent_sane,   # GDN recurrent SANE
     get_delta_net_chunk,                  # DeltaNet chunkwise
+    get_delta_net_chunk_sane,             # DeltaNet chunkwise SANE
     get_delta_net_recurrent,              # DeltaNet recurrent
+    get_delta_net_recurrent_sane,         # DeltaNet recurrent SANE
 )
 
 # RWKV-7 CUDA：HEAD_SIZE 与 chunk_size 均为编译期常量，必须在工厂指定
@@ -1079,8 +1224,14 @@ gdn_recurrent_sane = get_gated_delta_net_recurrent_sane(
 # DeltaNet chunkwise（当前仅 native，可在调用时传 chunk_size）
 dn_chunk = get_delta_net_chunk(KERNEL_TYPE="native", chunk_size=32)
 
+# DeltaNet chunkwise SANE（当前仅 native，可在调用时传 chunk_size）
+dn_chunk_sane = get_delta_net_chunk_sane(KERNEL_TYPE="native", chunk_size=32)
+
 # DeltaNet recurrent（当前仅 native；chunk_size 仅签名一致，可忽略）
 dn_recurrent = get_delta_net_recurrent(KERNEL_TYPE="native", chunk_size=32)
+
+# DeltaNet recurrent SANE（当前仅 native；chunk_size 仅签名一致，可忽略）
+dn_recurrent_sane = get_delta_net_recurrent_sane(KERNEL_TYPE="native", chunk_size=32)
 ```
 
 **注意：**

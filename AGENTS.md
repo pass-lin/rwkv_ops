@@ -52,9 +52,11 @@ MANIFEST.in                  # 源码分发清单
 | `gated_delta_net_chunk` | Gated DeltaNet chunkwise 算子 |
 | `gated_delta_net_chunk_sane` | Gated DeltaNet chunkwise SANE 算子 |
 | `delta_net_recurrent` / `delta_net_recurrent_inference` / `delta_net_recurrent_single_step` | DeltaNet recurrent 算子（训练/推理/单步） |
+| `delta_net_recurrent_sane` / `delta_net_recurrent_sane_inference` / `delta_net_recurrent_sane_single_step` | DeltaNet recurrent SANE 算子（训练/推理/单步） |
 | `delta_net_chunk` | DeltaNet chunkwise 算子 |
+| `delta_net_chunk_sane` | DeltaNet chunkwise SANE 算子 |
 | `mhc_pre_op` / `mhc_post_op` | mHC 预处理/后处理算子 |
-| `get_generalized_delta_rule` 等 14 个工厂函数 | 按 head_size / KERNEL_TYPE / chunk_size 获取算子 |
+| `get_generalized_delta_rule` 等 22 个工厂函数 | 按 head_size / KERNEL_TYPE / chunk_size 获取算子 |
 
 ---
 
@@ -270,6 +272,30 @@ MANIFEST.in                  # 源码分发清单
 > 需显式 `KERNEL_TYPE="triton"` 且安装 `jax-triton`，`native` 为纯 Keras ops。
 > chunk 家族只做 native + Triton，训练入口含反向。
 > recurrent 家族的 CUDA/Pallas 加速内核在后续阶段提供（见 §14）。
+
+#### DeltaNet recurrent SANE `delta_net_recurrent_sane` / `delta_net_recurrent_sane_inference` / `delta_net_recurrent_sane_single_step`
+
+| Framework | cuda | triton | native |
+|-----------|------|--------|--------|
+| PyTorch   | ❌   | ❌     | ✅     |
+| JAX       | ❌   | ❌     | ✅     |
+| TensorFlow| ❌   | ❌     | ✅     |
+| NumPy     | ❌   | ❌     | ✅     |
+| OpenVINO  | ❌   | ❌     | ✅     |
+
+> 当前仅提供纯 Keras ops 的 native 实现，加速内核在后续阶段补齐（见 §14）。
+
+#### DeltaNet chunkwise SANE `delta_net_chunk_sane`
+
+| Framework | cuda | triton | native |
+|-----------|------|--------|--------|
+| PyTorch   | ❌   | ❌     | ✅     |
+| JAX       | ❌   | ❌     | ✅     |
+| TensorFlow| ❌   | ❌     | ✅     |
+| NumPy     | ❌   | ❌     | ✅     |
+| OpenVINO  | ❌   | ❌     | ✅     |
+
+> 当前仅提供纯 Keras ops 的 native 实现，加速内核在后续阶段补齐（见 §14）。
 
 ### 2.3 分布式分片（jax）
 
@@ -1567,6 +1593,7 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
 | `rwkv_ops/delta_net_chunk/triton/` | DeltaNet chunkwise 共享 Triton 内核（l2norm / intra / wy / chunk_h / chunk_o / 反向各 kernel） |
 | `rwkv_ops/delta_net_chunk/torch_triton_kernel.py` | DeltaNet chunkwise PyTorch Triton 桥接 |
 | `rwkv_ops/delta_net_chunk/jax_triton_kernel.py` | DeltaNet chunkwise JAX-Triton 桥接 |
+| `rwkv_ops/delta_net_chunk_sane/native_keras_op.py` | DeltaNet chunkwise SANE 原生参考实现 |
 | `rwkv_ops/delta_net_recurrent/native_keras_op.py` | DeltaNet recurrent 原生参考实现 |
 | `rwkv_ops/delta_net_recurrent/triton_kernel.py` | DeltaNet recurrent 共享 Triton 内核 |
 | `rwkv_ops/delta_net_recurrent/torch_triton_kernel.py` | DeltaNet recurrent PyTorch Triton 桥接 |
@@ -1574,6 +1601,7 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
 | `rwkv_ops/delta_net_recurrent/jax_pallas_kernel.py` | DeltaNet recurrent Pallas 内核 |
 | `rwkv_ops/delta_net_recurrent/torch_cuda_kernel/` | DeltaNet recurrent PyTorch C++/CUDA 扩展（训练含反向 / 推理 / 单步，按 (K,V,chunk) 懒编译） |
 | `rwkv_ops/delta_net_recurrent/jax_cuda_kernel/` | DeltaNet recurrent JAX FFI CUDA（训练含反向 / 推理 / 单步，按 (K,V,chunk) 懒编译） |
+| `rwkv_ops/delta_net_recurrent_sane/native_keras_op.py` | DeltaNet recurrent SANE 原生参考实现 |
 | `rwkv_ops/rwkv6_kernel/ops_rwkv_kernel.py` | RWKV-6 数值 ground truth |
 | `rwkv_ops/rwkv6_kernel/native_keras_op.py` | RWKV-6 函数式原生封装 |
 | `rwkv_ops/mhc_kernel/native_op.py` | mHC 原生参考实现 |
@@ -1627,7 +1655,7 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
 | 2 | recurrent Triton（`triton_kernel.py` 共享 kernel + torch/jax 桥接），对照 `gdn_recurrent/` 的实现方式与 API 派生；训练/推理/单步三个算子都要有 Triton 入口 | 完成 |
 | 3 | chunk Triton（torch/jax）。chunk 家族**只做 native + Triton**：Pallas 过于复杂不做；CUDA 不做（自研 SIMT gemm 打不过 `tl.dot`） | 完成 |
 | 4 | recurrent Pallas（jax）+ CUDA（torch 扩展 / jax FFI），对照阶段 2 的 Triton 逻辑。分发语义：torch 非 CPU 时 native 默认即 Triton；jax GPU/TPU 时 native 默认即 Pallas；cuda 需显式 `KERNEL_TYPE="cuda"` | 完成 |
-| 5 | SANE 变体（`delta_net_chunk_sane` / `delta_net_recurrent_sane`）。变化很小（约 95% 代码复用前四阶段产物），全部放最后做 | 未开始 |
+| 5 | SANE 变体（`delta_net_chunk_sane` / `delta_net_recurrent_sane`）。变化很小（约 95% 代码复用前四阶段产物），全部放最后做 | 进行中（native 已完成） |
 
 ### 14.3 移植要点
 

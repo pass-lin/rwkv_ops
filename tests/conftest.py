@@ -263,6 +263,30 @@ def delta_net_inputs(rng, delta_net_shape):
 
 
 @pytest.fixture(scope="session")
+def delta_net_sane_inputs(rng, delta_net_inputs):
+    """DeltaNet-SANE 测试输入，在 delta_net_inputs 基础上补充 tau 与 mask。
+
+    tau = softplus(x) + 1，x 均值约 7 时 tau ≈ 8（并非接近恒等的大阈值）；
+    mask 随机取 0/1，用于验证 padding chunk 行为。
+
+    Args:
+        rng: np.random.Generator，随机数生成器。
+        delta_net_inputs: dict, DeltaNet 基础输入。
+
+    Returns:
+        dict: 包含 delta_net_inputs 全部字段与 tau/mask。
+            tau: [B, T//16, H], float32。
+            mask: [B, T//16], float32。
+    """
+    B, T, H, _ = delta_net_inputs["q"].shape
+    chunk_num = T // 16
+    x = rng.standard_normal((B, max(chunk_num, 1), H), dtype=np.float32) * 0.5 + 7.0
+    tau = np.log1p(np.exp(x)) + 1.0
+    mask = rng.integers(0, 2, (B, max(chunk_num, 1))).astype(np.float32)
+    return {**delta_net_inputs, "tau": tau.astype(np.float32), "mask": mask}
+
+
+@pytest.fixture(scope="session")
 def mhc_shape():
     """mHC 测试默认形状。
 
