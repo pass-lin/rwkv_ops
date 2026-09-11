@@ -318,7 +318,7 @@ def test_rwkv7_sane_triton_forward_state_chunk_size(
     )
 
     _test_is_close("y_chunk_size_32", y_ref, y_tgt, atol=2e-2, rtol=2e-2)
-    _test_is_close("final_state_chunk_size_32", s_ref, s_tgt, atol=1e-3, rtol=1e-1)
+    _test_is_close("final_state_chunk_size_32", s_ref, s_tgt, atol=1e-3, rtol=1e-2)
 
 
 @pytest.mark.torch
@@ -353,7 +353,7 @@ def test_rwkv7_sane_triton_backward_chunk_size(
     g_tgt = grads(rwkv7_sane_triton_op, tgt)
 
     thresholds = {
-        "r": (1e-3, 1e-1),
+        "r": (1e-3, 1e-2),
         "k": (7e-3, 1e-2),
         "v": (7e-3, 1e-2),
         "a": (7e-3, 1e-2),
@@ -407,7 +407,7 @@ def test_rwkv7_sane_triton_forward_state_masked_chunk_size(
     )
 
     _test_is_close("y_mask_chunk_size_32", y_ref, y_tgt, atol=2e-2, rtol=2e-2)
-    _test_is_close("final_state_mask_chunk_size_32", s_ref, s_tgt, atol=1e-3, rtol=1e-1)
+    _test_is_close("final_state_mask_chunk_size_32", s_ref, s_tgt, atol=1e-3, rtol=1e-2)
 
 
 @pytest.mark.torch
@@ -451,7 +451,7 @@ def test_rwkv7_sane_triton_backward_masked_chunk_size(
     g_tgt = grads(rwkv7_sane_triton_op, tgt, mask)
 
     thresholds = {
-        "r": (1e-3, 1e-1),
+        "r": (1e-3, 1e-2),
         "k": (7e-3, 1e-2),
         "v": (7e-3, 1e-2),
         "a": (7e-3, 1e-2),
@@ -525,7 +525,7 @@ def test_rwkv7_sane_triton_no_mask_backward_chunk_size(
     g_tgt = grads(rwkv7_sane_triton_op, tgt)
 
     thresholds = {
-        "r": (1e-3, 1e-1),
+        "r": (1e-3, 1e-2),
         "k": (7e-3, 1e-2),
         "v": (7e-3, 1e-2),
         "a": (7e-3, 1e-2),

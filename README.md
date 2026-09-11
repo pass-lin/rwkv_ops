@@ -892,13 +892,14 @@ out, final_state = delta_net_chunk(
 
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
-| PyTorch     | ❌   | ❌     | ✅     |
-| JAX         | ❌   | ❌     | ✅     |
+| PyTorch     | ❌   | ✅     | ✅     |
+| JAX         | ❌   | ✅     | ✅     |
 | TensorFlow  | ❌   | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 | OpenVINO    | ❌   | ❌     | ✅     |
 
-> 当前仅提供纯 Keras ops 的 native 实现，五个后端均可用，训练入口支持反向传播；Triton 加速内核将在后续阶段提供。
+> Torch 后端的 `native` 在非 CPU 平台默认为 Triton 实现；JAX 侧 `triton` 需显式 `KERNEL_TYPE="triton"` 并安装 `jax-triton`，`native` 为纯 Keras ops。训练入口支持反向传播。chunk 家族只做 native + Triton，不做 CUDA/Pallas。
+> 注意：Triton 实现要求 `T % chunk_size == 0` 且 `chunk_size >= 16`，不做内部 padding。
 
 <a id="分布式并行"></a>
 ## 分布式并行（JAX）

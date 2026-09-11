@@ -254,13 +254,16 @@ MANIFEST.in                  # 源码分发清单
 
 | Framework | cuda | triton | native |
 |-----------|------|--------|--------|
-| PyTorch   | ❌   | ❌     | ✅     |
-| JAX       | ❌   | ❌     | ✅     |
+| PyTorch   | ❌   | ✅     | ✅³    |
+| JAX       | ❌   | ✅     | ✅     |
 | TensorFlow| ❌   | ❌     | ✅     |
 | NumPy     | ❌   | ❌     | ✅     |
 | OpenVINO  | ❌   | ❌     | ✅     |
 
-> recurrent 家族的 Triton/CUDA/Pallas 与 chunk 家族的加速内核在后续阶段提供（见 §14）。
+> ³ Torch 后端的 `native` 在非 CPU 平台默认为 Triton 实现；JAX 侧 `triton`
+> 需显式 `KERNEL_TYPE="triton"` 且安装 `jax-triton`，`native` 为纯 Keras ops。
+> chunk 家族只做 native + Triton，训练入口含反向。
+> recurrent 家族的 CUDA/Pallas 加速内核在后续阶段提供（见 §14）。
 
 ### 2.3 分布式分片（jax）
 
@@ -688,11 +691,21 @@ pytest tests/jax -v -m "not slow"
 - 新增/修改加速内核必须覆盖：前向输出与 final_state vs native；反向梯度
   vs native 自动微分；mask 全 1 / 全 0 / 随机 mask 等价性；
   `head_first=True/False` 两种 layout。
+- **双精度覆盖（全项目默认强制）**：每个加速内核（Triton/CUDA/Pallas）的
+  测试必须同时包含 **bf16和fp32用例**
+  情况覆盖；两组共用同一组 numpy 输入，分别 cast 后按各自红线判定。
+  若某内核只支持 bf16 I/O，fp32 组用例改为验证"fp32 输入警告并 cast"
+  的行为，不得直接省略。
 - SANE 类算子额外镜像覆盖：带/不带 mask 的前向+反向（含 tau 梯度）、无 mask
   警告 + None state、任意长度推理（T=34）、不规则 padding、head 轴 TP（jax）。
 - 统一模式：同一组 numpy 输入分别喂 native 与加速算子，输入 cast bf16
   （state/tau/mask 保持 f32），loss 用 `mean(y²) + mean(state²)`。
-- 容差惯例：
+- 精度红线（**全项目所有算子通用，任何测试不得突破**）：
+  - **bf16：最大误差 1e-2**。
+  - **fp32：最大 1e-3，目标 1e-4**。
+  - 唯一例外：bf16 输入图下游的 fp32 叶子梯度（如 dbeta）带 bf16 输入
+    噪声，最大可放宽到 2e-3。
+- 各家族容差明细（均不得突破上述红线）：
   - RWKV-7 前向 y atol=1e-5 / rtol=1e-2（SANE 的 y 放宽到 atol=1e-4）；
     final_state atol=1e-5 / rtol=1e-3；反向 grad atol=7e-3 / rtol=1e-3
     （grad_b 放宽到 1e-2）。
@@ -701,6 +714,9 @@ pytest tests/jax -v -m "not slow"
   - DeltaNet native：互拍沿用 GDN 惯例——chunk 参与的对比输入 cast bf16
     （beta/state 保持 f32），atol=1e-2 / rtol=1e-3；recurrent vs reference /
     single_step / inference 对比保持 fp32，atol=1e-5 / rtol=1e-3。
+  - DeltaNet Triton 反向：bf16 叶子（q/k/v）梯度 atol=1e-2 / rtol=1e-2；
+    fp32 叶子梯度收紧——dbeta atol=2e-3 / rtol=1e-2（上述例外项），
+    dh0 atol=1e-4 / rtol=1e-3。
   - RWKV-6 / mHC：一律 1e-2 / 1e-2。
 - mHC 测试同时包含速度和显存基准。
 
@@ -1541,6 +1557,9 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
 | `rwkv_ops/gdn_recurrent_sane/torch_cuda_kernel/` | GDN recurrent SANE PyTorch C++/CUDA 扩展（训练含反向含 dtau / 推理 / 单步） |
 | `rwkv_ops/gdn_recurrent_sane/jax_cuda_kernel/` | GDN recurrent SANE JAX FFI CUDA（训练含反向 / 推理 / 单步，按 (K,V,chunk) 懒编译） |
 | `rwkv_ops/delta_net_chunk/native_keras_op.py` | DeltaNet chunkwise 原生参考实现 |
+| `rwkv_ops/delta_net_chunk/triton/` | DeltaNet chunkwise 共享 Triton 内核（l2norm / intra / wy / chunk_h / chunk_o / 反向各 kernel） |
+| `rwkv_ops/delta_net_chunk/torch_triton_kernel.py` | DeltaNet chunkwise PyTorch Triton 桥接 |
+| `rwkv_ops/delta_net_chunk/jax_triton_kernel.py` | DeltaNet chunkwise JAX-Triton 桥接 |
 | `rwkv_ops/delta_net_recurrent/native_keras_op.py` | DeltaNet recurrent 原生参考实现 |
 | `rwkv_ops/delta_net_recurrent/triton_kernel.py` | DeltaNet recurrent 共享 Triton 内核 |
 | `rwkv_ops/delta_net_recurrent/torch_triton_kernel.py` | DeltaNet recurrent PyTorch Triton 桥接 |
@@ -1596,8 +1615,8 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
 |---|---|---|
 | 1 | native 实现（chunk + recurrent 两家族）。重点是测试：`delta_net_chunk` / `delta_net_recurrent` / `delta_net_reference` 三方互拍对齐作为后续加速内核的基准，另做 g≡0 交叉验证（同输入喂 `gated_delta_net_*` 传 `g=zeros` 应一致）。测试覆盖全部五个后端 | 完成 |
 | 2 | recurrent Triton（`triton_kernel.py` 共享 kernel + torch/jax 桥接），对照 `gdn_recurrent/` 的实现方式与 API 派生；训练/推理/单步三个算子都要有 Triton 入口 | 完成 |
-| 3 | recurrent Pallas（jax）+ CUDA（torch 扩展 / jax FFI），对照阶段 2 的 Triton 逻辑。分发语义：torch 非 CPU 时 native 默认即 Triton；jax GPU/TPU 时 native 默认即 Pallas；cuda 需显式 `KERNEL_TYPE="cuda"` | 未开始 |
-| 4 | chunk Triton（torch/jax）。chunk 家族**只做 native + Triton**：Pallas 过于复杂不做；CUDA 不做（自研 SIMT gemm 打不过 `tl.dot`） | 未开始 |
+| 3 | chunk Triton（torch/jax）。chunk 家族**只做 native + Triton**：Pallas 过于复杂不做；CUDA 不做（自研 SIMT gemm 打不过 `tl.dot`） | 完成 |
+| 4 | recurrent Pallas（jax）+ CUDA（torch 扩展 / jax FFI），对照阶段 2 的 Triton 逻辑。分发语义：torch 非 CPU 时 native 默认即 Triton；jax GPU/TPU 时 native 默认即 Pallas；cuda 需显式 `KERNEL_TYPE="cuda"` | 未开始 |
 | 5 | SANE 变体（`delta_net_chunk_sane` / `delta_net_recurrent_sane`）。变化很小（约 95% 代码复用前四阶段产物），全部放最后做 | 未开始 |
 
 ### 14.3 移植要点
