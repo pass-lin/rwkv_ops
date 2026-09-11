@@ -240,14 +240,20 @@ MANIFEST.in                  # 源码分发清单
 
 | Framework | cuda | triton | native |
 |-----------|------|--------|--------|
-| PyTorch   | ❌   | ✅     | ✅²    |
-| JAX       | ❌   | ✅     | ✅     |
+| PyTorch   | ✅   | ✅     | ✅²    |
+| JAX       | ✅   | ✅     | ✅     |
 | TensorFlow| ❌   | ❌     | ✅     |
 | NumPy     | ❌   | ❌     | ✅     |
 | OpenVINO  | ❌   | ❌     | ✅     |
 
 > ² Torch 后端的 `native` 在非 CPU 平台默认为 Triton 实现；JAX 侧 `triton`
-> 需显式 `KERNEL_TYPE="triton"` 且安装 `jax-triton`，`native` 为纯 Keras ops。
+> 需显式 `KERNEL_TYPE="triton"` 且安装 `jax-triton`，`native` 在 GPU/TPU 上
+> 为 Pallas 实现（`jax_pallas_kernel.py`），其余为纯 Keras ops。
+> PyTorch 侧 `cuda` 为 C++/CUDA 扩展（`torch_cuda_kernel/`，训练含反向、
+> 推理、单步三个入口）；JAX 侧 `cuda` 为 FFI 实现（`jax_cuda_kernel/`，
+> bf16/fp32 双实例化，训练含反向、推理、单步三个入口，需 JAX >= 0.4.31）；
+> CUDA 版 `chunk_size` 作为编译期常量按 `(K, V, chunk_size)` 懒编译，
+> 调用时传入不同值会各自编译一次（不做工厂值校验）。
 > 训练入口含反向，推理与单步入口仅前向。
 
 #### DeltaNet chunkwise `delta_net_chunk`
@@ -277,6 +283,7 @@ jax 侧所有加速算子都用 `custom_partitioning` + einsum 风格 `sharding_
 | rwkv7 / rwkv7_sane 单步 cuda | ✅ | ✅ |
 | gdn_recurrent cuda / triton / pallas | ✅ | ✅ |
 | gdn_recurrent_sane cuda / triton / pallas | ✅ | ✅ |
+| delta_net_recurrent cuda / triton / pallas | ✅ | ✅ |
 | gdn_chunk_sane triton | ✅ | ✅ |
 | rwkv6 cuda | ✅ | ❌（channel 融合为 `c`，head 维未暴露） |
 
@@ -1564,6 +1571,9 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
 | `rwkv_ops/delta_net_recurrent/triton_kernel.py` | DeltaNet recurrent 共享 Triton 内核 |
 | `rwkv_ops/delta_net_recurrent/torch_triton_kernel.py` | DeltaNet recurrent PyTorch Triton 桥接 |
 | `rwkv_ops/delta_net_recurrent/jax_triton_kernel.py` | DeltaNet recurrent JAX-Triton 桥接 |
+| `rwkv_ops/delta_net_recurrent/jax_pallas_kernel.py` | DeltaNet recurrent Pallas 内核 |
+| `rwkv_ops/delta_net_recurrent/torch_cuda_kernel/` | DeltaNet recurrent PyTorch C++/CUDA 扩展（训练含反向 / 推理 / 单步，按 (K,V,chunk) 懒编译） |
+| `rwkv_ops/delta_net_recurrent/jax_cuda_kernel/` | DeltaNet recurrent JAX FFI CUDA（训练含反向 / 推理 / 单步，按 (K,V,chunk) 懒编译） |
 | `rwkv_ops/rwkv6_kernel/ops_rwkv_kernel.py` | RWKV-6 数值 ground truth |
 | `rwkv_ops/rwkv6_kernel/native_keras_op.py` | RWKV-6 函数式原生封装 |
 | `rwkv_ops/mhc_kernel/native_op.py` | mHC 原生参考实现 |
@@ -1616,7 +1626,7 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
 | 1 | native 实现（chunk + recurrent 两家族）。重点是测试：`delta_net_chunk` / `delta_net_recurrent` / `delta_net_reference` 三方互拍对齐作为后续加速内核的基准，另做 g≡0 交叉验证（同输入喂 `gated_delta_net_*` 传 `g=zeros` 应一致）。测试覆盖全部五个后端 | 完成 |
 | 2 | recurrent Triton（`triton_kernel.py` 共享 kernel + torch/jax 桥接），对照 `gdn_recurrent/` 的实现方式与 API 派生；训练/推理/单步三个算子都要有 Triton 入口 | 完成 |
 | 3 | chunk Triton（torch/jax）。chunk 家族**只做 native + Triton**：Pallas 过于复杂不做；CUDA 不做（自研 SIMT gemm 打不过 `tl.dot`） | 完成 |
-| 4 | recurrent Pallas（jax）+ CUDA（torch 扩展 / jax FFI），对照阶段 2 的 Triton 逻辑。分发语义：torch 非 CPU 时 native 默认即 Triton；jax GPU/TPU 时 native 默认即 Pallas；cuda 需显式 `KERNEL_TYPE="cuda"` | 未开始 |
+| 4 | recurrent Pallas（jax）+ CUDA（torch 扩展 / jax FFI），对照阶段 2 的 Triton 逻辑。分发语义：torch 非 CPU 时 native 默认即 Triton；jax GPU/TPU 时 native 默认即 Pallas；cuda 需显式 `KERNEL_TYPE="cuda"` | 完成 |
 | 5 | SANE 变体（`delta_net_chunk_sane` / `delta_net_recurrent_sane`）。变化很小（约 95% 代码复用前四阶段产物），全部放最后做 | 未开始 |
 
 ### 14.3 移植要点

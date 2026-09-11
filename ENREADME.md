@@ -860,13 +860,13 @@ Same interface as `delta_net_recurrent`, but **does not compute gradients** and 
 
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
-| PyTorch     | ❌   | ✅     | ✅     |
-| JAX         | ❌   | ✅     | ✅     |
+| PyTorch     | ✅   | ✅     | ✅     |
+| JAX         | ✅   | ✅     | ✅     |
 | TensorFlow  | ❌   | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 | OpenVINO    | ❌   | ❌     | ✅     |
 
-1. On the Torch backend, `native` defaults to the Triton implementation on non-CPU platforms; on the JAX side, `triton` requires explicit `KERNEL_TYPE="triton"` and the `jax-triton` package, while `native` is pure Keras ops. CUDA/Pallas accelerated kernels will come in later phases.
+1. On the Torch backend, `native` defaults to the Triton implementation on non-CPU platforms; on the JAX side, `triton` requires explicit `KERNEL_TYPE="triton"` and the `jax-triton` package, while `native` is the Pallas implementation on GPU/TPU and pure Keras ops elsewhere. `cuda` provides the training (with backward) / inference / single-step entry points on both PyTorch (C++ extension) and JAX (FFI, requires JAX >= 0.4.31); `chunk_size` is a compile-time constant, lazily compiled per `(K, V, chunk_size)`.
 2. The training entry point supports back-propagation; the inference and single-step entry points **do not support gradients**.
 3. The chunkwise counterpart lives in `delta_net_chunk/`, see below.
 

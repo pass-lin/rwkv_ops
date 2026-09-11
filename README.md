@@ -841,13 +841,13 @@ out, state = delta_net_recurrent_single_step(
 
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
-| PyTorch     | ❌   | ✅     | ✅     |
-| JAX         | ❌   | ✅     | ✅     |
+| PyTorch     | ✅   | ✅     | ✅     |
+| JAX         | ✅   | ✅     | ✅     |
 | TensorFlow  | ❌   | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 | OpenVINO    | ❌   | ❌     | ✅     |
 
-1. Torch 后端的 `native` 在非 CPU 平台默认为 Triton 实现；JAX 侧 `triton` 需显式 `KERNEL_TYPE="triton"` 并安装 `jax-triton`，`native` 为纯 Keras ops。CUDA/Pallas 加速内核将在后续阶段提供。
+1. Torch 后端的 `native` 在非 CPU 平台默认为 Triton 实现；JAX 侧 `triton` 需显式 `KERNEL_TYPE="triton"` 并安装 `jax-triton`，`native` 在 GPU/TPU 上为 Pallas 实现，其余为纯 Keras ops。`cuda` 在 PyTorch（C++ 扩展）与 JAX（FFI，需 JAX >= 0.4.31）均提供训练（含反向）/推理/单步三入口，`chunk_size` 作为编译期常量按 `(K, V, chunk_size)` 懒编译。
 2. 训练入口支持反向传播；推理与单步入口**没有梯度**。
 3. chunkwise 版本位于 `delta_net_chunk/`，见下节。
 
