@@ -66,7 +66,7 @@ def _normalize_inputs(q, k, v, beta, head_first):
 def _normalize_tau_mask(tau, mask, use_mask, B, H, T, chunk_size, device):
     """把 tau 转成内部布局 [B, H, T//chunk_size]，并按 use_mask 准备 mask。
 
-    use_mask=False 时传全 1 mask，kernel 内 blend 无条件执行 SANE，无分支。
+    use_mask=False 时返回空张量占位，kernel 侧改用独立的 no-mask 实现。
     """
     num_chunks = T // chunk_size
     if num_chunks > 0:
@@ -74,11 +74,11 @@ def _normalize_tau_mask(tau, mask, use_mask, B, H, T, chunk_size, device):
         if use_mask:
             mask = mask.contiguous().to(device, torch.float32)
         else:
-            mask = torch.ones(B, num_chunks, dtype=torch.float32, device=device)
+            mask = torch.empty(0, dtype=torch.float32, device=device)
         return tau, mask
     # T < chunk_size 时创建一个不会被读取的占位符。
     tau_dummy = torch.zeros(B, H, 1, dtype=torch.float32, device=device)
-    mask_dummy = torch.ones(B, 1, dtype=torch.float32, device=device)
+    mask_dummy = torch.empty(0, dtype=torch.float32, device=device)
     return tau_dummy, mask_dummy
 
 
@@ -151,22 +151,40 @@ class _DeltaNetRecurrentSaneCudaFunction(torch.autograd.Function):
         final_state = torch.empty(B, H, K, V, dtype=torch.float32, device=q.device)
         h0 = _prepare_initial_state(initial_state, B, H, K, V, q.device)
 
-        ops.forward(
-            q,
-            k,
-            v,
-            beta,
-            tau,
-            mask,
-            h0,
-            scale,
-            o,
-            kv_mem,
-            state_chkp,
-            inv_norm_q,
-            inv_norm_k,
-            final_state,
-        )
+        if use_mask:
+            ops.forward(
+                q,
+                k,
+                v,
+                beta,
+                tau,
+                mask,
+                h0,
+                scale,
+                o,
+                kv_mem,
+                state_chkp,
+                inv_norm_q,
+                inv_norm_k,
+                final_state,
+            )
+        else:
+            # 无 mask 路径：chunk 边界无条件 SANE，不传占位 mask。
+            ops.forward_no_mask(
+                q,
+                k,
+                v,
+                beta,
+                tau,
+                h0,
+                scale,
+                o,
+                kv_mem,
+                state_chkp,
+                inv_norm_q,
+                inv_norm_k,
+                final_state,
+            )
 
         ctx.save_for_backward(
             q, k, v, beta, tau, mask, kv_mem, state_chkp, inv_norm_q, inv_norm_k
@@ -218,27 +236,50 @@ class _DeltaNetRecurrentSaneCudaFunction(torch.autograd.Function):
         else:
             dht = torch.zeros(B, H, K, V, dtype=torch.float32, device=q.device)
 
-        ops.backward(
-            q,
-            k,
-            v,
-            beta,
-            tau,
-            mask,
-            do,
-            dht,
-            kv_mem,
-            inv_norm_q,
-            inv_norm_k,
-            state_chkp,
-            scale,
-            dq,
-            dk,
-            dv,
-            dbeta,
-            dtau,
-            dh0,
-        )
+        if mask.numel() > 0:
+            ops.backward(
+                q,
+                k,
+                v,
+                beta,
+                tau,
+                mask,
+                do,
+                dht,
+                kv_mem,
+                inv_norm_q,
+                inv_norm_k,
+                state_chkp,
+                scale,
+                dq,
+                dk,
+                dv,
+                dbeta,
+                dtau,
+                dh0,
+            )
+        else:
+            # 无 mask 路径：chunk 边界无条件回传 SANE 梯度，不传占位 mask。
+            ops.backward_no_mask(
+                q,
+                k,
+                v,
+                beta,
+                tau,
+                do,
+                dht,
+                kv_mem,
+                inv_norm_q,
+                inv_norm_k,
+                state_chkp,
+                scale,
+                dq,
+                dk,
+                dv,
+                dbeta,
+                dtau,
+                dh0,
+            )
 
         input_dtype = ctx.input_dtype
         if not ctx.head_first:
@@ -294,7 +335,11 @@ class _DeltaNetRecurrentSaneInferenceCudaFunction(torch.autograd.Function):
         final_state = torch.empty(B, H, K, V, dtype=torch.float32, device=q.device)
         h0 = _prepare_initial_state(initial_state, B, H, K, V, q.device)
 
-        ops.forward_inference(q, k, v, beta, tau, mask, h0, scale, o, final_state)
+        if use_mask:
+            ops.forward_inference(q, k, v, beta, tau, mask, h0, scale, o, final_state)
+        else:
+            # 无 mask 路径：chunk 边界无条件 SANE，不传占位 mask。
+            ops.forward_inference_no_mask(q, k, v, beta, tau, h0, scale, o, final_state)
 
         o = o.to(input_dtype)
         if not head_first:

@@ -746,3 +746,131 @@ def test_gdn_sane_triton_bfloat16_chunk_size_8(gdn_sane_inputs, gdn_sane_cuda_de
         atol=1e-2,
         rtol=1e-2,
     )
+
+
+@pytest.mark.torch
+def test_gdn_sane_triton_no_mask_fwd_matches_native(
+    gdn_sane_inputs, gdn_sane_cuda_device
+):
+    """mask=None 时 no-mask 内核的无条件 SANE 前向与 native 对拍（bf16）。"""
+    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device, torch.bfloat16)
+    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device, torch.bfloat16)
+    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device, torch.bfloat16)
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
+    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
+    tau = _to_cuda_tensor(gdn_sane_inputs["tau"], gdn_sane_cuda_device)
+    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
+
+    out_tri, state_tri = gdn_triton_recurrent(
+        q, k, v, g, beta, tau, mask=None, initial_state=h0, output_final_state=True
+    )
+    out_ref, state_ref = gdn_native_recurrent(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau,
+        mask=None,
+        initial_state=h0,
+        output_final_state=True,
+        chunk_size=16,
+    )
+
+    assert state_tri is None
+    assert state_ref is None
+    assert_allclose_with_stats(
+        out_ref, out_tri, "no_mask triton vs native output", atol=1e-2, rtol=1e-2
+    )
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_gdn_sane_triton_no_mask_bwd_matches_native(
+    gdn_sane_inputs, gdn_sane_cuda_device
+):
+    """no-mask 内核反向（含 tau 梯度）与 native 无条件分支对拍（fp32）。"""
+    q_np, k_np, v_np = (
+        gdn_sane_inputs["q"],
+        gdn_sane_inputs["k"],
+        gdn_sane_inputs["v"],
+    )
+    g_np, beta_np = gdn_sane_inputs["g"], gdn_sane_inputs["beta"]
+    tau_np, h0_np = gdn_sane_inputs["tau"], gdn_sane_inputs["h0"]
+
+    def _run_and_grad(fn):
+        q = _to_cuda_tensor(q_np, gdn_sane_cuda_device).requires_grad_(True)
+        k = _to_cuda_tensor(k_np, gdn_sane_cuda_device).requires_grad_(True)
+        v = _to_cuda_tensor(v_np, gdn_sane_cuda_device).requires_grad_(True)
+        g = _to_cuda_tensor(g_np, gdn_sane_cuda_device).requires_grad_(True)
+        beta = _to_cuda_tensor(beta_np, gdn_sane_cuda_device).requires_grad_(True)
+        tau = _to_cuda_tensor(tau_np, gdn_sane_cuda_device).requires_grad_(True)
+        h0 = _to_cuda_tensor(h0_np, gdn_sane_cuda_device).requires_grad_(True)
+        out, state = fn(
+            q, k, v, g, beta, tau, mask=None, initial_state=h0, output_final_state=True
+        )
+        loss = (out.float() ** 2).mean()
+        if state is not None:
+            loss = loss + (state.float() ** 2).mean()
+        loss.backward()
+        return q.grad, k.grad, v.grad, g.grad, beta.grad, tau.grad, h0.grad
+
+    grads_ref = _run_and_grad(gdn_native_recurrent)
+    grads_tri = _run_and_grad(gdn_triton_recurrent)
+
+    names = ["q", "k", "v", "g", "beta", "tau", "h0"]
+    for name, ref, tgt in zip(names, grads_ref, grads_tri):
+        assert ref is not None, f"native {name} grad is None"
+        assert tgt is not None, f"triton {name} grad is None"
+        assert_allclose_with_stats(
+            ref, tgt, f"no_mask bwd {name}", atol=1e-2, rtol=1e-2
+        )
+
+
+@pytest.mark.torch
+def test_gdn_sane_triton_output_final_state_false_ignores_mask(
+    gdn_sane_inputs, gdn_sane_cuda_device
+):
+    """output_final_state=False 时即便提供 mask 也走无条件 SANE 的 no-mask 内核。"""
+    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device, torch.bfloat16)
+    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device, torch.bfloat16)
+    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device, torch.bfloat16)
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
+    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
+    tau = _to_cuda_tensor(gdn_sane_inputs["tau"], gdn_sane_cuda_device)
+    mask = _to_cuda_tensor(gdn_sane_inputs["mask"], gdn_sane_cuda_device)
+    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
+
+    out_with_mask, _ = gdn_triton_recurrent(
+        q, k, v, g, beta, tau, mask=mask, initial_state=h0, output_final_state=False
+    )
+    out_no_mask, _ = gdn_triton_recurrent(
+        q, k, v, g, beta, tau, mask=None, initial_state=h0, output_final_state=False
+    )
+    out_ref, _ = gdn_native_recurrent(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau,
+        mask=None,
+        initial_state=h0,
+        output_final_state=False,
+        chunk_size=16,
+    )
+
+    assert_allclose_with_stats(
+        out_no_mask,
+        out_with_mask,
+        "output_final_state=False ignores mask",
+        atol=1e-3,
+        rtol=1e-3,
+    )
+    assert_allclose_with_stats(
+        out_ref,
+        out_with_mask,
+        "output_final_state=False vs native",
+        atol=1e-2,
+        rtol=1e-2,
+    )

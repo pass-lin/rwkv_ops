@@ -7,8 +7,11 @@ import triton
 
 from .triton_kernel import (
     delta_net_recurrent_sane_bwd_kernel,
+    delta_net_recurrent_sane_bwd_kernel_no_mask,
     delta_net_recurrent_sane_fwd_kernel,
+    delta_net_recurrent_sane_fwd_kernel_no_mask,
     delta_net_recurrent_sane_inference_fwd_kernel,
+    delta_net_recurrent_sane_inference_fwd_kernel_no_mask,
     delta_net_recurrent_sane_single_step_fwd_kernel,
 )
 
@@ -24,7 +27,10 @@ def _normalize_inputs(q, k, v, beta, head_first):
 
 
 def _normalize_tau_mask(tau, mask, B, H, T, chunk_size, device):
-    """把 tau/mask 转成内部布局 [B, H, T//chunk_size] / [B, T//chunk_size]。"""
+    """把 tau/mask 转成内部布局 [B, H, T//chunk_size] / [B, T//chunk_size]。
+
+    无 mask 场景返回空张量占位，kernel 侧改用独立的 no-mask 实现，不读取 mask。
+    """
     num_chunks = T // chunk_size
     use_mask = mask is not None
     if num_chunks > 0:
@@ -32,11 +38,11 @@ def _normalize_tau_mask(tau, mask, B, H, T, chunk_size, device):
         if use_mask:
             mask = mask.contiguous().to(device, torch.float32)
         else:
-            mask = torch.ones(B, num_chunks, dtype=torch.float32, device=device)
+            mask = torch.empty(0, dtype=torch.float32, device=device)
         return tau, mask, use_mask
     # T < chunk_size 时创建一个不会被读取的占位符。
     tau_dummy = torch.zeros(B, H, 1, dtype=torch.float32, device=device)
-    mask_dummy = torch.ones(B, 1, dtype=torch.float32, device=device)
+    mask_dummy = torch.empty(0, dtype=torch.float32, device=device)
     return tau_dummy, mask_dummy, use_mask
 
 
@@ -106,33 +112,61 @@ def _make_delta_net_recurrent_sane_triton_function(chunk_size):
             BV = min(128, triton.next_power_of_2(V))
             grid = _make_recurrent_grid(B, H, V, BV)
 
-            delta_net_recurrent_sane_fwd_kernel[grid](
-                q=q,
-                k=k,
-                v=v,
-                beta=beta,
-                tau=tau,
-                mask=mask,
-                h0=h0,
-                o=o,
-                kv_mem_out=kv_mem_out,
-                state_chkp=state_chkp,
-                inv_norm_q=inv_norm_q,
-                inv_norm_k=inv_norm_k,
-                ht=final_state,
-                scale=scale,
-                B=B,
-                H=H,
-                T=T,
-                K=K,
-                V=V,
-                BK=BK,
-                BV=BV,
-                CHUNK_LEN=chunk_size,
-                USE_INITIAL_STATE=True,
-                STORE_FINAL_STATE=True,
-                USE_MASK=use_mask,
-            )
+            if use_mask:
+                delta_net_recurrent_sane_fwd_kernel[grid](
+                    q=q,
+                    k=k,
+                    v=v,
+                    beta=beta,
+                    tau=tau,
+                    mask=mask,
+                    h0=h0,
+                    o=o,
+                    kv_mem_out=kv_mem_out,
+                    state_chkp=state_chkp,
+                    inv_norm_q=inv_norm_q,
+                    inv_norm_k=inv_norm_k,
+                    ht=final_state,
+                    scale=scale,
+                    B=B,
+                    H=H,
+                    T=T,
+                    K=K,
+                    V=V,
+                    BK=BK,
+                    BV=BV,
+                    CHUNK_LEN=chunk_size,
+                    USE_INITIAL_STATE=True,
+                    STORE_FINAL_STATE=True,
+                    USE_MASK=True,
+                )
+            else:
+                # 无 mask 路径：chunk 边界无条件 SANE，不传占位 mask。
+                delta_net_recurrent_sane_fwd_kernel_no_mask[grid](
+                    q=q,
+                    k=k,
+                    v=v,
+                    beta=beta,
+                    tau=tau,
+                    h0=h0,
+                    o=o,
+                    kv_mem_out=kv_mem_out,
+                    state_chkp=state_chkp,
+                    inv_norm_q=inv_norm_q,
+                    inv_norm_k=inv_norm_k,
+                    ht=final_state,
+                    scale=scale,
+                    B=B,
+                    H=H,
+                    T=T,
+                    K=K,
+                    V=V,
+                    BK=BK,
+                    BV=BV,
+                    CHUNK_LEN=chunk_size,
+                    USE_INITIAL_STATE=True,
+                    STORE_FINAL_STATE=True,
+                )
 
             ctx.save_for_backward(
                 q,
@@ -224,38 +258,71 @@ def _make_delta_net_recurrent_sane_triton_function(chunk_size):
             BV = min(128, triton.next_power_of_2(V))
             grid = _make_recurrent_grid(B, H, V, BV)
 
-            delta_net_recurrent_sane_bwd_kernel[grid](
-                q=q,
-                k=k,
-                v=v,
-                beta=beta,
-                tau=tau,
-                mask=mask,
-                do=do,
-                dht=dht,
-                kv_mem_out=kv_mem_out,
-                inv_norm_q=inv_norm_q,
-                inv_norm_k=inv_norm_k,
-                h0=h0,
-                state_chkp=state_chkp,
-                dq=dq,
-                dk=dk,
-                dv=dv,
-                dbeta=dbeta,
-                dtau=dtau,
-                dh0=dh0,
-                scale=scale,
-                B=B,
-                H=H,
-                T=T,
-                K=K,
-                V=V,
-                BK=BK,
-                BV=BV,
-                CHUNK_LEN=CHUNK_LEN,
-                USE_FINAL_STATE_GRADIENT=use_final_state_gradient,
-                USE_MASK=use_mask,
-            )
+            if use_mask:
+                delta_net_recurrent_sane_bwd_kernel[grid](
+                    q=q,
+                    k=k,
+                    v=v,
+                    beta=beta,
+                    tau=tau,
+                    mask=mask,
+                    do=do,
+                    dht=dht,
+                    kv_mem_out=kv_mem_out,
+                    inv_norm_q=inv_norm_q,
+                    inv_norm_k=inv_norm_k,
+                    h0=h0,
+                    state_chkp=state_chkp,
+                    dq=dq,
+                    dk=dk,
+                    dv=dv,
+                    dbeta=dbeta,
+                    dtau=dtau,
+                    dh0=dh0,
+                    scale=scale,
+                    B=B,
+                    H=H,
+                    T=T,
+                    K=K,
+                    V=V,
+                    BK=BK,
+                    BV=BV,
+                    CHUNK_LEN=CHUNK_LEN,
+                    USE_FINAL_STATE_GRADIENT=use_final_state_gradient,
+                    USE_MASK=True,
+                )
+            else:
+                # 无 mask 路径：chunk 边界无条件回传 SANE 梯度，不传占位 mask。
+                delta_net_recurrent_sane_bwd_kernel_no_mask[grid](
+                    q=q,
+                    k=k,
+                    v=v,
+                    beta=beta,
+                    tau=tau,
+                    do=do,
+                    dht=dht,
+                    kv_mem_out=kv_mem_out,
+                    inv_norm_q=inv_norm_q,
+                    inv_norm_k=inv_norm_k,
+                    h0=h0,
+                    state_chkp=state_chkp,
+                    dq=dq,
+                    dk=dk,
+                    dv=dv,
+                    dbeta=dbeta,
+                    dtau=dtau,
+                    dh0=dh0,
+                    scale=scale,
+                    B=B,
+                    H=H,
+                    T=T,
+                    K=K,
+                    V=V,
+                    BK=BK,
+                    BV=BV,
+                    CHUNK_LEN=CHUNK_LEN,
+                    USE_FINAL_STATE_GRADIENT=use_final_state_gradient,
+                )
 
             if not ctx.head_first:
                 dq = dq.transpose(1, 2)
@@ -333,29 +400,53 @@ def _make_delta_net_recurrent_sane_inference_triton_function(chunk_size):
             BV = min(128, triton.next_power_of_2(V))
             grid = _make_recurrent_grid(B, H, V, BV)
 
-            delta_net_recurrent_sane_inference_fwd_kernel[grid](
-                q=q,
-                k=k,
-                v=v,
-                beta=beta,
-                tau=tau,
-                mask=mask,
-                h0=h0,
-                o=o,
-                ht=final_state,
-                scale=scale,
-                B=B,
-                H=H,
-                T=T,
-                K=K,
-                V=V,
-                BK=BK,
-                BV=BV,
-                USE_INITIAL_STATE=True,
-                STORE_FINAL_STATE=True,
-                USE_MASK=use_mask,
-                CHUNK_LEN=chunk_size,
-            )
+            if use_mask:
+                delta_net_recurrent_sane_inference_fwd_kernel[grid](
+                    q=q,
+                    k=k,
+                    v=v,
+                    beta=beta,
+                    tau=tau,
+                    mask=mask,
+                    h0=h0,
+                    o=o,
+                    ht=final_state,
+                    scale=scale,
+                    B=B,
+                    H=H,
+                    T=T,
+                    K=K,
+                    V=V,
+                    BK=BK,
+                    BV=BV,
+                    USE_INITIAL_STATE=True,
+                    STORE_FINAL_STATE=True,
+                    USE_MASK=True,
+                    CHUNK_LEN=chunk_size,
+                )
+            else:
+                # 无 mask 路径：chunk 边界无条件 SANE，不传占位 mask。
+                delta_net_recurrent_sane_inference_fwd_kernel_no_mask[grid](
+                    q=q,
+                    k=k,
+                    v=v,
+                    beta=beta,
+                    tau=tau,
+                    h0=h0,
+                    o=o,
+                    ht=final_state,
+                    scale=scale,
+                    B=B,
+                    H=H,
+                    T=T,
+                    K=K,
+                    V=V,
+                    BK=BK,
+                    BV=BV,
+                    USE_INITIAL_STATE=True,
+                    STORE_FINAL_STATE=True,
+                    CHUNK_LEN=chunk_size,
+                )
 
             if not head_first:
                 o = o.transpose(1, 2)

@@ -32,6 +32,23 @@ void cuda_dn_sane_single_step(int B, int H, float scale, const ET *q,
                               const ET *k, const ET *v, const float *beta,
                               const float *tau, const float *do_sane,
                               const float *h0, ET *o, float *ht);
+template <typename ET>
+void cuda_dn_sane_forward_no_mask(int B, int T, int H, float scale, const ET *q,
+                                  const ET *k, const ET *v, const float *beta,
+                                  const float *tau, const float *h0, ET *o,
+                                  float *kv_mem, float *chkp, float *inv_q,
+                                  float *inv_k, float *ht);
+template <typename ET>
+void cuda_dn_sane_backward_no_mask(
+    int B, int T, int H, float scale, const ET *q, const ET *k, const ET *v,
+    const float *beta, const float *tau, const ET *dout, const float *dht,
+    const float *kv_mem, const float *inv_q, const float *inv_k,
+    const float *chkp, float *dq, float *dk, float *dv, float *dbeta,
+    float *dtau, float *dh0);
+template <typename ET>
+void cuda_dn_sane_forward_inference_no_mask(
+    int B, int T, int H, float scale, const ET *q, const ET *k, const ET *v,
+    const float *beta, const float *tau, const float *h0, ET *o, float *ht);
 
 extern template void
 cuda_dn_sane_forward<bf>(int, int, int, float, const bf *, const bf *,
@@ -76,6 +93,30 @@ extern template void
 cuda_dn_sane_single_step<float>(int, int, float, const float *, const float *,
                                 const float *, const float *, const float *,
                                 const float *, const float *, float *, float *);
+extern template void cuda_dn_sane_forward_no_mask<bf>(
+    int, int, int, float, const bf *, const bf *, const bf *, const float *,
+    const float *, const float *, bf *, float *, float *, float *, float *,
+    float *);
+extern template void cuda_dn_sane_forward_no_mask<float>(
+    int, int, int, float, const float *, const float *, const float *,
+    const float *, const float *, const float *, float *, float *, float *,
+    float *, float *, float *);
+extern template void cuda_dn_sane_backward_no_mask<bf>(
+    int, int, int, float, const bf *, const bf *, const bf *, const float *,
+    const float *, const bf *, const float *, const float *, const float *,
+    const float *, const float *, float *, float *, float *, float *, float *,
+    float *);
+extern template void cuda_dn_sane_backward_no_mask<float>(
+    int, int, int, float, const float *, const float *, const float *,
+    const float *, const float *, const float *, const float *, const float *,
+    const float *, const float *, const float *, float *, float *, float *,
+    float *, float *, float *);
+extern template void cuda_dn_sane_forward_inference_no_mask<bf>(
+    int, int, int, float, const bf *, const bf *, const bf *, const float *,
+    const float *, const float *, bf *, float *);
+extern template void cuda_dn_sane_forward_inference_no_mask<float>(
+    int, int, int, float, const float *, const float *, const float *,
+    const float *, const float *, const float *, float *, float *);
 
 // PyTorch wrapper。输入 layout 均为 head-first：q/k 为 [B, H, T, K]，
 // v/o 为 [B, H, T, V]，beta 为 [B, H, T]，state 为 [B, H, K, V]，
@@ -202,6 +243,104 @@ void single_step(torch::Tensor &q, torch::Tensor &k, torch::Tensor &v,
   }
 }
 
+// 无 mask 版本的 PyTorch wrapper：不接收 mask 张量，chunk 边界无条件 SANE。
+void forward_no_mask(torch::Tensor &q, torch::Tensor &k, torch::Tensor &v,
+                     torch::Tensor &beta, torch::Tensor &tau,
+                     torch::Tensor &h0, double scale, torch::Tensor &o,
+                     torch::Tensor &kv_mem, torch::Tensor &chkp,
+                     torch::Tensor &inv_q, torch::Tensor &inv_k,
+                     torch::Tensor &ht) {
+  int B = q.sizes()[0], H = q.sizes()[1], T = q.sizes()[2];
+  if (q.scalar_type() == at::kBFloat16) {
+    cuda_dn_sane_forward_no_mask<bf>(
+        B, T, H, (float)scale, (const bf *)q.data_ptr(),
+        (const bf *)k.data_ptr(), (const bf *)v.data_ptr(),
+        (const float *)beta.data_ptr(), (const float *)tau.data_ptr(),
+        (const float *)h0.data_ptr(), (bf *)o.data_ptr(),
+        (float *)kv_mem.data_ptr(), (float *)chkp.data_ptr(),
+        (float *)inv_q.data_ptr(), (float *)inv_k.data_ptr(),
+        (float *)ht.data_ptr());
+  } else if (q.scalar_type() == at::kFloat) {
+    cuda_dn_sane_forward_no_mask<float>(
+        B, T, H, (float)scale, (const float *)q.data_ptr(),
+        (const float *)k.data_ptr(), (const float *)v.data_ptr(),
+        (const float *)beta.data_ptr(), (const float *)tau.data_ptr(),
+        (const float *)h0.data_ptr(), (float *)o.data_ptr(),
+        (float *)kv_mem.data_ptr(), (float *)chkp.data_ptr(),
+        (float *)inv_q.data_ptr(), (float *)inv_k.data_ptr(),
+        (float *)ht.data_ptr());
+  } else {
+    TORCH_CHECK(false,
+                "delta_net_recurrent_sane cuda kernel only supports bfloat16 "
+                "or float32 inputs");
+  }
+}
+
+void backward_no_mask(torch::Tensor &q, torch::Tensor &k, torch::Tensor &v,
+                      torch::Tensor &beta, torch::Tensor &tau,
+                      torch::Tensor &dout, torch::Tensor &dht,
+                      torch::Tensor &kv_mem, torch::Tensor &inv_q,
+                      torch::Tensor &inv_k, torch::Tensor &chkp, double scale,
+                      torch::Tensor &dq, torch::Tensor &dk, torch::Tensor &dv,
+                      torch::Tensor &dbeta, torch::Tensor &dtau,
+                      torch::Tensor &dh0) {
+  int B = q.sizes()[0], H = q.sizes()[1], T = q.sizes()[2];
+  if (q.scalar_type() == at::kBFloat16) {
+    cuda_dn_sane_backward_no_mask<bf>(
+        B, T, H, (float)scale, (const bf *)q.data_ptr(),
+        (const bf *)k.data_ptr(), (const bf *)v.data_ptr(),
+        (const float *)beta.data_ptr(), (const float *)tau.data_ptr(),
+        (const bf *)dout.data_ptr(), (const float *)dht.data_ptr(),
+        (const float *)kv_mem.data_ptr(), (const float *)inv_q.data_ptr(),
+        (const float *)inv_k.data_ptr(), (const float *)chkp.data_ptr(),
+        (float *)dq.data_ptr(), (float *)dk.data_ptr(), (float *)dv.data_ptr(),
+        (float *)dbeta.data_ptr(), (float *)dtau.data_ptr(),
+        (float *)dh0.data_ptr());
+  } else if (q.scalar_type() == at::kFloat) {
+    cuda_dn_sane_backward_no_mask<float>(
+        B, T, H, (float)scale, (const float *)q.data_ptr(),
+        (const float *)k.data_ptr(), (const float *)v.data_ptr(),
+        (const float *)beta.data_ptr(), (const float *)tau.data_ptr(),
+        (const float *)dout.data_ptr(), (const float *)dht.data_ptr(),
+        (const float *)kv_mem.data_ptr(), (const float *)inv_q.data_ptr(),
+        (const float *)inv_k.data_ptr(), (const float *)chkp.data_ptr(),
+        (float *)dq.data_ptr(), (float *)dk.data_ptr(), (float *)dv.data_ptr(),
+        (float *)dbeta.data_ptr(), (float *)dtau.data_ptr(),
+        (float *)dh0.data_ptr());
+  } else {
+    TORCH_CHECK(false,
+                "delta_net_recurrent_sane cuda kernel only supports bfloat16 "
+                "or float32 inputs");
+  }
+}
+
+void forward_inference_no_mask(torch::Tensor &q, torch::Tensor &k,
+                               torch::Tensor &v, torch::Tensor &beta,
+                               torch::Tensor &tau, torch::Tensor &h0,
+                               double scale, torch::Tensor &o,
+                               torch::Tensor &ht) {
+  int B = q.sizes()[0], H = q.sizes()[1], T = q.sizes()[2];
+  if (q.scalar_type() == at::kBFloat16) {
+    cuda_dn_sane_forward_inference_no_mask<bf>(
+        B, T, H, (float)scale, (const bf *)q.data_ptr(),
+        (const bf *)k.data_ptr(), (const bf *)v.data_ptr(),
+        (const float *)beta.data_ptr(), (const float *)tau.data_ptr(),
+        (const float *)h0.data_ptr(), (bf *)o.data_ptr(),
+        (float *)ht.data_ptr());
+  } else if (q.scalar_type() == at::kFloat) {
+    cuda_dn_sane_forward_inference_no_mask<float>(
+        B, T, H, (float)scale, (const float *)q.data_ptr(),
+        (const float *)k.data_ptr(), (const float *)v.data_ptr(),
+        (const float *)beta.data_ptr(), (const float *)tau.data_ptr(),
+        (const float *)h0.data_ptr(), (float *)o.data_ptr(),
+        (float *)ht.data_ptr());
+  } else {
+    TORCH_CHECK(false,
+                "delta_net_recurrent_sane cuda kernel only supports bfloat16 "
+                "or float32 inputs");
+  }
+}
+
 // 算子注册。命名空间由编译宏 TORCH_LIBRARY_NAME 决定，Python 侧按
 // (K, V, chunk_size) 传入不同名称实现同一进程内的多版本隔离。
 #ifndef TORCH_LIBRARY_NAME
@@ -223,6 +362,18 @@ TORCH_LIBRARY(TORCH_LIBRARY_NAME, m) {
   m.def("single_step(Tensor q, Tensor k, Tensor v, Tensor beta, "
         "Tensor tau, Tensor do_sane, Tensor h0, float scale, Tensor(a!) o, "
         "Tensor(b!) ht) -> ()");
+  m.def("forward_no_mask(Tensor q, Tensor k, Tensor v, Tensor beta, "
+        "Tensor tau, Tensor h0, float scale, Tensor(a!) o, Tensor(b!) kv_mem, "
+        "Tensor(c!) chkp, Tensor(d!) inv_q, Tensor(e!) inv_k, "
+        "Tensor(f!) ht) -> ()");
+  m.def("backward_no_mask(Tensor q, Tensor k, Tensor v, Tensor beta, "
+        "Tensor tau, Tensor dout, Tensor dht, Tensor kv_mem, Tensor inv_q, "
+        "Tensor inv_k, Tensor chkp, float scale, Tensor(a!) dq, Tensor(b!) dk, "
+        "Tensor(c!) dv, Tensor(e!) dbeta, Tensor(f!) dtau, "
+        "Tensor(g!) dh0) -> ()");
+  m.def("forward_inference_no_mask(Tensor q, Tensor k, Tensor v, "
+        "Tensor beta, Tensor tau, Tensor h0, float scale, Tensor(a!) o, "
+        "Tensor(b!) ht) -> ()");
 }
 
 TORCH_LIBRARY_IMPL(TORCH_LIBRARY_NAME, CUDA, m) {
@@ -230,4 +381,7 @@ TORCH_LIBRARY_IMPL(TORCH_LIBRARY_NAME, CUDA, m) {
   m.impl("backward", &backward);
   m.impl("forward_inference", &forward_inference);
   m.impl("single_step", &single_step);
+  m.impl("forward_no_mask", &forward_no_mask);
+  m.impl("backward_no_mask", &backward_no_mask);
+  m.impl("forward_inference_no_mask", &forward_inference_no_mask);
 }

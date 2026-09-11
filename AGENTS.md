@@ -631,6 +631,13 @@ y_t = sum_K(state_t * q_t)
 - `gated_delta_net_recurrent_sane` 的 `tau` 形状为 `[B, T//chunk_size, H]`、`mask`
   形状为 `[B, T//chunk_size]`，`chunk_size` 同样遵循上述规则（CUDA 工厂指定，
   其他后端调用时传入）。
+- **SANE 的 no-mask 独立算子**：SANE 族算子（`rwkv7_sane` / `gated_delta_net_*_sane` /
+  `delta_net_*_sane`）在带 mask 实现之外，每个入口都额外提供一个**独立的 no-mask
+  算子**（kernel 与包装统一加 `_no_mask` 后缀，不使用 `USE_MASK` 常量在 kernel 内分支），
+  由 Python 入口按 `use_mask = output_final_state and mask is not None` 二选一。
+  无 mask 路径不分配、不传递占位 mask，chunk 边界无条件执行 SANE（反向无条件累加
+  `dtau` 并把下游梯度乘 `sech2`）。覆盖入口：训练前向 / 训练反向（含 `dtau` 梯度）/
+  推理前向；single-step 由 per-sample `do_sane` 标量控制，不做 no-mask 变体。
 - `gated_delta_net_recurrent`（无 SANE）接受 `chunk_size` 但忽略，仅保持签名一致；
   它与 `gated_delta_net_reference` 支持任意长度。
 - chunkwise 实现先把 g 做 cumsum 得到 chunk 内 decay 矩阵，再用 Neumann 级数
@@ -926,6 +933,8 @@ __global__ void wkv7_forward(...)
 ### 8.5 提交前检查清单
 
 - [ ] `ruff check .` 与 `ruff format --check .` 全绿。
+- [ ] 改动的 Python 文件已通过语法检查（`python -m py_compile <files>` 或等价的
+  `compile()`/`ast.parse()`），无 SyntaxError（见 §8.6）。
 - [ ] `.cu/.cuh/.cpp/.h` 文件已运行 `./scripts/format_cpp.sh`（LLVM style）。
 - [ ] 版本号两处同步（`pyproject.toml` + `rwkv_ops/__init__.py`）。
 - [ ] 新增编译产物已加入 `.gitignore` 排除 / `MANIFEST.in` 包含规则。
@@ -934,6 +943,13 @@ __global__ void wkv7_forward(...)
 - [ ] Triton kernel 改动已同步检查 jax/torch 两个桥接。
 - [ ] 新 FFI 算子的构建目录已加入 `clean_build_artifacts._CLEAN_PATTERNS`。
 - [ ] 已更新 `AGENTS.md`、`README.md`、`ENREADME.md` 的支持矩阵。
+
+### 8.6 语法自检（不需要运行测试）
+
+- 交付/提交前，对所有改动的 Python 文件跑 `python -m py_compile <files>`（或等价的
+  `compile()` / `ast.parse()`），确认没有 SyntaxError；这是不跑测试时唯一的静态保证。
+- CUDA/C++ 源文件跑 `./scripts/format_cpp.sh` 保证排版；编译正确性留给对应后端实测。
+- 全量扫描示例：`python -c "import ast,pathlib; [ast.parse(p.read_text(encoding='utf-8')) for p in pathlib.Path('rwkv_ops').rglob('*.py')]"`。
 
 ---
 

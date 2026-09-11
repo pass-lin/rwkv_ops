@@ -702,3 +702,129 @@ def test_dn_cuda_sane_sharding_structure(
         atol=1e-5,
         rtol=1e-4,
     )
+
+
+@pytest.mark.jax
+def test_dn_cuda_sane_no_mask_fwd_matches_native(
+    delta_net_sane_inputs, dn_sane_jax_cuda_device
+):
+    """mask=None 时 no-mask 内核的无条件 SANE 前向与 native 对拍（bf16）。"""
+    q, k, v, beta, tau, _, h0 = _prepare_sane_inputs(
+        delta_net_sane_inputs, dn_sane_jax_cuda_device, dtype="bfloat16"
+    )
+
+    out_ref, state_ref = gdn_native_sane(
+        q,
+        k,
+        v,
+        beta,
+        tau,
+        mask=None,
+        initial_state=h0,
+        output_final_state=True,
+        chunk_size=16,
+    )
+    out_cuda, state_cuda = dn_cuda_sane(
+        q,
+        k,
+        v,
+        beta,
+        tau,
+        mask=None,
+        initial_state=h0,
+        output_final_state=True,
+        chunk_size=16,
+    )
+
+    assert state_ref is None
+    assert state_cuda is None
+    assert_allclose_with_stats(
+        out_ref, out_cuda, "no_mask cuda vs native output", atol=1e-2, rtol=1e-2
+    )
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+def test_dn_cuda_sane_no_mask_bwd_matches_native(
+    delta_net_sane_inputs, dn_sane_jax_cuda_device
+):
+    """no-mask 内核反向（含 tau 梯度）与 native 无条件分支对拍（fp32）。"""
+    q, k, v, beta, tau, _, h0 = _prepare_sane_inputs(
+        delta_net_sane_inputs, dn_sane_jax_cuda_device, dtype="float32"
+    )
+
+    ref_grads = jax.grad(
+        lambda q, k, v, beta, tau, h0: _sane_loss_fn(
+            gdn_native_sane, q, k, v, beta, tau, None, h0
+        ),
+        argnums=(0, 1, 2, 3, 4, 5),
+    )(q, k, v, beta, tau, h0)
+    cuda_grads = jax.grad(
+        lambda q, k, v, beta, tau, h0: _sane_loss_fn(
+            dn_cuda_sane, q, k, v, beta, tau, None, h0
+        ),
+        argnums=(0, 1, 2, 3, 4, 5),
+    )(q, k, v, beta, tau, h0)
+
+    names = ["q", "k", "v", "beta", "tau", "h0"]
+    for name, gr, gt in zip(names, ref_grads, cuda_grads):
+        assert_allclose_with_stats(gr, gt, f"no_mask bwd {name}", atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.jax
+def test_dn_cuda_sane_output_final_state_false_ignores_mask(
+    delta_net_sane_inputs, dn_sane_jax_cuda_device
+):
+    """output_final_state=False 时即便提供 mask 也走无条件 SANE 的 no-mask 内核。"""
+    q, k, v, beta, tau, mask, h0 = _prepare_sane_inputs(
+        delta_net_sane_inputs, dn_sane_jax_cuda_device, dtype="bfloat16"
+    )
+
+    out_with_mask, _ = dn_cuda_sane(
+        q,
+        k,
+        v,
+        beta,
+        tau,
+        mask=mask,
+        initial_state=h0,
+        output_final_state=False,
+        chunk_size=16,
+    )
+    out_no_mask, _ = dn_cuda_sane(
+        q,
+        k,
+        v,
+        beta,
+        tau,
+        mask=None,
+        initial_state=h0,
+        output_final_state=False,
+        chunk_size=16,
+    )
+    out_ref, _ = gdn_native_sane(
+        q,
+        k,
+        v,
+        beta,
+        tau,
+        mask=None,
+        initial_state=h0,
+        output_final_state=False,
+        chunk_size=16,
+    )
+
+    assert_allclose_with_stats(
+        out_no_mask,
+        out_with_mask,
+        "output_final_state=False ignores mask",
+        atol=1e-3,
+        rtol=1e-3,
+    )
+    assert_allclose_with_stats(
+        out_ref,
+        out_with_mask,
+        "output_final_state=False vs native",
+        atol=1e-2,
+        rtol=1e-2,
+    )

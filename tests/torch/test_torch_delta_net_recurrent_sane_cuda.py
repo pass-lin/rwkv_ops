@@ -826,3 +826,125 @@ def test_dn_sane_cuda_bfloat16_chunk_size_32(
         atol=1e-2,
         rtol=1e-2,
     )
+
+
+@pytest.mark.torch
+def test_dn_sane_cuda_no_mask_fwd_matches_native(
+    delta_net_sane_inputs, dn_sane_cuda_device
+):
+    """mask=None 时 no-mask 内核的无条件 SANE 前向与 native 对拍（bf16）。"""
+    q = _to_cuda_tensor(delta_net_sane_inputs["q"], dn_sane_cuda_device, torch.bfloat16)
+    k = _to_cuda_tensor(delta_net_sane_inputs["k"], dn_sane_cuda_device, torch.bfloat16)
+    v = _to_cuda_tensor(delta_net_sane_inputs["v"], dn_sane_cuda_device, torch.bfloat16)
+    beta = _to_cuda_tensor(delta_net_sane_inputs["beta"], dn_sane_cuda_device)
+    tau = _to_cuda_tensor(delta_net_sane_inputs["tau"], dn_sane_cuda_device)
+    h0 = _to_cuda_tensor(delta_net_sane_inputs["h0"], dn_sane_cuda_device)
+
+    out_cuda, state_cuda = dn_cuda_recurrent(
+        q, k, v, beta, tau, mask=None, initial_state=h0, output_final_state=True
+    )
+    out_ref, state_ref = dn_native_recurrent(
+        q,
+        k,
+        v,
+        beta,
+        tau,
+        mask=None,
+        initial_state=h0,
+        output_final_state=True,
+        chunk_size=16,
+    )
+
+    assert state_cuda is None
+    assert state_ref is None
+    assert_allclose_with_stats(
+        out_ref, out_cuda, "no_mask cuda vs native output", atol=1e-2, rtol=1e-2
+    )
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_dn_sane_cuda_no_mask_bwd_matches_native(
+    delta_net_sane_inputs, dn_sane_cuda_device
+):
+    """no-mask 内核反向（含 tau 梯度）与 native 无条件分支对拍（fp32）。"""
+    q_np = delta_net_sane_inputs["q"]
+    k_np = delta_net_sane_inputs["k"]
+    v_np = delta_net_sane_inputs["v"]
+    beta_np = delta_net_sane_inputs["beta"]
+    tau_np = delta_net_sane_inputs["tau"]
+    h0_np = delta_net_sane_inputs["h0"]
+
+    def _run_and_grad(fn):
+        q = _to_cuda_tensor(q_np, dn_sane_cuda_device).requires_grad_(True)
+        k = _to_cuda_tensor(k_np, dn_sane_cuda_device).requires_grad_(True)
+        v = _to_cuda_tensor(v_np, dn_sane_cuda_device).requires_grad_(True)
+        beta = _to_cuda_tensor(beta_np, dn_sane_cuda_device).requires_grad_(True)
+        tau = _to_cuda_tensor(tau_np, dn_sane_cuda_device).requires_grad_(True)
+        h0 = _to_cuda_tensor(h0_np, dn_sane_cuda_device).requires_grad_(True)
+        out, state = fn(
+            q, k, v, beta, tau, mask=None, initial_state=h0, output_final_state=True
+        )
+        loss = (out.float() ** 2).mean()
+        if state is not None:
+            loss = loss + (state.float() ** 2).mean()
+        loss.backward()
+        return q.grad, k.grad, v.grad, beta.grad, tau.grad, h0.grad
+
+    grads_ref = _run_and_grad(dn_native_recurrent)
+    grads_cuda = _run_and_grad(dn_cuda_recurrent)
+
+    names = ["q", "k", "v", "beta", "tau", "h0"]
+    for name, ref, tgt in zip(names, grads_ref, grads_cuda):
+        assert ref is not None, f"native {name} grad is None"
+        assert tgt is not None, f"cuda {name} grad is None"
+        assert_allclose_with_stats(
+            ref, tgt, f"no_mask bwd {name}", atol=1e-2, rtol=1e-2
+        )
+
+
+@pytest.mark.torch
+def test_dn_sane_cuda_output_final_state_false_ignores_mask(
+    delta_net_sane_inputs, dn_sane_cuda_device
+):
+    """output_final_state=False 时即便提供 mask 也走无条件 SANE 的 no-mask 内核。"""
+    q = _to_cuda_tensor(delta_net_sane_inputs["q"], dn_sane_cuda_device, torch.bfloat16)
+    k = _to_cuda_tensor(delta_net_sane_inputs["k"], dn_sane_cuda_device, torch.bfloat16)
+    v = _to_cuda_tensor(delta_net_sane_inputs["v"], dn_sane_cuda_device, torch.bfloat16)
+    beta = _to_cuda_tensor(delta_net_sane_inputs["beta"], dn_sane_cuda_device)
+    tau = _to_cuda_tensor(delta_net_sane_inputs["tau"], dn_sane_cuda_device)
+    mask = _to_cuda_tensor(delta_net_sane_inputs["mask"], dn_sane_cuda_device)
+    h0 = _to_cuda_tensor(delta_net_sane_inputs["h0"], dn_sane_cuda_device)
+
+    out_with_mask, _ = dn_cuda_recurrent(
+        q, k, v, beta, tau, mask=mask, initial_state=h0, output_final_state=False
+    )
+    out_no_mask, _ = dn_cuda_recurrent(
+        q, k, v, beta, tau, mask=None, initial_state=h0, output_final_state=False
+    )
+    out_ref, _ = dn_native_recurrent(
+        q,
+        k,
+        v,
+        beta,
+        tau,
+        mask=None,
+        initial_state=h0,
+        output_final_state=False,
+        chunk_size=16,
+    )
+
+    assert_allclose_with_stats(
+        out_no_mask,
+        out_with_mask,
+        "output_final_state=False ignores mask",
+        atol=1e-3,
+        rtol=1e-3,
+    )
+    assert_allclose_with_stats(
+        out_ref,
+        out_with_mask,
+        "output_final_state=False vs native",
+        atol=1e-2,
+        rtol=1e-2,
+    )
