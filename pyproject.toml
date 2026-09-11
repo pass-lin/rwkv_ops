@@ -10,7 +10,7 @@ authors = [
 ]
 description = "RWKV operators for multiple backends (PyTorch, JAX, Keras)"
 readme = "README.md"
-license = { text = "Apache-2.0" }  # 改为文本许可证，不使用文件
+license = { text = "Apache-2.0" }
 requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -18,7 +18,8 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "keras>=3.0"
+    "keras>=3.0",
+    "cmake>=4.0",
 ]
 
 [project.optional-dependencies]
@@ -31,10 +32,4 @@ test = ["pytest>=8.0"]
 exclude = ["test_script"]
 
 [tool.hatch.build.targets.wheel]
-packages = [
-    "rwkv_ops",
-    "rwkv_ops.rwkv6_kernel",
-    "rwkv_ops.rwkv7_kernel",
-    "rwkv_ops.rwkv7_sane_kernel",
-    "rwkv_ops.cuda_tools",
-]
+packages = ["rwkv_ops"]
