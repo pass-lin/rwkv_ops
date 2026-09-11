@@ -1057,13 +1057,14 @@ out, final_state = delta_net_chunk_sane(
 
 | Framework   | cuda | triton | native |
 |-------------|------|--------|--------|
-| PyTorch     | ❌   | ❌     | ✅     |
-| JAX         | ❌   | ❌     | ✅     |
+| PyTorch     | ❌   | ✅     | ✅     |
+| JAX         | ❌   | ✅     | ✅     |
 | TensorFlow  | ❌   | ❌     | ✅     |
 | NumPy       | ❌   | ❌     | ✅     |
 | OpenVINO    | ❌   | ❌     | ✅     |
 
-> Only the pure Keras ops `native` implementation is available for now; accelerated kernels will follow in later phases.
+> On the Torch backend, `native` defaults to the Triton implementation on non-CPU platforms; on the JAX side, `triton` requires an explicit `KERNEL_TYPE="triton"` plus the `jax-triton` package, and `native` is pure Keras ops. The training entry point supports back-propagation (including the `tau` gradient). The chunk family only ships native + Triton, no CUDA/Pallas.
+> The Triton implementation requires `T % chunk_size == 0` and `chunk_size >= 16`; it does not pad internally.
 
 ---
 
