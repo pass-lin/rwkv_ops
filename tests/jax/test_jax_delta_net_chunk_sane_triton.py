@@ -385,3 +385,132 @@ def test_chunk_sane_triton_head_sharding(
     assert_allclose_with_stats(
         state_ref, state_sh, "head sharding state", atol=1e-2, rtol=1e-2
     )
+
+
+@pytest.mark.jax
+def test_chunk_sane_triton_no_mask_fwd_vs_native(
+    delta_net_sane_inputs, delta_chunk_sane_jax_triton_device
+):
+    """mask=None 时 no-mask 内核的无条件 SANE 前向与 native 对拍。"""
+    q, k, v, beta, tau, _, h0 = _prepare_sane_inputs(
+        delta_net_sane_inputs, delta_chunk_sane_jax_triton_device, dtype="bfloat16"
+    )
+
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
+        out_ref, state_ref = native_chunk_sane(
+            q,
+            k,
+            v,
+            beta,
+            tau,
+            mask=None,
+            initial_state=h0,
+            output_final_state=True,
+            chunk_size=16,
+        )
+        out_triton, state_triton = triton_chunk_sane(
+            q,
+            k,
+            v,
+            beta,
+            tau,
+            mask=None,
+            initial_state=h0,
+            output_final_state=True,
+            chunk_size=16,
+        )
+
+    assert state_ref is None
+    assert state_triton is None
+    assert_allclose_with_stats(
+        out_ref, out_triton, "no_mask fwd output", atol=1e-2, rtol=1e-2
+    )
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+def test_chunk_sane_triton_no_mask_bwd_vs_native(
+    delta_net_sane_inputs, delta_chunk_sane_jax_triton_device
+):
+    """no-mask 内核反向（含 tau 梯度）与 native 无条件分支对拍。"""
+    q, k, v, beta, tau, _, h0 = _prepare_sane_inputs(
+        delta_net_sane_inputs, delta_chunk_sane_jax_triton_device, dtype="bfloat16"
+    )
+
+    ref_grads = jax.grad(
+        lambda q, k, v, beta, tau, h0: _sane_loss_fn(
+            native_chunk_sane, q, k, v, beta, tau, None, h0
+        ),
+        argnums=(0, 1, 2, 3, 4, 5),
+    )(q, k, v, beta, tau, h0)
+
+    triton_grads = jax.grad(
+        lambda q, k, v, beta, tau, h0: _sane_loss_fn(
+            triton_chunk_sane, q, k, v, beta, tau, None, h0
+        ),
+        argnums=(0, 1, 2, 3, 4, 5),
+    )(q, k, v, beta, tau, h0)
+
+    names = ["q", "k", "v", "beta", "tau", "h0"]
+    for name, gr, gt in zip(names, ref_grads, triton_grads):
+        assert_allclose_with_stats(gr, gt, f"no_mask bwd {name}", atol=2e-1, rtol=2e-1)
+
+
+@pytest.mark.jax
+def test_chunk_sane_triton_output_final_state_false_ignores_mask(
+    delta_net_sane_inputs, delta_chunk_sane_jax_triton_device
+):
+    """output_final_state=False 时即便提供 mask 也走无条件 SANE 的 no-mask 内核。"""
+    q, k, v, beta, tau, mask, h0 = _prepare_sane_inputs(
+        delta_net_sane_inputs, delta_chunk_sane_jax_triton_device, dtype="bfloat16"
+    )
+
+    out_ref, _ = native_chunk_sane(
+        q,
+        k,
+        v,
+        beta,
+        tau,
+        mask=mask,
+        initial_state=h0,
+        output_final_state=False,
+        chunk_size=16,
+    )
+    out_with_mask, _ = triton_chunk_sane(
+        q,
+        k,
+        v,
+        beta,
+        tau,
+        mask=mask,
+        initial_state=h0,
+        output_final_state=False,
+        chunk_size=16,
+    )
+    out_no_mask, _ = triton_chunk_sane(
+        q,
+        k,
+        v,
+        beta,
+        tau,
+        mask=None,
+        initial_state=h0,
+        output_final_state=False,
+        chunk_size=16,
+    )
+
+    assert_allclose_with_stats(
+        out_ref,
+        out_with_mask,
+        "output_final_state=False output",
+        atol=1e-2,
+        rtol=1e-2,
+    )
+    assert_allclose_with_stats(
+        out_no_mask,
+        out_with_mask,
+        "output_final_state=False ignores mask",
+        atol=2e-5,
+        rtol=1e-5,
+    )

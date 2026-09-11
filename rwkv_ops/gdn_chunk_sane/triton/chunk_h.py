@@ -301,7 +301,6 @@ def _gdn_chunk_fwd_h_sane_kernel_no_mask(
         tl.store(p_ht, b_h.to(ht_ptr.dtype.element_ty), mask=m_h)
 
 
-
 def gdn_chunk_fwd_h_sane_no_mask(
     k,
     w,
@@ -362,7 +361,7 @@ def gdn_chunk_fwd_h_sane_no_mask(
         u,
         g,
         tau,
-            h0,
+        h0,
         B,
         H,
         T,

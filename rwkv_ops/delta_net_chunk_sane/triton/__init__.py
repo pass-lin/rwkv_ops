@@ -15,13 +15,21 @@ from ...delta_net_chunk.triton import (
     delta_net_chunk_recompute_w_u,
 )
 from .chunk_bwd_dhu import delta_net_chunk_bwd_dhu_sane as delta_net_chunk_bwd_dhu
+from .chunk_bwd_dhu import (
+    delta_net_chunk_bwd_dhu_sane_no_mask as delta_net_chunk_bwd_dhu_no_mask,
+)
 from .chunk_h import delta_net_chunk_fwd_h_sane as delta_net_chunk_fwd_h
+from .chunk_h import (
+    delta_net_chunk_fwd_h_sane_no_mask as delta_net_chunk_fwd_h_no_mask,
+)
 
 __all__ = [
     "delta_net_chunk_bwd_dhu",
+    "delta_net_chunk_bwd_dhu_no_mask",
     "delta_net_chunk_bwd_dqk",
     "delta_net_chunk_bwd_dv_local",
     "delta_net_chunk_fwd_h",
+    "delta_net_chunk_fwd_h_no_mask",
     "delta_net_chunk_fwd_intra",
     "delta_net_chunk_fwd_o",
     "delta_net_chunk_l2norm_bwd",

@@ -16,13 +16,19 @@ from ...gdn_chunk.triton import (
     gdn_chunk_recompute_w_u,
 )
 from .chunk_h import gdn_chunk_fwd_h_sane as gdn_chunk_fwd_h
+from .chunk_h import gdn_chunk_fwd_h_sane_no_mask as gdn_chunk_fwd_h_no_mask
 from .chunk_bwd_dhu import gdn_chunk_bwd_dhu_sane as gdn_chunk_bwd_dhu
+from .chunk_bwd_dhu import (
+    gdn_chunk_bwd_dhu_sane_no_mask as gdn_chunk_bwd_dhu_no_mask,
+)
 
 __all__ = [
     "gdn_chunk_bwd_dhu",
+    "gdn_chunk_bwd_dhu_no_mask",
     "gdn_chunk_bwd_dqkwg",
     "gdn_chunk_bwd_dv_local",
     "gdn_chunk_fwd_h",
+    "gdn_chunk_fwd_h_no_mask",
     "gdn_chunk_fwd_intra",
     "gdn_chunk_fwd_o",
     "gdn_chunk_l2norm_bwd",

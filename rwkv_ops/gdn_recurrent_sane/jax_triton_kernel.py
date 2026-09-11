@@ -17,8 +17,11 @@ from jax.sharding import NamedSharding, PartitionSpec
 
 from .triton_kernel import (
     gated_delta_net_recurrent_sane_bwd_kernel,
+    gated_delta_net_recurrent_sane_bwd_kernel_no_mask,
     gated_delta_net_recurrent_sane_fwd_kernel,
+    gated_delta_net_recurrent_sane_fwd_kernel_no_mask,
     gated_delta_net_recurrent_sane_inference_fwd_kernel,
+    gated_delta_net_recurrent_sane_inference_fwd_kernel_no_mask,
     gated_delta_net_recurrent_sane_single_step_fwd_kernel,
 )
 
@@ -37,6 +40,20 @@ INF_RULE = (
     "b n t k, b n t k, b n t v, b n t, b n t, b n c, b c, b n k v -> b n t v, b n k v"
 )
 SINGLE_RULE = "b n k, b n k, b n v, b n, b n, b n, b, b n k v -> b n v, b n k v"
+
+# 无 mask 版本规则：不包含 mask 的 `b c` 项，chunk 边界无条件 SANE。
+FWD_RULE_NO_MASK = (
+    "b n t k, b n t k, b n t v, b n t, b n t, b n c, b n k v -> "
+    "b n t v, b n t v, b n c k v, b n t, b n t, b n k v"
+)
+BWD_RULE_NO_MASK = (
+    "b n t k, b n t k, b n t v, b n t, b n t, b n t v, b n k v, "
+    "b n t v, b n t, b n k v, b n c k v, b n c -> "
+    "b n t k, b n t k, b n t v, b n t, b n t, b n c, b n k v"
+)
+INF_RULE_NO_MASK = (
+    "b n t k, b n t k, b n t v, b n t, b n t, b n c, b n k v -> b n t v, b n k v"
+)
 
 
 def _q_spec(qs):
@@ -293,6 +310,68 @@ _gdn_recurrent_sane_fwd_spmd.def_partition(
 )
 
 
+def _gdn_recurrent_sane_fwd_triton_call_no_mask(q, k, v, g, beta, tau, h0, chunk_size):
+    """无 mask 的 JAX-Triton 训练前向 launcher，chunk 边界无条件 SANE。"""
+    B, N, T, K = q.shape
+    V = v.shape[-1]
+    dtype = v.dtype
+    chunk_num = T // chunk_size
+    BV = _compute_bv(V)
+    scale = K**-0.5
+
+    out_shapes = [
+        jax.ShapeDtypeStruct((B, N, T, V), dtype),
+        jax.ShapeDtypeStruct((B, N, T, V), jnp.float32),
+        jax.ShapeDtypeStruct((B, N, chunk_num, K, V), jnp.float32),
+        jax.ShapeDtypeStruct((B, N, T), jnp.float32),
+        jax.ShapeDtypeStruct((B, N, T), jnp.float32),
+        jax.ShapeDtypeStruct((B, N, K, V), jnp.float32),
+    ]
+
+    grid = _compute_grid(B, N, V)
+
+    out, kv_mem, state_chkp, inv_norm_q, inv_norm_k, _ = jt.triton_call(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau,
+        h0,
+        scale,
+        B,
+        N,
+        T,
+        kernel=gated_delta_net_recurrent_sane_fwd_kernel_no_mask,
+        out_shape=out_shapes,
+        grid=grid,
+        K=K,
+        V=V,
+        BK=triton.next_power_of_2(K),
+        BV=BV,
+        CHUNK_LEN=chunk_size,
+        USE_INITIAL_STATE=True,
+        STORE_FINAL_STATE=False,
+    )
+    return out, kv_mem, state_chkp, inv_norm_q, inv_norm_k
+
+
+def _gdn_recurrent_sane_fwd_spmd_impl_no_mask(q, k, v, g, beta, tau, h0, chunk_size):
+    return _gdn_recurrent_sane_fwd_triton_call_no_mask(
+        q, k, v, g, beta, tau, h0, chunk_size
+    )
+
+
+_gdn_recurrent_sane_fwd_spmd_no_mask = custom_partitioning(
+    _gdn_recurrent_sane_fwd_spmd_impl_no_mask, static_argnums=(7,)
+)
+_gdn_recurrent_sane_fwd_spmd_no_mask.def_partition(
+    infer_sharding_from_operands=_fwd_infer_sharding,
+    sharding_rule=FWD_RULE_NO_MASK,
+    partition=_create_partition(_gdn_recurrent_sane_fwd_spmd_impl_no_mask),
+)
+
+
 # 训练反向
 
 
@@ -496,6 +575,191 @@ def _gdn_train_bwd(use_mask, chunk_size, res, grads):
 _gdn_recurrent_sane_train.defvjp(_gdn_train_fwd, _gdn_train_bwd)
 
 
+def _gdn_recurrent_sane_bwd_triton_call_no_mask(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    dy,
+    dht,
+    kv_mem,
+    inv_norm_q,
+    inv_norm_k,
+    h0,
+    state_chkp,
+    tau,
+    chunk_size,
+):
+    """无 mask 的 JAX-Triton 训练反向 launcher，chunk 边界无条件回传 SANE 梯度。"""
+    B, N, T, K = q.shape
+    V = v.shape[-1]
+    dtype = q.dtype
+    BV = _compute_bv(V)
+    scale = K**-0.5
+    use_final_state_gradient = dht is not None
+
+    out_shapes = [
+        jax.ShapeDtypeStruct((B, N, T, K), dtype),
+        jax.ShapeDtypeStruct((B, N, T, K), dtype),
+        jax.ShapeDtypeStruct((B, N, T, V), jnp.float32),
+        jax.ShapeDtypeStruct((B, N, T), jnp.float32),
+        jax.ShapeDtypeStruct((B, N, T), jnp.float32),
+        jax.ShapeDtypeStruct((B, N, T // chunk_size), jnp.float32),
+        jax.ShapeDtypeStruct((B, N, K, V), jnp.float32),
+    ]
+
+    grid = _compute_grid(B, N, V)
+
+    return jt.triton_call(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau,
+        dy,
+        dht,
+        kv_mem,
+        inv_norm_q,
+        inv_norm_k,
+        h0,
+        state_chkp,
+        scale,
+        B,
+        N,
+        T,
+        kernel=gated_delta_net_recurrent_sane_bwd_kernel_no_mask,
+        out_shape=out_shapes,
+        grid=grid,
+        zeroed_outputs=(0, 1, 2, 3, 4, 5, 6),
+        K=K,
+        V=V,
+        BK=triton.next_power_of_2(K),
+        BV=BV,
+        CHUNK_LEN=chunk_size,
+        USE_FINAL_STATE_GRADIENT=use_final_state_gradient,
+    )
+
+
+def _gdn_recurrent_sane_bwd_spmd_impl_no_mask(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    dy,
+    dht,
+    kv_mem,
+    inv_norm_q,
+    inv_norm_k,
+    h0,
+    state_chkp,
+    tau,
+    chunk_size,
+):
+    return _gdn_recurrent_sane_bwd_triton_call_no_mask(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        dy,
+        dht,
+        kv_mem,
+        inv_norm_q,
+        inv_norm_k,
+        h0,
+        state_chkp,
+        tau,
+        chunk_size,
+    )
+
+
+_gdn_recurrent_sane_bwd_spmd_no_mask = custom_partitioning(
+    _gdn_recurrent_sane_bwd_spmd_impl_no_mask, static_argnums=(13,)
+)
+_gdn_recurrent_sane_bwd_spmd_no_mask.def_partition(
+    infer_sharding_from_operands=_bwd_infer_sharding,
+    sharding_rule=BWD_RULE_NO_MASK,
+    partition=_create_partition(_gdn_recurrent_sane_bwd_spmd_impl_no_mask),
+)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(7,))
+def _gdn_recurrent_sane_train_no_mask(q, k, v, g, beta, tau, h0, chunk_size):
+    out, kv_mem, state_chkp, inv_norm_q, inv_norm_k = (
+        _gdn_recurrent_sane_fwd_spmd_no_mask(q, k, v, g, beta, tau, h0, chunk_size)
+    )
+    final_state = _apply_sane_to_final_state(state_chkp[:, :, -1, :, :], tau, mask=None)
+    return out, final_state
+
+
+def _gdn_train_fwd_no_mask(q, k, v, g, beta, tau, h0, chunk_size):
+    out, kv_mem, state_chkp, inv_norm_q, inv_norm_k = (
+        _gdn_recurrent_sane_fwd_spmd_no_mask(q, k, v, g, beta, tau, h0, chunk_size)
+    )
+    final_state = _apply_sane_to_final_state(state_chkp[:, :, -1, :, :], tau, mask=None)
+    return (out, final_state), (
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau,
+        kv_mem,
+        inv_norm_q,
+        inv_norm_k,
+        state_chkp,
+        h0,
+    )
+
+
+def _gdn_train_bwd_no_mask(chunk_size, res, grads):
+    (
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau,
+        kv_mem,
+        inv_norm_q,
+        inv_norm_k,
+        state_chkp,
+        h0,
+    ) = res
+    dy, dht = grads
+    dy = jnp.asarray(dy, q.dtype)
+    if dht is None:
+        B, N, T, K = q.shape
+        V = v.shape[-1]
+        dht = jnp.zeros((B, N, K, V), dtype=jnp.float32)
+    else:
+        dht = jnp.asarray(dht, jnp.float32)
+
+    dq, dk, dv, dg, dbeta, dtau, dh0 = _gdn_recurrent_sane_bwd_spmd_no_mask(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        dy,
+        dht,
+        kv_mem,
+        inv_norm_q,
+        inv_norm_k,
+        h0,
+        state_chkp,
+        tau,
+        chunk_size,
+    )
+    return dq, dk, dv, dg, dbeta, dtau, dh0
+
+
+_gdn_recurrent_sane_train_no_mask.defvjp(_gdn_train_fwd_no_mask, _gdn_train_bwd_no_mask)
+
+
 # 推理前向
 
 
@@ -557,6 +821,62 @@ _gdn_recurrent_sane_inf_spmd.def_partition(
     infer_sharding_from_operands=_inf_infer_sharding,
     sharding_rule=INF_RULE,
     partition=_create_partition(_gdn_recurrent_sane_inf_spmd_impl),
+)
+
+
+def _gdn_recurrent_sane_inf_triton_call_no_mask(q, k, v, g, beta, tau, h0, chunk_size):
+    """无 mask 的 JAX-Triton 推理前向 launcher，chunk 边界无条件 SANE。"""
+    B, N, T, K = q.shape
+    V = v.shape[-1]
+    dtype = v.dtype
+    BV = _compute_bv(V)
+    scale = K**-0.5
+
+    out_shapes = [
+        jax.ShapeDtypeStruct((B, N, T, V), dtype),
+        jax.ShapeDtypeStruct((B, N, K, V), jnp.float32),
+    ]
+
+    grid = _compute_grid(B, N, V)
+
+    return jt.triton_call(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        tau,
+        h0,
+        scale,
+        B,
+        N,
+        T,
+        kernel=gated_delta_net_recurrent_sane_inference_fwd_kernel_no_mask,
+        out_shape=out_shapes,
+        grid=grid,
+        K=K,
+        V=V,
+        BK=triton.next_power_of_2(K),
+        BV=BV,
+        USE_INITIAL_STATE=True,
+        STORE_FINAL_STATE=True,
+        CHUNK_LEN=chunk_size,
+    )
+
+
+def _gdn_recurrent_sane_inf_spmd_impl_no_mask(q, k, v, g, beta, tau, h0, chunk_size):
+    return _gdn_recurrent_sane_inf_triton_call_no_mask(
+        q, k, v, g, beta, tau, h0, chunk_size
+    )
+
+
+_gdn_recurrent_sane_inf_spmd_no_mask = custom_partitioning(
+    _gdn_recurrent_sane_inf_spmd_impl_no_mask, static_argnums=(7,)
+)
+_gdn_recurrent_sane_inf_spmd_no_mask.def_partition(
+    infer_sharding_from_operands=_inf_infer_sharding,
+    sharding_rule=INF_RULE_NO_MASK,
+    partition=_create_partition(_gdn_recurrent_sane_inf_spmd_impl_no_mask),
 )
 
 
@@ -682,20 +1002,21 @@ def gated_delta_net_recurrent_sane(
         )
 
     use_mask = output_final_state and mask is not None
+    h0 = _prepare_h0(initial_state, B, N, K, V)
     if use_mask:
         mask_arr = jnp.asarray(mask, dtype=jnp.float32)
         if mask_arr.shape != (B, C):
             raise ValueError(
                 f"mask shape {mask_arr.shape} must match (B, T//chunk_size) = ({B}, {C})"
             )
+        out, final_state = _gdn_recurrent_sane_train(
+            q, k, v, g, beta, tau, mask_arr, h0, use_mask, chunk_size
+        )
     else:
-        mask_arr = jnp.ones((B, C), dtype=jnp.float32)
-
-    h0 = _prepare_h0(initial_state, B, N, K, V)
-
-    out, final_state = _gdn_recurrent_sane_train(
-        q, k, v, g, beta, tau, mask_arr, h0, use_mask, chunk_size
-    )
+        # 无 mask 路径：chunk 边界无条件执行 SANE，不构造占位 mask。
+        out, final_state = _gdn_recurrent_sane_train_no_mask(
+            q, k, v, g, beta, tau, h0, chunk_size
+        )
 
     out = jnp.transpose(out, (0, 2, 1, 3))
     out = jnp.asarray(out, dtype)
@@ -779,6 +1100,7 @@ def gated_delta_net_recurrent_sane_inference(
         )
 
     use_mask = output_final_state and mask is not None
+    h0 = _prepare_h0(initial_state, B, N, K, V)
     if use_mask:
         mask_arr = jnp.asarray(mask, dtype=jnp.float32)
         if mask_arr.shape[-1] < C:
@@ -791,14 +1113,14 @@ def gated_delta_net_recurrent_sane_inference(
             raise ValueError(
                 f"mask shape {mask_arr.shape} must match (B, T//chunk_size) = ({B}, {C})"
             )
+        out, final_state = _gdn_recurrent_sane_inf_spmd(
+            q, k, v, g, beta, tau, mask_arr, h0, use_mask, chunk_size
+        )
     else:
-        mask_arr = jnp.ones((B, C), dtype=jnp.float32)
-
-    h0 = _prepare_h0(initial_state, B, N, K, V)
-
-    out, final_state = _gdn_recurrent_sane_inf_spmd(
-        q, k, v, g, beta, tau, mask_arr, h0, use_mask, chunk_size
-    )
+        # 无 mask 路径：chunk 边界无条件执行 SANE，不构造占位 mask。
+        out, final_state = _gdn_recurrent_sane_inf_spmd_no_mask(
+            q, k, v, g, beta, tau, h0, chunk_size
+        )
 
     out = jnp.transpose(out, (0, 2, 1, 3))
     out = jnp.asarray(out, dtype)

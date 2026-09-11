@@ -11,7 +11,9 @@ from jax.experimental.custom_partitioning import custom_partitioning
 from jax.sharding import NamedSharding, PartitionSpec
 
 from .triton.chunk_bwd_dhu import _delta_net_chunk_bwd_dhu_sane_kernel
+from .triton.chunk_bwd_dhu import _delta_net_chunk_bwd_dhu_sane_no_mask_kernel
 from .triton.chunk_h import _delta_net_chunk_fwd_h_sane_kernel
+from .triton.chunk_h import _delta_net_chunk_fwd_h_sane_no_mask_kernel
 from ..delta_net_chunk.triton.chunk_bwd_dqk import _delta_net_chunk_bwd_dqk_kernel
 from ..delta_net_chunk.triton.chunk_bwd_dv import _delta_net_chunk_bwd_dv_local_kernel
 from ..delta_net_chunk.triton.chunk_o import _delta_net_chunk_fwd_o_kernel
@@ -293,8 +295,6 @@ def _fwd_h_sane_no_mask_call(k, w, u, tau, h0, chunk_size):
     V = u.shape[-1]
     C = chunk_size
     N = T // C
-    # kernel 签名始终要求 mask_ptr，无 mask 时传 dummy 零张量。
-    dummy_mask = jnp.zeros((B, N), dtype=jnp.float32)
     out_shapes = [
         jax.ShapeDtypeStruct((B, H, N, K, V), jnp.float32),
         jax.ShapeDtypeStruct(u.shape, u.dtype),
@@ -311,14 +311,13 @@ def _fwd_h_sane_no_mask_call(k, w, u, tau, h0, chunk_size):
         w,
         u,
         tau,
-        dummy_mask,
         h0,
         B,
         H,
         T,
         K,
         V,
-        kernel=_delta_net_chunk_fwd_h_sane_kernel,
+        kernel=_delta_net_chunk_fwd_h_sane_no_mask_kernel,
         out_shape=out_shapes,
         grid=grid,
         C=C,
@@ -326,7 +325,6 @@ def _fwd_h_sane_no_mask_call(k, w, u, tau, h0, chunk_size):
         BV=BV,
         USE_INITIAL_STATE=True,
         STORE_FINAL_STATE=True,
-        USE_MASK=False,
     )
     return h, v_new, ht
 
@@ -499,7 +497,6 @@ def _bwd_dhu_sane_no_mask_call(q, k, w, h, v_new, tau, do, dv_local, dht, chunk_
     V = do.shape[-1]
     C = chunk_size
     N = T // C
-    dummy_mask = jnp.zeros((B, N), dtype=jnp.float32)
     out_shapes = [
         jax.ShapeDtypeStruct((B, H, N, K, V), jnp.float32),
         jax.ShapeDtypeStruct((B, H, K, V), jnp.float32),
@@ -523,7 +520,6 @@ def _bwd_dhu_sane_no_mask_call(q, k, w, h, v_new, tau, do, dv_local, dht, chunk_
         h,
         v_new,
         tau,
-        dummy_mask,
         do,
         dv_local,
         dht,
@@ -533,14 +529,13 @@ def _bwd_dhu_sane_no_mask_call(q, k, w, h, v_new, tau, do, dv_local, dht, chunk_
         K,
         V,
         scale,
-        kernel=_delta_net_chunk_bwd_dhu_sane_kernel,
+        kernel=_delta_net_chunk_bwd_dhu_sane_no_mask_kernel,
         out_shape=out_shapes,
         grid=grid,
         C=C,
         BK=BK,
         BV=BV,
         zeroed_outputs=(3,),
-        USE_MASK=False,
     )
     return dh, dh0, dv, dtau
 

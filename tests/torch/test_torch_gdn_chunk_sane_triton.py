@@ -408,3 +408,180 @@ def test_chunk_sane_factory_dispatch(gdn_sane_inputs, device):
     assert_allclose_with_stats(
         out_native, out_triton, "factory dispatch output", atol=1e-2, rtol=1e-2
     )
+
+
+@pytest.mark.torch
+def test_chunk_sane_triton_no_mask_fwd_vs_native(gdn_sane_inputs, device):
+    """mask=None 时 no-mask 内核的无条件 SANE 前向与 native 对拍。"""
+    q, k, v = gdn_sane_inputs["q"], gdn_sane_inputs["k"], gdn_sane_inputs["v"]
+    g, beta, h0 = gdn_sane_inputs["g"], gdn_sane_inputs["beta"], gdn_sane_inputs["h0"]
+    tau = gdn_sane_inputs["tau"]
+
+    q_t = _to_torch(q, device)
+    k_t = _to_torch(k, device)
+    v_t = _to_torch(v, device)
+    g_t = _to_torch(g, device, dtype=torch.float32)
+    beta_t = _to_torch(beta, device, dtype=torch.float32)
+    tau_t = _to_torch(tau, device, dtype=torch.float32)
+    h0_t = _to_torch(h0, device, dtype=torch.float32)
+
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
+        out_ref, state_ref = native_chunk_sane(
+            q_t,
+            k_t,
+            v_t,
+            g_t,
+            beta_t,
+            tau_t,
+            mask=None,
+            initial_state=h0_t,
+            output_final_state=True,
+            chunk_size=16,
+        )
+        out_triton, state_triton = triton_chunk_sane(
+            q_t,
+            k_t,
+            v_t,
+            g_t,
+            beta_t,
+            tau_t,
+            mask=None,
+            initial_state=h0_t,
+            output_final_state=True,
+            chunk_size=16,
+        )
+
+    assert state_ref is None
+    assert state_triton is None
+    assert_allclose_with_stats(
+        out_ref, out_triton, "no_mask fwd output", atol=1e-2, rtol=1e-2
+    )
+
+
+@pytest.mark.torch
+@pytest.mark.slow
+def test_chunk_sane_triton_no_mask_bwd_vs_native(gdn_sane_inputs, device):
+    """no-mask 内核反向（含 tau 梯度）与 native 无条件分支对拍。"""
+    q, k, v = gdn_sane_inputs["q"], gdn_sane_inputs["k"], gdn_sane_inputs["v"]
+    g, beta, h0 = gdn_sane_inputs["g"], gdn_sane_inputs["beta"], gdn_sane_inputs["h0"]
+    tau = gdn_sane_inputs["tau"]
+
+    def _run_and_grad(op):
+        q_t = _to_torch(q, device).requires_grad_(True)
+        k_t = _to_torch(k, device).requires_grad_(True)
+        v_t = _to_torch(v, device).requires_grad_(True)
+        g_t = _to_torch(g, device, dtype=torch.float32).requires_grad_(True)
+        beta_t = _to_torch(beta, device, dtype=torch.float32).requires_grad_(True)
+        tau_t = _to_torch(tau, device, dtype=torch.float32).requires_grad_(True)
+        h0_t = _to_torch(h0, device, dtype=torch.float32).requires_grad_(True)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            out, state = op(
+                q_t,
+                k_t,
+                v_t,
+                g_t,
+                beta_t,
+                tau_t,
+                mask=None,
+                initial_state=h0_t,
+                output_final_state=True,
+                chunk_size=16,
+            )
+            loss = out.to(torch.float32).pow(2).mean()
+            if state is not None:
+                loss = loss + state.pow(2).mean()
+            loss.backward()
+        return (
+            q_t.grad,
+            k_t.grad,
+            v_t.grad,
+            g_t.grad,
+            beta_t.grad,
+            tau_t.grad,
+            h0_t.grad,
+        )
+
+    grads_native = _run_and_grad(native_chunk_sane)
+    grads_triton = _run_and_grad(triton_chunk_sane)
+
+    names = ["q", "k", "v", "g", "beta", "tau", "h0"]
+    for name, ref, tgt in zip(names, grads_native, grads_triton):
+        assert ref is not None, f"native {name} grad is None"
+        assert tgt is not None, f"triton {name} grad is None"
+        assert_allclose_with_stats(
+            ref, tgt, f"no_mask bwd {name}", atol=2e-1, rtol=2e-1
+        )
+
+
+@pytest.mark.torch
+def test_chunk_sane_triton_output_final_state_false_ignores_mask(
+    gdn_sane_inputs, device
+):
+    """output_final_state=False 时即便提供 mask 也走无条件 SANE 的 no-mask 内核。"""
+    q, k, v = gdn_sane_inputs["q"], gdn_sane_inputs["k"], gdn_sane_inputs["v"]
+    g, beta, h0 = gdn_sane_inputs["g"], gdn_sane_inputs["beta"], gdn_sane_inputs["h0"]
+    tau, mask = gdn_sane_inputs["tau"], gdn_sane_inputs["mask"]
+
+    q_t = _to_torch(q, device)
+    k_t = _to_torch(k, device)
+    v_t = _to_torch(v, device)
+    g_t = _to_torch(g, device, dtype=torch.float32)
+    beta_t = _to_torch(beta, device, dtype=torch.float32)
+    tau_t = _to_torch(tau, device, dtype=torch.float32)
+    mask_t = _to_torch(mask, device, dtype=torch.float32)
+    h0_t = _to_torch(h0, device, dtype=torch.float32)
+
+    out_ref, _ = native_chunk_sane(
+        q_t,
+        k_t,
+        v_t,
+        g_t,
+        beta_t,
+        tau_t,
+        mask=mask_t,
+        initial_state=h0_t,
+        output_final_state=False,
+        chunk_size=16,
+    )
+    out_with_mask, _ = triton_chunk_sane(
+        q_t,
+        k_t,
+        v_t,
+        g_t,
+        beta_t,
+        tau_t,
+        mask=mask_t,
+        initial_state=h0_t,
+        output_final_state=False,
+        chunk_size=16,
+    )
+    out_no_mask, _ = triton_chunk_sane(
+        q_t,
+        k_t,
+        v_t,
+        g_t,
+        beta_t,
+        tau_t,
+        mask=None,
+        initial_state=h0_t,
+        output_final_state=False,
+        chunk_size=16,
+    )
+
+    assert_allclose_with_stats(
+        out_ref,
+        out_with_mask,
+        "output_final_state=False output",
+        atol=1e-2,
+        rtol=1e-2,
+    )
+    assert_allclose_with_stats(
+        out_no_mask,
+        out_with_mask,
+        "output_final_state=False ignores mask",
+        atol=2e-5,
+        rtol=1e-5,
+    )

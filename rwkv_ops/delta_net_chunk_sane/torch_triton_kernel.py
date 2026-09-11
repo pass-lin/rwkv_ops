@@ -6,9 +6,11 @@ import torch
 
 from .triton import (
     delta_net_chunk_bwd_dhu,
+    delta_net_chunk_bwd_dhu_no_mask,
     delta_net_chunk_bwd_dqk,
     delta_net_chunk_bwd_dv_local,
     delta_net_chunk_fwd_h,
+    delta_net_chunk_fwd_h_no_mask,
     delta_net_chunk_fwd_intra,
     delta_net_chunk_fwd_o,
     delta_net_chunk_l2norm_bwd,
@@ -17,7 +19,9 @@ from .triton import (
     delta_net_chunk_recompute_w_u,
 )
 from .triton.chunk_bwd_dhu import _delta_net_chunk_bwd_dhu_sane_kernel
+from .triton.chunk_bwd_dhu import _delta_net_chunk_bwd_dhu_sane_no_mask_kernel
 from .triton.chunk_h import _delta_net_chunk_fwd_h_sane_kernel
+from .triton.chunk_h import _delta_net_chunk_fwd_h_sane_no_mask_kernel
 from ..delta_net_chunk.triton.chunk_bwd_dqk import _delta_net_chunk_bwd_dqk_kernel
 from ..delta_net_chunk.triton.chunk_bwd_dv import _delta_net_chunk_bwd_dv_local_kernel
 from ..delta_net_chunk.triton.chunk_o import _delta_net_chunk_fwd_o_kernel
@@ -34,12 +38,14 @@ def _clear_delta_net_chunk_sane_autotune_cache():
     """清空 delta_net_chunk_sane 所有 Triton kernel 的 autotune cache。"""
     for kernel in (
         _delta_net_chunk_fwd_h_sane_kernel,
+        _delta_net_chunk_fwd_h_sane_no_mask_kernel,
         _delta_net_chunk_fwd_o_kernel,
         _delta_net_chunk_fwd_intra_kernel,
         _delta_net_chunk_recompute_w_u_fwd_kernel,
         _delta_net_chunk_l2norm_fwd_kernel,
         _delta_net_chunk_l2norm_bwd_kernel,
         _delta_net_chunk_bwd_dhu_sane_kernel,
+        _delta_net_chunk_bwd_dhu_sane_no_mask_kernel,
         _delta_net_chunk_bwd_dqk_kernel,
         _delta_net_chunk_bwd_dv_local_kernel,
         _delta_net_chunk_prepare_wy_repr_bwd_kernel,
@@ -121,17 +127,28 @@ class DeltaNetChunkSaneTritonFunction(torch.autograd.Function):
         w, u = delta_net_chunk_recompute_w_u(k, v, beta, A, chunk_size=chunk_size)
 
         # chunk 间状态递推（SANE）
-        h, v_new, final_state = delta_net_chunk_fwd_h(
-            k,
-            w,
-            u,
-            tau,
-            mask if use_mask else None,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            chunk_size=chunk_size,
-            use_mask=use_mask,
-        )
+        if use_mask:
+            h, v_new, final_state = delta_net_chunk_fwd_h(
+                k,
+                w,
+                u,
+                tau,
+                mask,
+                initial_state=initial_state,
+                output_final_state=output_final_state,
+                chunk_size=chunk_size,
+                use_mask=True,
+            )
+        else:
+            h, v_new, final_state = delta_net_chunk_fwd_h_no_mask(
+                k,
+                w,
+                u,
+                tau,
+                initial_state=initial_state,
+                output_final_state=output_final_state,
+                chunk_size=chunk_size,
+            )
 
         # 最终输出
         o = delta_net_chunk_fwd_o(q, k, v_new, h, chunk_size=chunk_size)
@@ -196,21 +213,36 @@ class DeltaNetChunkSaneTritonFunction(torch.autograd.Function):
         dv_local = delta_net_chunk_bwd_dv_local(q, k, do, scale, chunk_size=chunk_size)
 
         # 2. 状态反向扫描（SANE）
-        dh, dh0, dv, dtau = delta_net_chunk_bwd_dhu(
-            q,
-            k,
-            w,
-            h,
-            v_new,
-            tau,
-            mask if use_mask else None,
-            do,
-            dv_local,
-            dht=dht,
-            scale=scale,
-            chunk_size=chunk_size,
-            use_mask=use_mask,
-        )
+        if use_mask:
+            dh, dh0, dv, dtau = delta_net_chunk_bwd_dhu(
+                q,
+                k,
+                w,
+                h,
+                v_new,
+                tau,
+                mask,
+                do,
+                dv_local,
+                dht=dht,
+                scale=scale,
+                chunk_size=chunk_size,
+                use_mask=True,
+            )
+        else:
+            dh, dh0, dv, dtau = delta_net_chunk_bwd_dhu_no_mask(
+                q,
+                k,
+                w,
+                h,
+                v_new,
+                tau,
+                do,
+                dv_local,
+                dht=dht,
+                scale=scale,
+                chunk_size=chunk_size,
+            )
 
         # 3. dq / dk / dw
         dq, dk, dw = delta_net_chunk_bwd_dqk(

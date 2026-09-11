@@ -12,7 +12,9 @@ from jax.sharding import NamedSharding, PartitionSpec
 
 # SANE 专用 kernel 从本包导入。
 from .triton.chunk_h import _gdn_chunk_fwd_h_sane_kernel
+from .triton.chunk_h import _gdn_chunk_fwd_h_sane_no_mask_kernel
 from .triton.chunk_bwd_dhu import _gdn_chunk_bwd_dhu_sane_kernel
+from .triton.chunk_bwd_dhu import _gdn_chunk_bwd_dhu_sane_no_mask_kernel
 
 # 其余未改动 kernel 从 gdn_chunk.triton 子模块导入。
 from ..gdn_chunk.triton.cumsum import _chunk_local_cumsum_kernel
@@ -340,8 +342,6 @@ def _fwd_h_sane_no_mask_call(k, w, u, g, tau, h0, chunk_size):
     V = u.shape[-1]
     C = chunk_size
     N = T // C
-    # kernel 签名始终要求 mask_ptr，无 mask 时传 dummy 零张量。
-    dummy_mask = jnp.zeros((B, N), dtype=jnp.float32)
     out_shapes = [
         jax.ShapeDtypeStruct((B, H, N, K, V), jnp.float32),
         jax.ShapeDtypeStruct(u.shape, u.dtype),
@@ -359,14 +359,13 @@ def _fwd_h_sane_no_mask_call(k, w, u, g, tau, h0, chunk_size):
         u,
         g,
         tau,
-        dummy_mask,
         h0,
         B,
         H,
         T,
         K,
         V,
-        kernel=_gdn_chunk_fwd_h_sane_kernel,
+        kernel=_gdn_chunk_fwd_h_sane_no_mask_kernel,
         out_shape=out_shapes,
         grid=grid,
         C=C,
@@ -374,7 +373,6 @@ def _fwd_h_sane_no_mask_call(k, w, u, g, tau, h0, chunk_size):
         BV=BV,
         USE_INITIAL_STATE=True,
         STORE_FINAL_STATE=True,
-        USE_MASK=False,
     )
     return h, v_new, ht
 
@@ -554,7 +552,6 @@ def _bwd_dhu_sane_no_mask_call(
     V = do.shape[-1]
     C = chunk_size
     N = T // C
-    dummy_mask = jnp.zeros((B, N), dtype=jnp.float32)
     out_shapes = [
         jax.ShapeDtypeStruct((B, H, N, K, V), jnp.float32),
         jax.ShapeDtypeStruct((B, H, K, V), jnp.float32),
@@ -579,7 +576,6 @@ def _bwd_dhu_sane_no_mask_call(
         h,
         v_new,
         tau,
-        dummy_mask,
         do,
         dv_local,
         dht,
@@ -589,14 +585,13 @@ def _bwd_dhu_sane_no_mask_call(
         K,
         V,
         scale,
-        kernel=_gdn_chunk_bwd_dhu_sane_kernel,
+        kernel=_gdn_chunk_bwd_dhu_sane_no_mask_kernel,
         out_shape=out_shapes,
         grid=grid,
         C=C,
         BK=BK,
         BV=BV,
         zeroed_outputs=(3,),
-        USE_MASK=False,
     )
     return dh, dh0, dv, dtau
 

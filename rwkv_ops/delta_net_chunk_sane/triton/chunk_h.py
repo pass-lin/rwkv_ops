@@ -278,7 +278,6 @@ def _delta_net_chunk_fwd_h_sane_kernel_no_mask(
         tl.store(p_ht, b_h.to(ht_ptr.dtype.element_ty), mask=m_h)
 
 
-
 def delta_net_chunk_fwd_h_sane_no_mask(
     k,
     w,
@@ -336,7 +335,7 @@ def delta_net_chunk_fwd_h_sane_no_mask(
         w,
         u,
         tau,
-            h0,
+        h0,
         B,
         H,
         T,

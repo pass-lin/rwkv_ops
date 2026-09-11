@@ -509,7 +509,6 @@ def _gdn_chunk_bwd_dhu_sane_kernel_no_mask(
     tl.store(p_dh0, b_dh.to(dh0_ptr.dtype.element_ty), mask=m_h)
 
 
-
 def gdn_chunk_bwd_dhu_sane_no_mask(
     q,
     k,
@@ -571,7 +570,7 @@ def gdn_chunk_bwd_dhu_sane_no_mask(
         h,
         v_new,
         tau,
-            do,
+        do,
         dv_local,
         dht,
         B,

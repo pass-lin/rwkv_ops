@@ -7,9 +7,11 @@ import torch
 from .triton import (
     chunk_local_cumsum,
     gdn_chunk_bwd_dhu,
+    gdn_chunk_bwd_dhu_no_mask,
     gdn_chunk_bwd_dqkwg,
     gdn_chunk_bwd_dv_local,
     gdn_chunk_fwd_h,
+    gdn_chunk_fwd_h_no_mask,
     gdn_chunk_fwd_intra,
     gdn_chunk_fwd_o,
     gdn_chunk_l2norm_bwd,
@@ -18,7 +20,9 @@ from .triton import (
     gdn_chunk_recompute_w_u,
 )
 from .triton.chunk_bwd_dhu import _gdn_chunk_bwd_dhu_sane_kernel
+from .triton.chunk_bwd_dhu import _gdn_chunk_bwd_dhu_sane_no_mask_kernel
 from .triton.chunk_h import _gdn_chunk_fwd_h_sane_kernel
+from .triton.chunk_h import _gdn_chunk_fwd_h_sane_no_mask_kernel
 from ..gdn_chunk.triton.chunk_bwd_dqkwg import _gdn_chunk_bwd_dqkwg_kernel
 from ..gdn_chunk.triton.chunk_bwd_dv import _gdn_chunk_bwd_dv_local_kernel
 from ..gdn_chunk.triton.chunk_o import _gdn_chunk_fwd_o_kernel
@@ -36,6 +40,7 @@ def _clear_gdn_chunk_sane_autotune_cache():
     """清空 gdn_chunk_sane 所有 Triton kernel 的 autotune cache。"""
     for kernel in (
         _gdn_chunk_fwd_h_sane_kernel,
+        _gdn_chunk_fwd_h_sane_no_mask_kernel,
         _gdn_chunk_fwd_o_kernel,
         _gdn_chunk_fwd_intra_kernel,
         _gdn_chunk_recompute_w_u_fwd_kernel,
@@ -43,6 +48,7 @@ def _clear_gdn_chunk_sane_autotune_cache():
         _gdn_chunk_l2norm_bwd_kernel,
         _chunk_local_cumsum_kernel,
         _gdn_chunk_bwd_dhu_sane_kernel,
+        _gdn_chunk_bwd_dhu_sane_no_mask_kernel,
         _gdn_chunk_bwd_dqkwg_kernel,
         _gdn_chunk_bwd_dv_local_kernel,
         _gdn_chunk_prepare_wy_repr_bwd_kernel,
@@ -129,18 +135,28 @@ class GatedDeltaNetChunkSaneTritonFunction(torch.autograd.Function):
         w, u = gdn_chunk_recompute_w_u(k, v, beta, A, g, chunk_size=chunk_size)
 
         # chunk 间状态递推（SANE）
-        h, v_new, final_state = gdn_chunk_fwd_h(
-            k,
-            w,
-            u,
-            g,
-            tau,
-            mask if use_mask else None,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            chunk_size=chunk_size,
-            use_mask=use_mask,
-        )
+        if use_mask:
+            h, v_new, final_state = gdn_chunk_fwd_h(
+                k,
+                w,
+                u,
+                tau,
+                mask,
+                initial_state=initial_state,
+                output_final_state=output_final_state,
+                chunk_size=chunk_size,
+                use_mask=True,
+            )
+        else:
+            h, v_new, final_state = gdn_chunk_fwd_h_no_mask(
+                k,
+                w,
+                u,
+                tau,
+                initial_state=initial_state,
+                output_final_state=output_final_state,
+                chunk_size=chunk_size,
+            )
 
         # 最终输出
         o = gdn_chunk_fwd_o(q, k, v_new, h, g, chunk_size=chunk_size)
@@ -207,22 +223,36 @@ class GatedDeltaNetChunkSaneTritonFunction(torch.autograd.Function):
         dv_local = gdn_chunk_bwd_dv_local(q, k, g, do, scale, chunk_size=chunk_size)
 
         # 2. 状态反向扫描（SANE）
-        dh, dh0, dv, dtau = gdn_chunk_bwd_dhu(
-            q,
-            k,
-            w,
-            g,
-            h,
-            v_new,
-            tau,
-            mask if use_mask else None,
-            do,
-            dv_local,
-            dht=dht,
-            scale=scale,
-            chunk_size=chunk_size,
-            use_mask=use_mask,
-        )
+        if use_mask:
+            dh, dh0, dv, dtau = gdn_chunk_bwd_dhu(
+                q,
+                k,
+                w,
+                h,
+                v_new,
+                tau,
+                mask,
+                do,
+                dv_local,
+                dht=dht,
+                scale=scale,
+                chunk_size=chunk_size,
+                use_mask=True,
+            )
+        else:
+            dh, dh0, dv, dtau = gdn_chunk_bwd_dhu_no_mask(
+                q,
+                k,
+                w,
+                h,
+                v_new,
+                tau,
+                do,
+                dv_local,
+                dht=dht,
+                scale=scale,
+                chunk_size=chunk_size,
+            )
 
         # 3. dq / dk / dw / chunk 内 dg
         dq, dk, dw, dg = gdn_chunk_bwd_dqkwg(
