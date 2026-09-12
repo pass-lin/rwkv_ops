@@ -870,7 +870,6 @@ def _bwd_out_shape(q, v, chunk_size: int):
         jax.ShapeDtypeStruct((B, N, T, K), q.dtype),
         jax.ShapeDtypeStruct((B, N, T, V), jnp.float32),
         jax.ShapeDtypeStruct((B, N, T), jnp.float32),
-        jax.ShapeDtypeStruct((B, N, T), jnp.float32),
         jax.ShapeDtypeStruct((B, N, K, V), jnp.float32),
         jax.ShapeDtypeStruct((B, N, T // chunk_size), jnp.float32),
     ]

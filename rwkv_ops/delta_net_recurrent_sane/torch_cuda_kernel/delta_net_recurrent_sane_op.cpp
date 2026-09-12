@@ -39,22 +39,21 @@ void cuda_dn_sane_forward_no_mask(int B, int T, int H, float scale, const ET *q,
                                   float *kv_mem, float *chkp, float *inv_q,
                                   float *inv_k, float *ht);
 template <typename ET>
-void cuda_dn_sane_backward_no_mask(
-    int B, int T, int H, float scale, const ET *q, const ET *k, const ET *v,
-    const float *beta, const float *tau, const ET *dout, const float *dht,
-    const float *kv_mem, const float *inv_q, const float *inv_k,
-    const float *chkp, float *dq, float *dk, float *dv, float *dbeta,
-    float *dtau, float *dh0);
+void cuda_dn_sane_backward_no_mask(int B, int T, int H, float scale,
+                                   const ET *q, const ET *k, const ET *v,
+                                   const float *beta, const float *tau,
+                                   const ET *dout, const float *dht,
+                                   const float *kv_mem, const float *inv_q,
+                                   const float *inv_k, const float *chkp,
+                                   float *dq, float *dk, float *dv,
+                                   float *dbeta, float *dtau, float *dh0);
 template <typename ET>
-void cuda_dn_sane_forward_inference_no_mask(
-    int B, int T, int H, float scale, const ET *q, const ET *k, const ET *v,
-    const float *beta, const float *tau, const float *h0, ET *o, float *ht);
+void cuda_dn_sane_forward_inference_no_mask(int B, int T, int H, float scale,
+                                            const ET *q, const ET *k,
+                                            const ET *v, const float *beta,
+                                            const float *tau, const float *h0,
+                                            ET *o, float *ht);
 
-extern template void
-cuda_dn_sane_forward<bf>(int, int, int, float, const bf *, const bf *,
-                         const bf *, const float *, const float *,
-                         const float *, const float *, const float *, bf *,
-                         float *, float *, float *, float *, float *);
 extern template void cuda_dn_sane_forward<bf>(int, int, int, float, const bf *,
                                               const bf *, const bf *,
                                               const float *, const float *,
@@ -93,10 +92,11 @@ extern template void
 cuda_dn_sane_single_step<float>(int, int, float, const float *, const float *,
                                 const float *, const float *, const float *,
                                 const float *, const float *, float *, float *);
-extern template void cuda_dn_sane_forward_no_mask<bf>(
-    int, int, int, float, const bf *, const bf *, const bf *, const float *,
-    const float *, const float *, bf *, float *, float *, float *, float *,
-    float *);
+extern template void
+cuda_dn_sane_forward_no_mask<bf>(int, int, int, float, const bf *, const bf *,
+                                 const bf *, const float *, const float *,
+                                 const float *, bf *, float *, float *, float *,
+                                 float *, float *);
 extern template void cuda_dn_sane_forward_no_mask<float>(
     int, int, int, float, const float *, const float *, const float *,
     const float *, const float *, const float *, float *, float *, float *,
@@ -245,11 +245,10 @@ void single_step(torch::Tensor &q, torch::Tensor &k, torch::Tensor &v,
 
 // 无 mask 版本的 PyTorch wrapper：不接收 mask 张量，chunk 边界无条件 SANE。
 void forward_no_mask(torch::Tensor &q, torch::Tensor &k, torch::Tensor &v,
-                     torch::Tensor &beta, torch::Tensor &tau,
-                     torch::Tensor &h0, double scale, torch::Tensor &o,
-                     torch::Tensor &kv_mem, torch::Tensor &chkp,
-                     torch::Tensor &inv_q, torch::Tensor &inv_k,
-                     torch::Tensor &ht) {
+                     torch::Tensor &beta, torch::Tensor &tau, torch::Tensor &h0,
+                     double scale, torch::Tensor &o, torch::Tensor &kv_mem,
+                     torch::Tensor &chkp, torch::Tensor &inv_q,
+                     torch::Tensor &inv_k, torch::Tensor &ht) {
   int B = q.sizes()[0], H = q.sizes()[1], T = q.sizes()[2];
   if (q.scalar_type() == at::kBFloat16) {
     cuda_dn_sane_forward_no_mask<bf>(

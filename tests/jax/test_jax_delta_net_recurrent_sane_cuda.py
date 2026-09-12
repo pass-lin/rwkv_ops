@@ -127,14 +127,14 @@ def test_dn_cuda_sane_backward_matches_native(
         lambda q, k, v, beta, tau, h0: _sane_loss_fn(
             gdn_native_sane, q, k, v, beta, tau, mask, h0
         ),
-        argnums=(0, 1, 2, 3, 4, 5, 6),
+        argnums=(0, 1, 2, 3, 4, 5),
     )(q, k, v, beta, tau, h0)
 
     cuda_grads = jax.grad(
         lambda q, k, v, beta, tau, h0: _sane_loss_fn(
             dn_cuda_sane, q, k, v, beta, tau, mask, h0
         ),
-        argnums=(0, 1, 2, 3, 4, 5, 6),
+        argnums=(0, 1, 2, 3, 4, 5),
     )(q, k, v, beta, tau, h0)
 
     names = ["q", "k", "v", "beta", "tau", "h0"]
@@ -171,14 +171,14 @@ def test_dn_cuda_sane_bfloat16_io(delta_net_sane_inputs, dn_sane_jax_cuda_device
         lambda q, k, v, beta, tau, h0: _sane_loss_fn(
             gdn_native_sane, q, k, v, beta, tau, mask, h0
         ),
-        argnums=(0, 1, 2, 3, 4, 5, 6),
+        argnums=(0, 1, 2, 3, 4, 5),
     )(q, k, v, beta, tau, h0)
 
     cuda_grads = jax.grad(
         lambda q, k, v, beta, tau, h0: _sane_loss_fn(
             dn_cuda_sane, q, k, v, beta, tau, mask, h0
         ),
-        argnums=(0, 1, 2, 3, 4, 5, 6),
+        argnums=(0, 1, 2, 3, 4, 5),
     )(q, k, v, beta, tau, h0)
 
     names = ["q", "k", "v", "beta", "tau", "h0"]
@@ -522,14 +522,14 @@ def test_dn_cuda_sane_backward_chunk_size(
         lambda q, k, v, beta, tau, h0: _sane_loss_fn(
             gdn_native_sane, q, k, v, beta, tau, mask, h0, chunk_size=chunk_size
         ),
-        argnums=(0, 1, 2, 3, 4, 5, 6),
+        argnums=(0, 1, 2, 3, 4, 5),
     )(q, k, v, beta, tau, h0)
 
     cuda_grads = jax.grad(
         lambda q, k, v, beta, tau, h0: _sane_loss_fn(
             dn_cuda_sane, q, k, v, beta, tau, mask, h0, chunk_size=chunk_size
         ),
-        argnums=(0, 1, 2, 3, 4, 5, 6),
+        argnums=(0, 1, 2, 3, 4, 5),
     )(q, k, v, beta, tau, h0)
 
     names = ["q", "k", "v", "beta", "tau", "h0"]
