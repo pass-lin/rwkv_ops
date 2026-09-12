@@ -1710,7 +1710,7 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
 
 ---
 
-## 15. 待办：SANE 无 mask 独立算子（进行中）
+## 15. SANE 无 mask 独立算子
 
 > **触发规则 A1（已定案，勿改）**：`use_mask = output_final_state and mask is not None`。
 > `use_mask=False`（即 `output_final_state=False` 或 `mask=None`）时，chunk 边界**无条件**执行 SANE：
@@ -1721,31 +1721,44 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
 > `rwkv7_sane_kernel/torch_triton_kernel.py`（`_make_sane_triton_op_with_mask` / `_make_sane_triton_op_no_mask`）。
 > 命名：新 kernel 与包装一律加 `_no_mask` 后缀。
 
-### 15.1 范围
+### 15.1 范围与状态
 
-| 家族 | 需新增 no-mask 的入口 | 后端 |
-|---|---|---|
-| `gdn_recurrent_sane` | train-fwd / train-bwd(含 dtau) / inference | Triton(共享+torch+jax)、CUDA(torch 扩展 + jax FFI)、Pallas(jax) |
-| `delta_net_recurrent_sane` | 同上 | 同上 |
-| `gdn_chunk_sane` | `chunk_h` / `chunk_bwd_dhu`(含 dtau) | 仅 Triton(torch+jax) |
-| `delta_net_chunk_sane` | 同上 | 仅 Triton |
+| 家族 | 需新增 no-mask 的入口 | 后端 | 状态 |
+|---|---|---|---|
+| `gdn_recurrent_sane` | train-fwd / train-bwd(含 dtau) / inference | Triton(共享+torch+jax)、CUDA(torch 扩展 + jax FFI)、Pallas(jax) | ✅ 完成 |
+| `delta_net_recurrent_sane` | 同上 | 同上 | ✅ 完成 |
+| `gdn_chunk_sane` | `chunk_h` / `chunk_bwd_dhu`(含 dtau) | 仅 Triton(torch+jax) | ✅ 完成 |
+| `delta_net_chunk_sane` | 同上 | 仅 Triton | ✅ 完成 |
 
 **明确不做**：single-step（SANE 由 per-sample `do_sane` 标量控制，无 mask 数组）；native（已有无条件分支）。
 **chunk 家族不做 CUDA/Pallas**（设计约定：自研 SIMT 打不过 `tl.dot`）。
 
-### 15.2 已完成
+### 15.2 实现要点（各后端）
 
-**(a) 已提交 `12484ea dn no mask 算子`**
-1. `delta_net_recurrent_sane` 的 jax/cuda 前置修复：`static_argnums`/`nondiff_argnums` 按形参个数重算
-   （`jax_triton_kernel.py`、`jax_pallas_kernel.py`、`jax_cuda_kernel/delta_net_recurrent_sane_jax.py`）；
-   CUDA `.cu` 与 `.cpp` 的显式实例化列表按声明重新生成（fwd 17 / bwd 22 / inference 13 / single_step 12）。
-2. 测试 chunk_size 由 8 改为 32（5 个 `tests/{torch,jax}/test_*_delta_net_recurrent_sane_*`）。
-3. chunk 家族 no-mask **内核层**：`gdn_chunk_sane/triton/{chunk_h,chunk_bwd_dhu}.py` 与
-   `delta_net_chunk_sane/triton/{chunk_h,chunk_bwd_dhu}.py`，各新增 1 个 `*_no_mask_kernel` + 1 个 `*_no_mask` 包装。
+- **共享 Triton 内核**（`triton_kernel.py`）：fwd / bwd / inference 各新增一个 `*_kernel_no_mask`，
+  去掉 `mask` 参数与 `USE_MASK` 分支；bwd 无条件累加 `dtau` 并把 carry 乘 `sech2`
+  （autotune `pre_hook` 同样注册，保证 `dtau` 初值为零）。
+- **torch 桥接**（`torch_triton_kernel.py` / `torch_cuda_kernel/*_torch.py`）：按 `use_mask` 二选一分派；
+  `output_final_state=False` 或 `mask=None` 时不再构造全 1 占位 mask（backward 用
+  `ctx.use_mask` 或 `mask.numel() > 0` 判定）。
+- **jax-triton / jax-FFI**：新增 `*_RULE_NO_MASK`（去掉 mask 的 `b c` 项）与独立的
+  launcher / spmd / `custom_vjp`；`static_argnums`、`nondiff_argnums` 按形参个数重算；
+  FFI 侧新增 `*NoMaskBf16/F32` 符号并加入 `_FFI_SYMBOLS` 注册。
+- **Pallas**：新增 `_make_*_kernel_no_mask` 与独立 launcher/warmup/spmd/custom_vjp；
+  warmup 与 launch 的**参数顺序必须一致**。
+- **CUDA**：`.cu` 新增独立 `__global__` kernel 并重建显式实例化列表；`.cpp` 新增 wrapper/binding
+  （`forward_no_mask` / `backward_no_mask` / `forward_inference_no_mask`）。
 
-**(b) 工作区未提交（10 个文件，AST OK、ruff 绿）**：chunk 家族 no-mask **桥接层**
-- 两个家族的 `triton/__init__.py` 导出 `*_no_mask`；
-- `torch_triton_kernel.py`：导入 no-mask kernel、autotune cache 列表、fwd/bwd 按 `use_mask` 二选一分派；
-- `jax_triton_kernel.py`：no-mask 分支改用 no-mask 内核，并去掉 `dummy_mask` 与 `USE_MASK=False`。
+### 15.3 测试
 
-→ **chunk 家族全链路已通，只差测试**。
+10 个 recurrent SANE 测试文件（2 家族 × {torch, jax} × {triton, pallas, cuda}）各补充 3 个用例：
+no-mask 前向 vs native、no-mask 反向（含 `tau` 梯度）、`output_final_state=False` 忽略 mask（A1 语义）。
+chunk 家族的 4 个测试文件同样覆盖上述三类。
+
+### 15.4 后续待办
+
+1. **回归测试**：全部 no-mask 用例尚未在 GPU 上实际执行（交付时只做了语法/风格自检），
+   需按 `pytest tests/torch`、`pytest tests/jax` 分后端跑通。
+2. **多卡复核**：jax 侧 no-mask 分支的分片规则只做了单卡 1-device mesh 结构验证，
+   真实 DP/TP 行为需在多卡环境复核。
+3. 后续新增 SANE 家族算子时需同步补 no-mask 变体（见 §10 扩展指南）。

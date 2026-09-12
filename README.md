@@ -661,6 +661,7 @@ out, state = gated_delta_net_recurrent_sane_single_step(
 1. 训练入口支持反向传播（含 `tau` 梯度）；推理与单步入口**没有梯度**。
 2. `cuda` 后端的 `chunk_size` 作为编译期常量按 `(K, V, chunk_size)` 在首次调用时懒编译，调用时可传入不同 `chunk_size`（各自编译一次）；JAX 侧 `cuda` 为 FFI 实现（`jax_cuda_kernel/`），同样覆盖训练（含反向）/推理/单步三个入口。
 3. `mask=None` 时仍执行无条件 SANE，但 `output_final_state=True` 会发出 `UserWarning` 并将 `final_state` 置为 `None`，避免 padding 污染被误用。
+4. `output_final_state=False` 或 `mask=None`（即 `use_mask = output_final_state and mask is not None` 为 False）时改用**独立的 no-mask 算子**：在每个 chunk 边界**无条件**执行 SANE，不读取 `mask`、不计算 `state*(1-m) + sane*m` 混合；只有 `output_final_state=True` 且显式传入 `mask` 时才使用带 mask 算子。
 
 <a id="gdn_chunk-使用方法"></a>
 ## gdn_chunk 使用方法
@@ -767,6 +768,7 @@ out, final_state = gated_delta_net_chunk_sane(
 
 > 训练入口支持反向传播（含 `tau` 梯度）。JAX 侧 `triton` 需显式 `KERNEL_TYPE="triton"` 并安装 `jax-triton`。
 > `mask=None` 时输出仍使用无条件 SANE，但 `output_final_state=True` 会发出 `UserWarning` 并将 `final_state` 置为 `None`。
+> `output_final_state=False` 或 `mask=None`（即 `use_mask = output_final_state and mask is not None` 为 False）时改用**独立的 no-mask 算子**：chunk 边界无条件执行 SANE，不读取 `mask`、不计算混合；只有 `output_final_state=True` 且显式传入 `mask` 时才使用带 mask 算子。
 
 ---
 
@@ -993,6 +995,7 @@ out, final_state = delta_net_recurrent_sane(
 1. Torch 后端的 `native` 在非 CPU 平台默认为 Triton 实现；JAX 侧 `triton` 需显式 `KERNEL_TYPE="triton"` 并安装 `jax-triton`，`native` 在 GPU/TPU 上为 Pallas 实现，其余为纯 Keras ops。`cuda` 在 PyTorch（C++ 扩展）与 JAX（FFI，需 JAX >= 0.4.31）均提供训练（含反向含 `tau` 梯度）/推理/单步三入口，`chunk_size` 作为编译期常量按 `(K, V, chunk_size)` 懒编译。
 2. 训练入口支持反向传播（含 `tau` 梯度）；推理与单步入口**没有梯度**。
 3. `mask=None` 时仍执行无条件 SANE；`output_final_state=False` 时同样走无条件 SANE。
+4. `output_final_state=False` 或 `mask=None`（即 `use_mask = output_final_state and mask is not None` 为 False）时改用**独立的 no-mask 算子**：chunk 边界无条件执行 SANE，不读取 `mask`、不计算混合；只有 `output_final_state=True` 且显式传入 `mask` 时才使用带 mask 算子。
 
 <a id="delta_net_chunk_sane-使用方法"></a>
 ## delta_net_chunk_sane 使用方法
@@ -1046,6 +1049,7 @@ out, final_state = delta_net_chunk_sane(
 
 > Torch 后端的 `native` 在非 CPU 平台默认为 Triton 实现；JAX 侧 `triton` 需显式 `KERNEL_TYPE="triton"` 且安装 `jax-triton`，`native` 为纯 Keras ops。训练入口支持反向传播（含 `tau` 梯度）。chunk 家族只做 native + Triton，不做 CUDA/Pallas。
 > Triton 实现要求 `T % chunk_size == 0` 且 `chunk_size >= 16`，不做内部 padding。
+> `output_final_state=False` 或 `mask=None`（即 `use_mask = output_final_state and mask is not None` 为 False）时改用**独立的 no-mask 算子**：chunk 边界无条件执行 SANE，不读取 `mask`、不计算混合；只有 `output_final_state=True` 且显式传入 `mask` 时才使用带 mask 算子。
 
 <a id="分布式并行"></a>
 ## 分布式并行（JAX）

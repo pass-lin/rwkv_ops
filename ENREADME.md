@@ -680,6 +680,7 @@ Same interface as `gated_delta_net_recurrent_sane`, but **does not compute gradi
 1. The training entry point supports back-propagation (including `tau` gradients); the inference and single-step entry points **do not support gradients**.
 2. With the `cuda` backend, `chunk_size` is a compile-time constant and the kernel is lazily compiled per `(K, V, chunk_size)` on first use; different `chunk_size` values may be passed at call time (each compiles once). On the JAX side, `cuda` is an FFI implementation (`jax_cuda_kernel/`) covering the same training (with backward), inference, and single-step entry points.
 3. When `mask=None`, unconditional SANE is still performed, but `output_final_state=True` emits a `UserWarning` and sets `final_state=None` to avoid using a state potentially contaminated by padding.
+4. When `output_final_state=False` or `mask=None` (i.e. `use_mask = output_final_state and mask is not None` is False), an **independent no-mask operator** is used: SANE is applied unconditionally at every chunk boundary, without reading `mask` or computing the `state*(1-m) + sane*m` blend. The masked operator is used only when `output_final_state=True` and an explicit `mask` is passed.
 
 <a id="usage-of-gdn_chunk"></a>
 ## Usage of `gdn_chunk`
@@ -786,6 +787,7 @@ out, final_state = gated_delta_net_chunk_sane(
 
 > The training entry point supports back-propagation (including gradients for `tau`). On the JAX side, `triton` requires explicit `KERNEL_TYPE="triton"` and the `jax-triton` package.
 > When `mask=None` the output still uses unconditional SANE, but `output_final_state=True` emits a `UserWarning` and sets `final_state` to `None`.
+> When `output_final_state=False` or `mask=None` (i.e. `use_mask = output_final_state and mask is not None` is False), an **independent no-mask operator** is used: SANE is applied unconditionally at every chunk boundary, without reading `mask` or computing the blend. The masked operator is used only when `output_final_state=True` and an explicit `mask` is passed.
 
 ---
 
@@ -1014,6 +1016,7 @@ Single-step RNN entry point (decode phase); additionally takes `do_sane`.
 1. On the Torch backend, `native` defaults to the Triton implementation on non-CPU platforms; on the JAX side, `triton` requires explicit `KERNEL_TYPE="triton"` and the `jax-triton` package, while `native` is the Pallas implementation on GPU/TPU and pure Keras ops elsewhere. `cuda` provides the training (with backward including the `tau` gradient) / inference / single-step entry points on both PyTorch (C++ extension) and JAX (FFI, requires JAX >= 0.4.31); `chunk_size` is a compile-time constant, lazily compiled per `(K, V, chunk_size)`.
 2. The training entry point supports back-propagation (including the `tau` gradient); the inference and single-step entry points **do not support gradients**.
 3. `mask=None` still applies unconditional SANE; `output_final_state=False` also takes the unconditional-SANE path.
+4. When `output_final_state=False` or `mask=None` (i.e. `use_mask = output_final_state and mask is not None` is False), an **independent no-mask operator** is used: SANE is applied unconditionally at every chunk boundary, without reading `mask` or computing the blend. The masked operator is used only when `output_final_state=True` and an explicit `mask` is passed.
 
 <a id="usage-of-delta_net_chunk_sane"></a>
 ## Usage of `delta_net_chunk_sane`
@@ -1067,6 +1070,7 @@ out, final_state = delta_net_chunk_sane(
 
 > On the Torch backend, `native` defaults to the Triton implementation on non-CPU platforms; on the JAX side, `triton` requires an explicit `KERNEL_TYPE="triton"` plus the `jax-triton` package, and `native` is pure Keras ops. The training entry point supports back-propagation (including the `tau` gradient). The chunk family only ships native + Triton, no CUDA/Pallas.
 > The Triton implementation requires `T % chunk_size == 0` and `chunk_size >= 16`; it does not pad internally.
+> When `output_final_state=False` or `mask=None` (i.e. `use_mask = output_final_state and mask is not None` is False), an **independent no-mask operator** is used: SANE is applied unconditionally at every chunk boundary, without reading `mask` or computing the blend. The masked operator is used only when `output_final_state=True` and an explicit `mask` is passed.
 
 ---
 
