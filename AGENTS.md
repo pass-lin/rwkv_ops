@@ -1807,10 +1807,4 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
 no-mask 前向 vs native、no-mask 反向（含 `tau` 梯度）、`output_final_state=False` 忽略 mask（A1 语义）。
 chunk 家族的 4 个测试文件同样覆盖上述三类。
 
-### 15.4 后续待办
 
-1. **回归测试**：全部 no-mask 用例尚未在 GPU 上实际执行（交付时只做了语法/风格自检），
-   需按 `pytest tests/torch`、`pytest tests/jax` 分后端跑通。
-2. **多卡复核**：jax 侧 no-mask 分支的分片规则只做了单卡 1-device mesh 结构验证，
-   真实 DP/TP 行为需在多卡环境复核。
-3. 后续新增 SANE 家族算子时需同步补 no-mask 变体（见 §10 扩展指南）。
