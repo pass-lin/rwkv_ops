@@ -22,9 +22,11 @@ rwkv_ops/
 
 tests/                       # pytest 测试目录（按后端隔离）
 ├── conftest.py              # 公共 fixtures / 数值对比工具（不 import 任何后端！）
+├── test_package_imports.py   # 包完整性测试（静态 import 校验 + 后端 × KERNEL_TYPE 导入穷举）
 ├── jax/                     # JAX 后端测试
 ├── numpy/                   # NumPy 后端测试
 ├── tensorflow/              # TensorFlow 后端测试
+├── openvino/                # OpenVINO 后端测试
 └── torch/                   # PyTorch 后端测试
 
 clean_build_artifacts.py     # 编译产物清理（pytest 会话结束自动调用）
@@ -710,6 +712,10 @@ pytest tests/openvino -v
 
 # 跳过较重的 slow 测试
 pytest tests/jax -v -m "not slow"
+
+# 包完整性（import）测试：穷举后端 × KERNEL_TYPE 组合，见 §7.4
+pytest tests/test_package_imports.py -v
+pytest tests/test_package_imports.py -v -m "not slow"
 ```
 
 - 在**仓库根目录**运行（测试经根 conftest 的 `sys.path` 注入 import
@@ -770,6 +776,44 @@ pytest tests/jax -v -m "not slow"
     dh0 atol=1e-4 / rtol=1e-3。
   - RWKV-6 / mHC：一律 1e-2 / 1e-2。
 - mHC 测试同时包含速度和显存基准。
+
+### 7.4 包完整性（import）测试（`tests/test_package_imports.py`）
+
+`import rwkv_ops` 会在导入期按 `KERAS_BACKEND × KERNEL_TYPE` 实例化全部算子，
+因此"某模块导入了已删除/改名的符号""某后端桥接文件漏改"这类问题只会在
+**用户安装之后**才暴露，必须由本文件在提交/发布前拦住。历史案例：0.11.0 的
+`gdn_chunk_sane/triton/__init__.py` 导入了不存在的 `gdn_chunk_fwd_h_sane`，
+导致 jax + triton 下 `import rwkv_ops` 直接 ImportError。
+
+```bash
+pytest tests/test_package_imports.py -v                  # 全量（含 cuda 组合）
+pytest tests/test_package_imports.py -v -m "not slow"    # 跳过 cuda 组合
+```
+
+- 覆盖范围：
+  - **静态**：解析 `rwkv_ops/**/*.py` 的 AST，校验每条包内 `from ... import ...`
+    的名字在目标模块中真实存在；校验 `_PUBLIC_API` 清单与 `pyproject.toml`
+    版本号一致性。
+  - **运行期**：穷举 **5 后端 × 3 KERNEL_TYPE = 15 个组合**（`torch` / `jax` /
+    `numpy` / `tensorflow` / `openvino` × `native` / `triton` / `cuda`），每个组合
+    在**子进程**中 `import rwkv_ops`，并检查 `__init__.py` 暴露的全部符号存在、
+    公共 API 可调用（子进程可避免锁定当前 pytest 进程的 Keras 后端）。
+  - **加速桥接模块**：额外显式导入全部 `*_jax_triton*` / `*_torch_triton*` 模块——
+    这些模块只在硬件能力探测通过时才会被 `import rwkv_ops` 顺带导入，
+    无 GPU 环境也必须验证其名字正确性。
+- cuda 组合标记 `slow`：GPU 机器上导入期会触发 RWKV-6 FFI / C++ 扩展编译；
+  无 CUDA 机器上静默回退 native，导入代价与 native 组合相同。
+- **新增算子的强制要求**：
+  - 新家族 / 新入口必须在 `rwkv_ops/__init__.py` 暴露（自动纳入 15 组合矩阵），
+    并在 `_PUBLIC_API` 清单登记（与本文档 §1.1 表格同步，否则
+    `test_documented_public_api_exposed` 失败）。
+  - 新后端桥接模块按既有命名约定放置（`torch_triton_kernel.py` /
+    `jax_triton_kernel.py` / `jax_triton_op/` / `torch_triton_op/`）即自动纳入
+    桥接导入检查；命名不合约定会造成漏检。
+  - 交付前必须跑通全量 `pytest tests/test_package_imports.py -v`；只跑
+    `-m "not slow"` 时需在交付说明里注明 cuda 组合未验证。
+- `RWKV_OPS_IMPORT_CHECK_ROOT=<path>` 可把被测包目录指向其它副本（例如 wheel
+  解包目录），用于发布前复核已构建的发布物。
 
 ---
 
@@ -938,8 +982,11 @@ __global__ void wkv7_forward(...)
 - [ ] `.cu/.cuh/.cpp/.h` 文件已运行 `./scripts/format_cpp.sh`（LLVM style）。
 - [ ] 版本号两处同步（`pyproject.toml` + `rwkv_ops/__init__.py`）。
 - [ ] 新增编译产物已加入 `.gitignore` 排除 / `MANIFEST.in` 包含规则。
-- [ ] 新增/修改的算子已在 `rwkv_ops/__init__.py` 正确暴露。
+- [ ] 新增/修改的算子已在 `rwkv_ops/__init__.py` 正确暴露，并在
+  `tests/test_package_imports.py` 的 `_PUBLIC_API` 清单登记（见 §7.4）。
 - [ ] 对应后端测试已补充（文件名带后端前缀），并验证与 native 数值一致。
+- [ ] `pytest tests/test_package_imports.py -v` 通过：新增算子自动进入
+  5 后端 × 3 KERNEL_TYPE 的导入矩阵，新桥接模块按命名约定自动纳入（见 §7.4）。
 - [ ] Triton kernel 改动已同步检查 jax/torch 两个桥接。
 - [ ] 新 FFI 算子的构建目录已加入 `clean_build_artifacts._CLEAN_PATTERNS`。
 - [ ] 已更新 `AGENTS.md`、`README.md`、`ENREADME.md` 的支持矩阵。
@@ -998,8 +1045,12 @@ __global__ void wkv7_forward(...)
 5. 在 `tests/<backend>/` 中添加测试（文件名带后端前缀），fixture 挂进对应
    conftest（jax 侧按 `xxx_jax_op` / `xxx_jax_triton_op` / `xxx_jax_pallas_op`
    命名）。
-6. 新 FFI 算子的构建目录加入 `clean_build_artifacts._CLEAN_PATTERNS`。
-7. 更新本 `AGENTS.md`、`README.md`、`ENREADME.md` 中的支持矩阵。
+6. 在 `tests/test_package_imports.py` 的 `_PUBLIC_API` 清单登记新算子，并在
+   `rwkv_ops/__init__.py` 暴露：这样新算子自动进入全部 5 后端 × 3 KERNEL_TYPE
+   的导入矩阵；新桥接模块按既有命名约定（`*_torch_triton_kernel.py` /
+   `*_jax_triton_kernel.py` / `*_triton_op/`）放置即自动纳入检查（见 §7.4）。
+7. 新 FFI 算子的构建目录加入 `clean_build_artifacts._CLEAN_PATTERNS`。
+8. 更新本 `AGENTS.md`、`README.md`、`ENREADME.md` 中的支持矩阵。
 
 ---
 
@@ -1644,6 +1695,7 @@ y, state = jax.jit(op, out_shardings=(sharding, None))(x)
 | `rwkv_ops/cuda_tools/nvcc_wrap` | nvcc 包装器（绕过 CUDA 13.1/glibc 冲突），勿删、保持可执行 |
 | `clean_build_artifacts.py` | 编译产物清理（pytest 会话结束自动调用） |
 | `tests/conftest.py` | 共享 fixtures / 断言工具 / 自动清理钩子（不 import 后端） |
+| `tests/test_package_imports.py` | 包完整性测试：包内 import 静态校验 + 5 后端 × 3 KERNEL_TYPE 导入穷举（见 §7.4） |
 | `pyproject.toml` | 包元数据（hatchling）、依赖、版本号 |
 | `MANIFEST.in` | 源码分发文件清单 |
 
