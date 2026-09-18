@@ -164,6 +164,88 @@ def _gdn_chunk_fwd_h_sane_kernel(
         tl.store(p_ht, b_h.to(ht_ptr.dtype.element_ty), mask=m_h)
 
 
+def gdn_chunk_fwd_h_sane(
+    k,
+    w,
+    u,
+    g,
+    tau,
+    mask,
+    initial_state=None,
+    output_final_state=False,
+    chunk_size=64,
+    use_mask=True,
+):
+    """chunk 间状态递推 SANE 封装（带 mask）。
+
+    Args:
+        k: [B, H, T, K]，已归一化的 key。
+        w: [B, H, T, K]，WY 表示 w。
+        u: [B, H, T, V]，WY 表示 u。
+        g: [B, H, T]，cumsum 后的 log-space decay。
+        tau: [B, H, T//C]，SANE 阈值。
+        mask: [B, T//C]，per-chunk mask。
+        initial_state: [B, H, K, V] 或 [1, H, K, V]，可选。
+        output_final_state: bool。
+        chunk_size: int。
+        use_mask: bool，是否读取 mask。
+
+    Returns:
+        h: [B, H, T//chunk_size, K, V]，SANE 后进入状态。
+        v_new: [B, H, T, V]。
+        final_state: [B, H, K, V]，当 output_final_state=True。
+    """
+    B, H, T, K = k.shape
+    V = u.shape[-1]
+    C = chunk_size
+    N = T // C
+
+    h = torch.empty(B, H, N, K, V, dtype=torch.float32, device=k.device)
+    v_new = torch.empty_like(u)
+
+    if initial_state is not None:
+        h0 = initial_state.to(torch.float32)
+        if h0.shape[0] == 1 and B > 1:
+            h0 = h0.expand(B, *h0.shape[1:]).contiguous()
+    else:
+        h0 = None
+
+    ht = (
+        torch.empty(B, H, K, V, dtype=torch.float32, device=k.device)
+        if output_final_state
+        else None
+    )
+
+    BK = triton.next_power_of_2(K)
+
+    def grid(meta):
+        return (B * H * triton.cdiv(V, meta["BV"]),)
+
+    _gdn_chunk_fwd_h_sane_kernel[grid](
+        k,
+        w,
+        u,
+        g,
+        tau,
+        mask,
+        h0,
+        B,
+        H,
+        T,
+        K,
+        V,
+        h,
+        v_new,
+        ht,
+        C=C,
+        BK=BK,
+        USE_INITIAL_STATE=(h0 is not None),
+        STORE_FINAL_STATE=output_final_state,
+        USE_MASK=use_mask,
+    )
+    return h, v_new, ht
+
+
 @triton.autotune(
     configs=[
         triton.Config({"BV": 64}, num_warps=4, num_stages=2),
@@ -355,7 +437,7 @@ def gdn_chunk_fwd_h_sane_no_mask(
     def grid(meta):
         return (B * H * triton.cdiv(V, meta["BV"]),)
 
-    _gdn_chunk_fwd_h_sane_kernel[grid](
+    _gdn_chunk_fwd_h_sane_kernel_no_mask[grid](
         k,
         w,
         u,

@@ -11,9 +11,9 @@ from jax.experimental.custom_partitioning import custom_partitioning
 from jax.sharding import NamedSharding, PartitionSpec
 
 from .triton.chunk_bwd_dhu import _delta_net_chunk_bwd_dhu_sane_kernel
-from .triton.chunk_bwd_dhu import _delta_net_chunk_bwd_dhu_sane_no_mask_kernel
+from .triton.chunk_bwd_dhu import _delta_net_chunk_bwd_dhu_sane_kernel_no_mask
 from .triton.chunk_h import _delta_net_chunk_fwd_h_sane_kernel
-from .triton.chunk_h import _delta_net_chunk_fwd_h_sane_no_mask_kernel
+from .triton.chunk_h import _delta_net_chunk_fwd_h_sane_kernel_no_mask
 from ..delta_net_chunk.triton.chunk_bwd_dqk import _delta_net_chunk_bwd_dqk_kernel
 from ..delta_net_chunk.triton.chunk_bwd_dv import _delta_net_chunk_bwd_dv_local_kernel
 from ..delta_net_chunk.triton.chunk_o import _delta_net_chunk_fwd_o_kernel
@@ -317,7 +317,7 @@ def _fwd_h_sane_no_mask_call(k, w, u, tau, h0, chunk_size):
         T,
         K,
         V,
-        kernel=_delta_net_chunk_fwd_h_sane_no_mask_kernel,
+        kernel=_delta_net_chunk_fwd_h_sane_kernel_no_mask,
         out_shape=out_shapes,
         grid=grid,
         C=C,
@@ -529,7 +529,7 @@ def _bwd_dhu_sane_no_mask_call(q, k, w, h, v_new, tau, do, dv_local, dht, chunk_
         K,
         V,
         scale,
-        kernel=_delta_net_chunk_bwd_dhu_sane_no_mask_kernel,
+        kernel=_delta_net_chunk_bwd_dhu_sane_kernel_no_mask,
         out_shape=out_shapes,
         grid=grid,
         C=C,

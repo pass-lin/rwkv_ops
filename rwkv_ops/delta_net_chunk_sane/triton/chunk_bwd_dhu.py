@@ -264,6 +264,91 @@ def _delta_net_chunk_bwd_dhu_sane_kernel(
     tl.store(p_dh0, b_dh.to(dh0_ptr.dtype.element_ty), mask=m_h)
 
 
+def delta_net_chunk_bwd_dhu_sane(
+    q,
+    k,
+    w,
+    h,
+    v_new,
+    tau,
+    mask,
+    do,
+    dv_local,
+    dht=None,
+    scale=1.0,
+    chunk_size=64,
+    use_mask=True,
+):
+    """状态反向扫描 SANE 封装（带 mask）。
+
+    Args:
+        q: [B, H, T, K]。
+        k: [B, H, T, K]。
+        w: [B, H, T, K]。
+        h: [B, H, T//C, K, V]，SANE 后进入状态。
+        v_new: [B, H, T, V]。
+        tau: [B, H, T//C]，SANE 阈值。
+        mask: [B, T//C]，per-chunk mask。
+        do: [B, H, T, V]。
+        dv_local: [B, H, T, V]。
+        dht: [B, H, K, V]，可选。
+        scale: float。
+        chunk_size: int。
+        use_mask: bool，是否读取 mask。
+
+    Returns:
+        dh: [B, H, T//C, K, V]。
+        dh0: [B, H, K, V]。
+        dv: [B, H, T, V]。
+        dtau: [B, H, T//C]。
+    """
+    B, H, T, K = q.shape
+    V = do.shape[-1]
+    C = chunk_size
+    N = T // C
+
+    dh = torch.empty(B, H, N, K, V, dtype=torch.float32, device=q.device)
+    dv = torch.empty_like(do)
+    dh0 = torch.empty(B, H, K, V, dtype=torch.float32, device=q.device)
+    # dtau 由 kernel 内 atomic_add 累加，必须零初始化。
+    dtau = torch.zeros(B, H, N, dtype=torch.float32, device=q.device)
+
+    BK = triton.next_power_of_2(K)
+
+    def grid(meta):
+        return (B * H * triton.cdiv(V, meta["BV"]),)
+
+    if dht is None:
+        dht = torch.zeros(B, H, K, V, dtype=torch.float32, device=q.device)
+
+    _delta_net_chunk_bwd_dhu_sane_kernel[grid](
+        q,
+        k,
+        w,
+        h,
+        v_new,
+        tau,
+        mask,
+        do,
+        dv_local,
+        dht,
+        B,
+        H,
+        T,
+        K,
+        V,
+        scale,
+        dh,
+        dh0,
+        dv,
+        dtau,
+        C=C,
+        BK=BK,
+        USE_MASK=use_mask,
+    )
+    return dh, dh0, dv, dtau
+
+
 @triton.autotune(
     configs=[
         triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
@@ -539,7 +624,7 @@ def delta_net_chunk_bwd_dhu_sane_no_mask(
 
     if dht is None:
         dht = torch.zeros(B, H, K, V, dtype=torch.float32, device=q.device)
-    _delta_net_chunk_bwd_dhu_sane_kernel[grid](
+    _delta_net_chunk_bwd_dhu_sane_kernel_no_mask[grid](
         q,
         k,
         w,

@@ -20,9 +20,9 @@ from .triton import (
     gdn_chunk_recompute_w_u,
 )
 from .triton.chunk_bwd_dhu import _gdn_chunk_bwd_dhu_sane_kernel
-from .triton.chunk_bwd_dhu import _gdn_chunk_bwd_dhu_sane_no_mask_kernel
+from .triton.chunk_bwd_dhu import _gdn_chunk_bwd_dhu_sane_kernel_no_mask
 from .triton.chunk_h import _gdn_chunk_fwd_h_sane_kernel
-from .triton.chunk_h import _gdn_chunk_fwd_h_sane_no_mask_kernel
+from .triton.chunk_h import _gdn_chunk_fwd_h_sane_kernel_no_mask
 from ..gdn_chunk.triton.chunk_bwd_dqkwg import _gdn_chunk_bwd_dqkwg_kernel
 from ..gdn_chunk.triton.chunk_bwd_dv import _gdn_chunk_bwd_dv_local_kernel
 from ..gdn_chunk.triton.chunk_o import _gdn_chunk_fwd_o_kernel
@@ -40,7 +40,7 @@ def _clear_gdn_chunk_sane_autotune_cache():
     """清空 gdn_chunk_sane 所有 Triton kernel 的 autotune cache。"""
     for kernel in (
         _gdn_chunk_fwd_h_sane_kernel,
-        _gdn_chunk_fwd_h_sane_no_mask_kernel,
+        _gdn_chunk_fwd_h_sane_kernel_no_mask,
         _gdn_chunk_fwd_o_kernel,
         _gdn_chunk_fwd_intra_kernel,
         _gdn_chunk_recompute_w_u_fwd_kernel,
@@ -48,7 +48,7 @@ def _clear_gdn_chunk_sane_autotune_cache():
         _gdn_chunk_l2norm_bwd_kernel,
         _chunk_local_cumsum_kernel,
         _gdn_chunk_bwd_dhu_sane_kernel,
-        _gdn_chunk_bwd_dhu_sane_no_mask_kernel,
+        _gdn_chunk_bwd_dhu_sane_kernel_no_mask,
         _gdn_chunk_bwd_dqkwg_kernel,
         _gdn_chunk_bwd_dv_local_kernel,
         _gdn_chunk_prepare_wy_repr_bwd_kernel,
@@ -140,6 +140,7 @@ class GatedDeltaNetChunkSaneTritonFunction(torch.autograd.Function):
                 k,
                 w,
                 u,
+                g,
                 tau,
                 mask,
                 initial_state=initial_state,
@@ -152,6 +153,7 @@ class GatedDeltaNetChunkSaneTritonFunction(torch.autograd.Function):
                 k,
                 w,
                 u,
+                g,
                 tau,
                 initial_state=initial_state,
                 output_final_state=output_final_state,
@@ -228,6 +230,7 @@ class GatedDeltaNetChunkSaneTritonFunction(torch.autograd.Function):
                 q,
                 k,
                 w,
+                g,
                 h,
                 v_new,
                 tau,
@@ -244,6 +247,7 @@ class GatedDeltaNetChunkSaneTritonFunction(torch.autograd.Function):
                 q,
                 k,
                 w,
+                g,
                 h,
                 v_new,
                 tau,

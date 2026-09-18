@@ -19,9 +19,9 @@ from .triton import (
     delta_net_chunk_recompute_w_u,
 )
 from .triton.chunk_bwd_dhu import _delta_net_chunk_bwd_dhu_sane_kernel
-from .triton.chunk_bwd_dhu import _delta_net_chunk_bwd_dhu_sane_no_mask_kernel
+from .triton.chunk_bwd_dhu import _delta_net_chunk_bwd_dhu_sane_kernel_no_mask
 from .triton.chunk_h import _delta_net_chunk_fwd_h_sane_kernel
-from .triton.chunk_h import _delta_net_chunk_fwd_h_sane_no_mask_kernel
+from .triton.chunk_h import _delta_net_chunk_fwd_h_sane_kernel_no_mask
 from ..delta_net_chunk.triton.chunk_bwd_dqk import _delta_net_chunk_bwd_dqk_kernel
 from ..delta_net_chunk.triton.chunk_bwd_dv import _delta_net_chunk_bwd_dv_local_kernel
 from ..delta_net_chunk.triton.chunk_o import _delta_net_chunk_fwd_o_kernel
@@ -38,14 +38,14 @@ def _clear_delta_net_chunk_sane_autotune_cache():
     """清空 delta_net_chunk_sane 所有 Triton kernel 的 autotune cache。"""
     for kernel in (
         _delta_net_chunk_fwd_h_sane_kernel,
-        _delta_net_chunk_fwd_h_sane_no_mask_kernel,
+        _delta_net_chunk_fwd_h_sane_kernel_no_mask,
         _delta_net_chunk_fwd_o_kernel,
         _delta_net_chunk_fwd_intra_kernel,
         _delta_net_chunk_recompute_w_u_fwd_kernel,
         _delta_net_chunk_l2norm_fwd_kernel,
         _delta_net_chunk_l2norm_bwd_kernel,
         _delta_net_chunk_bwd_dhu_sane_kernel,
-        _delta_net_chunk_bwd_dhu_sane_no_mask_kernel,
+        _delta_net_chunk_bwd_dhu_sane_kernel_no_mask,
         _delta_net_chunk_bwd_dqk_kernel,
         _delta_net_chunk_bwd_dv_local_kernel,
         _delta_net_chunk_prepare_wy_repr_bwd_kernel,

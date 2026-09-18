@@ -12,9 +12,9 @@ from jax.sharding import NamedSharding, PartitionSpec
 
 # SANE 专用 kernel 从本包导入。
 from .triton.chunk_h import _gdn_chunk_fwd_h_sane_kernel
-from .triton.chunk_h import _gdn_chunk_fwd_h_sane_no_mask_kernel
+from .triton.chunk_h import _gdn_chunk_fwd_h_sane_kernel_no_mask
 from .triton.chunk_bwd_dhu import _gdn_chunk_bwd_dhu_sane_kernel
-from .triton.chunk_bwd_dhu import _gdn_chunk_bwd_dhu_sane_no_mask_kernel
+from .triton.chunk_bwd_dhu import _gdn_chunk_bwd_dhu_sane_kernel_no_mask
 
 # 其余未改动 kernel 从 gdn_chunk.triton 子模块导入。
 from ..gdn_chunk.triton.cumsum import _chunk_local_cumsum_kernel
@@ -365,7 +365,7 @@ def _fwd_h_sane_no_mask_call(k, w, u, g, tau, h0, chunk_size):
         T,
         K,
         V,
-        kernel=_gdn_chunk_fwd_h_sane_no_mask_kernel,
+        kernel=_gdn_chunk_fwd_h_sane_kernel_no_mask,
         out_shape=out_shapes,
         grid=grid,
         C=C,
@@ -585,7 +585,7 @@ def _bwd_dhu_sane_no_mask_call(
         K,
         V,
         scale,
-        kernel=_gdn_chunk_bwd_dhu_sane_no_mask_kernel,
+        kernel=_gdn_chunk_bwd_dhu_sane_kernel_no_mask,
         out_shape=out_shapes,
         grid=grid,
         C=C,
