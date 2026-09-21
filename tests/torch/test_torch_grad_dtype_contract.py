@@ -63,6 +63,11 @@ CHUNK_FAMILIES = [
 ALL_FAMILIES = FAMILIES + CHUNK_FAMILIES
 ALL_FAMILY_IDS = [family[0] for family in ALL_FAMILIES]
 
+# torch 侧的 Triton 桥接由 KERNEL_TYPE="native" 在非 CPU 平台上自动选中
+# （见 rwkv_ops.utils._use_triton）；KERNEL_TYPE="triton" 在 torch 后端会静默回退
+# 纯 Keras native，因此这里传 "native" 覆盖 Triton 桥接，用例 id 仍标记为 triton。
+TRITON_KERNEL_TYPE = pytest.param("native", id="triton")
+
 
 @pytest.fixture(scope="module")
 def contract_device():
@@ -77,12 +82,12 @@ def _to(arr, dtype, device):
     return torch.from_numpy(arr).to(device=device, dtype=dtype)
 
 
-def _make_primals(inputs, device, has_g, has_sane):
-    """构造符合 dtype 契约的输入：q/k/v 为 bfloat16，其余为 float32。"""
+def _make_primals(inputs, device, has_g, has_sane, qv_dtype=torch.bfloat16):
+    """构造符合 dtype 契约的输入：q/k/v 为 qv_dtype，其余为 float32。"""
     primals = {
-        "q": _to(inputs["q"], torch.bfloat16, device),
-        "k": _to(inputs["k"], torch.bfloat16, device),
-        "v": _to(inputs["v"], torch.bfloat16, device),
+        "q": _to(inputs["q"], qv_dtype, device),
+        "k": _to(inputs["k"], qv_dtype, device),
+        "v": _to(inputs["v"], qv_dtype, device),
         "beta": _to(inputs["beta"], torch.float32, device),
         "h0": _to(inputs["h0"], torch.float32, device),
     }
@@ -133,7 +138,7 @@ def _leaf_tensors(primals):
     return names, leaves
 
 
-@pytest.mark.parametrize("kernel_type", ["triton"])
+@pytest.mark.parametrize("kernel_type", [TRITON_KERNEL_TYPE])
 @pytest.mark.parametrize("family", ALL_FAMILIES, ids=ALL_FAMILY_IDS)
 def test_recurrent_backward_dtype_contract(
     family, kernel_type, request, contract_device
@@ -158,7 +163,7 @@ def test_recurrent_backward_dtype_contract(
     )
 
 
-@pytest.mark.parametrize("kernel_type", ["triton"])
+@pytest.mark.parametrize("kernel_type", [TRITON_KERNEL_TYPE])
 @pytest.mark.parametrize("family", ALL_FAMILIES, ids=ALL_FAMILY_IDS)
 def test_recurrent_upstream_bf16_chain(family, kernel_type, request, contract_device):
     """上游 bf16 层（silu）输出直连算子时，反向链路必须可执行且梯度为 bf16。"""
@@ -177,7 +182,7 @@ def test_recurrent_upstream_bf16_chain(family, kernel_type, request, contract_de
     )
 
 
-@pytest.mark.parametrize("kernel_type", ["triton"])
+@pytest.mark.parametrize("kernel_type", [TRITON_KERNEL_TYPE])
 @pytest.mark.parametrize("family", ALL_FAMILIES, ids=ALL_FAMILY_IDS)
 def test_recurrent_mismatched_qkv_dtype_raises(
     family, kernel_type, request, contract_device
@@ -197,13 +202,19 @@ def test_recurrent_mismatched_qkv_dtype_raises(
 def test_recurrent_cuda_fp32_input_warns_and_restores_dtype(
     family, request, contract_device
 ):
-    """CUDA 路径把非 bfloat16 输入 cast 到 bfloat16，并按输入 dtype 返回 out。"""
+    """CUDA 路径要求 q/k/v 同 dtype；全 fp32 时警告并 cast，out 按输入 dtype 还原。"""
     fid, factory, fixture_name, has_g, has_sane = family
     inputs = request.getfixturevalue(fixture_name)
     op, primals = _build(factory, "cuda", inputs, contract_device, has_g, has_sane)
-    fp32 = dict(primals)
-    fp32["v"] = _to(inputs["v"], torch.float32, contract_device)
 
+    mixed = dict(primals)
+    mixed["v"] = primals["v"].to(torch.float32)
+    with pytest.raises((ValueError, TypeError)):
+        _apply(op, mixed, has_g, has_sane)
+
+    fp32 = _make_primals(
+        inputs, contract_device, has_g, has_sane, qv_dtype=torch.float32
+    )
     with pytest.warns(UserWarning):
         out_fp32, state_fp32 = _apply(op, fp32, has_g, has_sane)
 

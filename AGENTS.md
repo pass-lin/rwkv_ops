@@ -402,6 +402,13 @@ chunkwise 版本专门放分块并行实现（训练 / 推理），recurrent 版
   否则 bf16 图会上游出现 `lax.mul requires arguments to have the same dtypes`。
 - CUDA 内核的 FFI `Ret` / C++ 模板实例化声明不变（`dq`/`dk` 为 `DT`，
   `dv`/`dg`/`dbeta`/`dh0`/`dtau` 为 fp32），dtype 归一统一在 Python 包装层完成。
+- **同 dtype 强校验只在加速实现里落地**：`q/k/v` 不一致的 `ValueError`/`TypeError`
+  由 CUDA / Triton / Pallas 入口（`_check_qkv_dtype`、`_normalize_inputs`）抛出；
+  纯 Keras 参考实现内部统一升 fp32，不做该校验（混 dtype 不会算错，也不产生
+  反向 dtype 错误）。
+- **torch 侧 Triton 桥接由 `KERNEL_TYPE="native"` 选中**（非 CPU 平台，见
+  `rwkv_ops/utils._use_triton`）；这些家族的工厂对 `KERNEL_TYPE="triton"` 会
+  静默回退纯 Keras native，写测试时不要用 "triton" 代表 torch 的 Triton 桥接。
 
 ### 3.4 共享与复用
 
@@ -780,6 +787,10 @@ pytest tests/test_package_imports.py -v -m "not slow"
   cast 到 bfloat16 + `out` 还原为 fp32」。参考实现：
   `tests/jax/test_jax_grad_dtype_contract.py`、
   `tests/torch/test_torch_grad_dtype_contract.py`。
+  两个文件都覆盖 8 个家族（4 recurrent + 4 chunk）；dtype 强校验与 CUDA
+  warn+cast 用例只挂在加速 kernel 上（torch 侧用 `KERNEL_TYPE="native"`
+  取 Triton 桥接、用 `"cuda"` 取 C++ 扩展；jax 侧 recurrent 家族 native 即
+  Pallas，chunk 家族只认 `"triton"`）。
 - **双精度覆盖（全项目默认强制）**：每个加速内核（Triton/CUDA/Pallas）的
   测试必须同时包含 **bf16和fp32用例**
   情况覆盖；两组共用同一组 numpy 输入，分别 cast 后按各自红线判定。

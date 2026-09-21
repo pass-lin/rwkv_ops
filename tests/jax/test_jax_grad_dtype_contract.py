@@ -63,6 +63,15 @@ CHUNK_FAMILIES = [
 ALL_FAMILIES = FAMILIES + CHUNK_FAMILIES
 ALL_FAMILY_IDS = [family[0] for family in ALL_FAMILIES]
 
+# 强校验 q/k/v 同 dtype 的只应是加速实现：recurrent 家族在 GPU 上 KERNEL_TYPE="native"
+# 即 Pallas kernel，chunk 家族只有 "triton" 是加速实现（native 为纯 Keras 参考实现）。
+RAISE_CASES = [
+    (family, kernel_type)
+    for family in ALL_FAMILIES
+    for kernel_type in (("native", "triton") if family in FAMILIES else ("triton",))
+]
+RAISE_IDS = [f"{family[0]}-{kernel_type}" for family, kernel_type in RAISE_CASES]
+
 
 @pytest.fixture(scope="module")
 def contract_device():
@@ -78,12 +87,12 @@ def _to(arr, dtype, device):
     return jax.device_put(jnp.asarray(arr, dtype=dtype), device)
 
 
-def _make_primals(inputs, device, has_g, has_sane):
-    """构造符合 dtype 契约的输入：q/k/v 为 bfloat16，其余为 float32。"""
+def _make_primals(inputs, device, has_g, has_sane, qv_dtype=jnp.bfloat16):
+    """构造符合 dtype 契约的输入：q/k/v 为 qv_dtype，其余为 float32。"""
     primals = {
-        "q": _to(inputs["q"], jnp.bfloat16, device),
-        "k": _to(inputs["k"], jnp.bfloat16, device),
-        "v": _to(inputs["v"], jnp.bfloat16, device),
+        "q": _to(inputs["q"], qv_dtype, device),
+        "k": _to(inputs["k"], qv_dtype, device),
+        "v": _to(inputs["v"], qv_dtype, device),
         "beta": _to(inputs["beta"], jnp.float32, device),
         "h0": _to(inputs["h0"], jnp.float32, device),
     }
@@ -144,7 +153,8 @@ def test_recurrent_backward_dtype_contract(
     def loss(*tensors):
         local = dict(zip(names, tensors))
         # mask 不参与求导，但仍需传给算子（SANE 路径要求显式 mask）。
-        local.setdefault("mask", primals["mask"])
+        if has_sane:
+            local["mask"] = primals["mask"]
         return _loss(op, local, has_g, has_sane)
 
     value, grads = jax.value_and_grad(loss, argnums=range(len(names)))(*args)
@@ -179,12 +189,10 @@ def test_recurrent_upstream_bf16_chain(family, kernel_type, request, contract_de
     )
 
 
-@pytest.mark.parametrize("kernel_type", ["native", "triton"])
-@pytest.mark.parametrize("family", ALL_FAMILIES, ids=ALL_FAMILY_IDS)
-def test_recurrent_mismatched_qkv_dtype_raises(
-    family, kernel_type, request, contract_device
-):
-    """q/k/v dtype 不一致时必须显式报错，而不是静默 cast。"""
+@pytest.mark.parametrize("case", RAISE_CASES, ids=RAISE_IDS)
+def test_recurrent_mismatched_qkv_dtype_raises(case, request, contract_device):
+    """q/k/v dtype 不一致时加速实现必须显式报错，而不是静默 cast。"""
+    family, kernel_type = case
     fid, factory, fixture_name, has_g, has_sane = family
     inputs = request.getfixturevalue(fixture_name)
     op, primals = _build(factory, kernel_type, inputs, contract_device, has_g, has_sane)
@@ -199,13 +207,17 @@ def test_recurrent_mismatched_qkv_dtype_raises(
 def test_recurrent_cuda_fp32_input_warns_and_restores_dtype(
     family, request, contract_device
 ):
-    """CUDA 路径把非 bfloat16 输入 cast 到 bfloat16，并按输入 dtype 返回 out。"""
+    """CUDA 路径要求 q/k/v 同 dtype；全 fp32 时警告并 cast，out 按输入 dtype 还原。"""
     fid, factory, fixture_name, has_g, has_sane = family
     inputs = request.getfixturevalue(fixture_name)
     op, primals = _build(factory, "cuda", inputs, contract_device, has_g, has_sane)
-    fp32 = dict(primals)
-    fp32["v"] = _to(inputs["v"], jnp.float32, contract_device)
 
+    mixed = dict(primals)
+    mixed["v"] = jnp.asarray(primals["v"], jnp.float32)
+    with pytest.raises((ValueError, TypeError)):
+        _apply(op, mixed, has_g, has_sane)
+
+    fp32 = _make_primals(inputs, contract_device, has_g, has_sane, qv_dtype=jnp.float32)
     with pytest.warns(UserWarning):
         out_fp32, state_fp32 = _apply(op, fp32, has_g, has_sane)
 
