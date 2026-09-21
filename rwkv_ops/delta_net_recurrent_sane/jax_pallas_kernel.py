@@ -166,6 +166,14 @@ def _transpose_head(x: jnp.ndarray, head_first: bool) -> jnp.ndarray:
     raise ValueError(f"_transpose_head only supports 3D or 4D inputs, got {x.ndim}D")
 
 
+def _check_qkv_dtype(q, k, v) -> None:
+    """q/k/v 必须同 dtype，否则无法共用同一套 kernel 实例化。"""
+    if not (q.dtype == k.dtype == v.dtype):
+        raise ValueError(
+            f"q/k/v must share the same dtype, got {q.dtype}, {k.dtype}, {v.dtype}"
+        )
+
+
 def _transpose_tau(tau: jnp.ndarray) -> jnp.ndarray:
     """tau 公共接口始终为 [B, T//chunk_size, N]；需要转成 head-first [B, N, T//chunk_size]。"""
     tau = jnp.asarray(tau, dtype=jnp.float32)
@@ -1071,7 +1079,15 @@ def _dn_train_bwd(chunk_size: int, res, grads):
         mask,
         chunk_size,
     )
-    return dq, dk, dv, dbeta, dtau, None, dh0
+    return (
+        jnp.asarray(dq, q.dtype),
+        jnp.asarray(dk, k.dtype),
+        jnp.asarray(dv, v.dtype),
+        jnp.asarray(dbeta, jnp.float32),
+        jnp.asarray(dtau, jnp.float32),
+        None,
+        jnp.asarray(dh0, jnp.float32),
+    )
 
 
 _delta_net_recurrent_sane_train.defvjp(_dn_train_fwd, _dn_train_bwd)
@@ -1238,7 +1254,14 @@ def _dn_train_bwd_no_mask(chunk_size: int, res, grads):
         tau,
         chunk_size,
     )
-    return dq, dk, dv, dbeta, dtau, dh0
+    return (
+        jnp.asarray(dq, q.dtype),
+        jnp.asarray(dk, k.dtype),
+        jnp.asarray(dv, v.dtype),
+        jnp.asarray(dbeta, jnp.float32),
+        jnp.asarray(dtau, jnp.float32),
+        jnp.asarray(dh0, jnp.float32),
+    )
 
 
 _delta_net_recurrent_sane_train_no_mask.defvjp(
@@ -1426,6 +1449,11 @@ def delta_net_recurrent_sane(
         ValueError: T 不被 chunk_size 整除，或 tau/mask 形状不匹配。
     """
     dtype = v.dtype
+    _check_qkv_dtype(q, k, v)
+    q = jnp.asarray(q, dtype)
+    k = jnp.asarray(k, dtype)
+    v = jnp.asarray(v, dtype)
+    beta = jnp.asarray(beta, jnp.float32)
     q = _transpose_head(q, head_first)
     k = _transpose_head(k, head_first)
     v = _transpose_head(v, head_first)
@@ -1524,6 +1552,11 @@ def delta_net_recurrent_sane_inference(
         ValueError: tau/mask 形状不匹配。
     """
     dtype = v.dtype
+    _check_qkv_dtype(q, k, v)
+    q = jnp.asarray(q, dtype)
+    k = jnp.asarray(k, dtype)
+    v = jnp.asarray(v, dtype)
+    beta = jnp.asarray(beta, jnp.float32)
     q = _transpose_head(q, head_first)
     k = _transpose_head(k, head_first)
     v = _transpose_head(v, head_first)
@@ -1631,6 +1664,7 @@ def delta_net_recurrent_sane_single_step(
         )
 
     dtype = v.dtype
+    _check_qkv_dtype(q, k, v)
     q = jnp.asarray(q, dtype=jnp.float32)
     k = jnp.asarray(k, dtype=jnp.float32)
     v = jnp.asarray(v, dtype=jnp.float32)

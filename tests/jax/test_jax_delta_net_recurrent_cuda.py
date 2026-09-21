@@ -48,11 +48,11 @@ def _dn_value_and_grad(fn, q, k, v, beta, h0):
 @pytest.mark.slow
 def test_delta_net_cuda_recurrent_matches_native(delta_net_inputs, dn_jax_device):
     """JAX CUDA recurrent 训练算子前向结果与 native Keras 参考对齐。"""
-    q = _to_jax_tensor(delta_net_inputs["q"], dn_jax_device)
-    k = _to_jax_tensor(delta_net_inputs["k"], dn_jax_device)
-    v = _to_jax_tensor(delta_net_inputs["v"], dn_jax_device)
-    beta = _to_jax_tensor(delta_net_inputs["beta"], dn_jax_device)
-    h0 = _to_jax_tensor(delta_net_inputs["h0"], dn_jax_device)
+    q = _to_jax_tensor(delta_net_inputs["q"], dn_jax_device, jnp.bfloat16)
+    k = _to_jax_tensor(delta_net_inputs["k"], dn_jax_device, jnp.bfloat16)
+    v = _to_jax_tensor(delta_net_inputs["v"], dn_jax_device, jnp.bfloat16)
+    beta = _to_jax_tensor(delta_net_inputs["beta"], dn_jax_device, jnp.float32)
+    h0 = _to_jax_tensor(delta_net_inputs["h0"], dn_jax_device, jnp.float32)
 
     out_cuda, state_cuda = dn_cuda_recurrent(
         q, k, v, beta, initial_state=h0, output_final_state=True
@@ -62,21 +62,21 @@ def test_delta_net_cuda_recurrent_matches_native(delta_net_inputs, dn_jax_device
     )
 
     assert_allclose_with_stats(
-        out_ref, out_cuda, "cuda recurrent vs native output", atol=1e-4, rtol=1e-3
+        out_ref, out_cuda, "cuda recurrent vs native output", atol=1e-2, rtol=1e-2
     )
     assert_allclose_with_stats(
-        state_ref, state_cuda, "cuda recurrent vs native state", atol=1e-4, rtol=1e-3
+        state_ref, state_cuda, "cuda recurrent vs native state", atol=1e-2, rtol=1e-2
     )
 
 
 @pytest.mark.jax
 def test_delta_net_cuda_inference_matches_native(delta_net_inputs, dn_jax_device):
     """JAX CUDA recurrent 推理算子前向结果与 native Keras 参考对齐。"""
-    q = _to_jax_tensor(delta_net_inputs["q"], dn_jax_device)
-    k = _to_jax_tensor(delta_net_inputs["k"], dn_jax_device)
-    v = _to_jax_tensor(delta_net_inputs["v"], dn_jax_device)
-    beta = _to_jax_tensor(delta_net_inputs["beta"], dn_jax_device)
-    h0 = _to_jax_tensor(delta_net_inputs["h0"], dn_jax_device)
+    q = _to_jax_tensor(delta_net_inputs["q"], dn_jax_device, jnp.bfloat16)
+    k = _to_jax_tensor(delta_net_inputs["k"], dn_jax_device, jnp.bfloat16)
+    v = _to_jax_tensor(delta_net_inputs["v"], dn_jax_device, jnp.bfloat16)
+    beta = _to_jax_tensor(delta_net_inputs["beta"], dn_jax_device, jnp.float32)
+    h0 = _to_jax_tensor(delta_net_inputs["h0"], dn_jax_device, jnp.float32)
 
     out_cuda, state_cuda = dn_cuda_inference(
         q, k, v, beta, initial_state=h0, output_final_state=True
@@ -86,21 +86,21 @@ def test_delta_net_cuda_inference_matches_native(delta_net_inputs, dn_jax_device
     )
 
     assert_allclose_with_stats(
-        out_ref, out_cuda, "cuda inference vs native output", atol=1e-4, rtol=1e-3
+        out_ref, out_cuda, "cuda inference vs native output", atol=1e-2, rtol=1e-2
     )
     assert_allclose_with_stats(
-        state_ref, state_cuda, "cuda inference vs native state", atol=1e-4, rtol=1e-3
+        state_ref, state_cuda, "cuda inference vs native state", atol=1e-2, rtol=1e-2
     )
 
 
 @pytest.mark.jax
 def test_delta_net_cuda_single_step_matches_native(delta_net_inputs, dn_jax_device):
     """JAX CUDA recurrent 单步 RNN 算子前向结果与 native Keras 参考对齐。"""
-    q = _to_jax_tensor(delta_net_inputs["q"][:, 0], dn_jax_device)
-    k = _to_jax_tensor(delta_net_inputs["k"][:, 0], dn_jax_device)
-    v = _to_jax_tensor(delta_net_inputs["v"][:, 0], dn_jax_device)
-    beta = _to_jax_tensor(delta_net_inputs["beta"][:, 0], dn_jax_device)
-    h0 = _to_jax_tensor(delta_net_inputs["h0"], dn_jax_device)
+    q = _to_jax_tensor(delta_net_inputs["q"][:, 0], dn_jax_device, jnp.bfloat16)
+    k = _to_jax_tensor(delta_net_inputs["k"][:, 0], dn_jax_device, jnp.bfloat16)
+    v = _to_jax_tensor(delta_net_inputs["v"][:, 0], dn_jax_device, jnp.bfloat16)
+    beta = _to_jax_tensor(delta_net_inputs["beta"][:, 0], dn_jax_device, jnp.float32)
+    h0 = _to_jax_tensor(delta_net_inputs["h0"], dn_jax_device, jnp.float32)
 
     out_cuda, state_cuda = dn_cuda_single_step(
         q, k, v, beta, initial_state=h0, output_final_state=True
@@ -110,10 +110,10 @@ def test_delta_net_cuda_single_step_matches_native(delta_net_inputs, dn_jax_devi
     )
 
     assert_allclose_with_stats(
-        out_ref, out_cuda, "cuda single step vs native output", atol=1e-4, rtol=1e-3
+        out_ref, out_cuda, "cuda single step vs native output", atol=1e-2, rtol=1e-2
     )
     assert_allclose_with_stats(
-        state_ref, state_cuda, "cuda single step vs native state", atol=1e-4, rtol=1e-3
+        state_ref, state_cuda, "cuda single step vs native state", atol=1e-2, rtol=1e-2
     )
 
 
@@ -149,11 +149,11 @@ def test_delta_net_cuda_bfloat16(delta_net_inputs, dn_jax_device):
 @pytest.mark.slow
 def test_delta_net_cuda_recurrent_backward(delta_net_inputs, dn_jax_device):
     """JAX CUDA recurrent 训练算子反向梯度与 native Keras 参考对齐。"""
-    q = _to_jax_tensor(delta_net_inputs["q"], dn_jax_device)
-    k = _to_jax_tensor(delta_net_inputs["k"], dn_jax_device)
-    v = _to_jax_tensor(delta_net_inputs["v"], dn_jax_device)
-    beta = _to_jax_tensor(delta_net_inputs["beta"], dn_jax_device)
-    h0 = _to_jax_tensor(delta_net_inputs["h0"], dn_jax_device)
+    q = _to_jax_tensor(delta_net_inputs["q"], dn_jax_device, jnp.bfloat16)
+    k = _to_jax_tensor(delta_net_inputs["k"], dn_jax_device, jnp.bfloat16)
+    v = _to_jax_tensor(delta_net_inputs["v"], dn_jax_device, jnp.bfloat16)
+    beta = _to_jax_tensor(delta_net_inputs["beta"], dn_jax_device, jnp.float32)
+    h0 = _to_jax_tensor(delta_net_inputs["h0"], dn_jax_device, jnp.float32)
 
     _, grads_ref = _dn_value_and_grad(dn_native_recurrent, q, k, v, beta, h0)
     _, grads_cuda = _dn_value_and_grad(dn_cuda_recurrent, q, k, v, beta, h0)
@@ -164,7 +164,7 @@ def test_delta_net_cuda_recurrent_backward(delta_net_inputs, dn_jax_device):
             gr,
             gc,
             f"grad_{name} cuda vs native",
-            atol=7e-3,
+            atol=1e-2,
             rtol=1e-2,
         )
 
@@ -172,11 +172,11 @@ def test_delta_net_cuda_recurrent_backward(delta_net_inputs, dn_jax_device):
 @pytest.mark.jax
 def test_delta_net_cuda_recurrent_head_first(delta_net_inputs, dn_jax_device):
     """JAX CUDA recurrent 训练算子 head_first 布局与默认布局结果一致。"""
-    q = _to_jax_tensor(delta_net_inputs["q"], dn_jax_device)
-    k = _to_jax_tensor(delta_net_inputs["k"], dn_jax_device)
-    v = _to_jax_tensor(delta_net_inputs["v"], dn_jax_device)
-    beta = _to_jax_tensor(delta_net_inputs["beta"], dn_jax_device)
-    h0 = _to_jax_tensor(delta_net_inputs["h0"], dn_jax_device)
+    q = _to_jax_tensor(delta_net_inputs["q"], dn_jax_device, jnp.bfloat16)
+    k = _to_jax_tensor(delta_net_inputs["k"], dn_jax_device, jnp.bfloat16)
+    v = _to_jax_tensor(delta_net_inputs["v"], dn_jax_device, jnp.bfloat16)
+    beta = _to_jax_tensor(delta_net_inputs["beta"], dn_jax_device, jnp.float32)
+    h0 = _to_jax_tensor(delta_net_inputs["h0"], dn_jax_device, jnp.float32)
 
     out_ref, state_ref = dn_cuda_recurrent(
         q, k, v, beta, initial_state=h0, output_final_state=True
@@ -192,37 +192,37 @@ def test_delta_net_cuda_recurrent_head_first(delta_net_inputs, dn_jax_device):
     )
 
     assert_allclose_with_stats(
-        out_ref, out_hf, "cuda head_first vs default output", atol=1e-5, rtol=1e-4
+        out_ref, out_hf, "cuda head_first vs default output", atol=1e-2, rtol=1e-2
     )
     assert_allclose_with_stats(
-        state_ref, state_hf, "cuda head_first vs default state", atol=1e-5, rtol=1e-4
+        state_ref, state_hf, "cuda head_first vs default state", atol=1e-2, rtol=1e-2
     )
 
 
 @pytest.mark.jax
 def test_delta_net_cuda_no_final_state(delta_net_inputs, dn_jax_device):
     """JAX CUDA recurrent output_final_state=False 时只返回输出张量。"""
-    q = _to_jax_tensor(delta_net_inputs["q"], dn_jax_device)
-    k = _to_jax_tensor(delta_net_inputs["k"], dn_jax_device)
-    v = _to_jax_tensor(delta_net_inputs["v"], dn_jax_device)
-    beta = _to_jax_tensor(delta_net_inputs["beta"], dn_jax_device)
+    q = _to_jax_tensor(delta_net_inputs["q"], dn_jax_device, jnp.bfloat16)
+    k = _to_jax_tensor(delta_net_inputs["k"], dn_jax_device, jnp.bfloat16)
+    v = _to_jax_tensor(delta_net_inputs["v"], dn_jax_device, jnp.bfloat16)
+    beta = _to_jax_tensor(delta_net_inputs["beta"], dn_jax_device, jnp.float32)
 
     out_only = dn_cuda_recurrent(q, k, v, beta, output_final_state=False)
     out_full, _ = dn_cuda_recurrent(q, k, v, beta, output_final_state=True)
 
     assert_allclose_with_stats(
-        out_full, out_only, "cuda no_final_state output", atol=1e-5, rtol=1e-4
+        out_full, out_only, "cuda no_final_state output", atol=1e-2, rtol=1e-2
     )
 
 
 @pytest.mark.jax
 def test_delta_net_cuda_initial_state_broadcast(delta_net_inputs, dn_jax_device):
     """JAX CUDA recurrent 支持 [1, H, K, V] 初始 state 广播。"""
-    q = _to_jax_tensor(delta_net_inputs["q"], dn_jax_device)
-    k = _to_jax_tensor(delta_net_inputs["k"], dn_jax_device)
-    v = _to_jax_tensor(delta_net_inputs["v"], dn_jax_device)
-    beta = _to_jax_tensor(delta_net_inputs["beta"], dn_jax_device)
-    h0 = _to_jax_tensor(delta_net_inputs["h0"][:1], dn_jax_device)
+    q = _to_jax_tensor(delta_net_inputs["q"], dn_jax_device, jnp.bfloat16)
+    k = _to_jax_tensor(delta_net_inputs["k"], dn_jax_device, jnp.bfloat16)
+    v = _to_jax_tensor(delta_net_inputs["v"], dn_jax_device, jnp.bfloat16)
+    beta = _to_jax_tensor(delta_net_inputs["beta"], dn_jax_device, jnp.float32)
+    h0 = _to_jax_tensor(delta_net_inputs["h0"][:1], dn_jax_device, jnp.float32)
 
     out_cuda, state_cuda = dn_cuda_recurrent(
         q, k, v, beta, initial_state=h0, output_final_state=True
@@ -232,20 +232,20 @@ def test_delta_net_cuda_initial_state_broadcast(delta_net_inputs, dn_jax_device)
     )
 
     assert_allclose_with_stats(
-        out_ref, out_cuda, "cuda broadcast h0 vs native output", atol=1e-4, rtol=1e-3
+        out_ref, out_cuda, "cuda broadcast h0 vs native output", atol=1e-2, rtol=1e-2
     )
     assert_allclose_with_stats(
-        state_ref, state_cuda, "cuda broadcast h0 vs native state", atol=1e-4, rtol=1e-3
+        state_ref, state_cuda, "cuda broadcast h0 vs native state", atol=1e-2, rtol=1e-2
     )
 
 
 @pytest.mark.jax
 def test_delta_net_cuda_rejects_arbitrary_length(delta_net_inputs, dn_jax_device):
     """JAX CUDA recurrent 训练算子拒绝不被 chunk_size 整除的序列长度。"""
-    q = _to_jax_tensor(delta_net_inputs["q"][:, :120], dn_jax_device)
-    k = _to_jax_tensor(delta_net_inputs["k"][:, :120], dn_jax_device)
-    v = _to_jax_tensor(delta_net_inputs["v"][:, :120], dn_jax_device)
-    beta = _to_jax_tensor(delta_net_inputs["beta"][:, :120], dn_jax_device)
+    q = _to_jax_tensor(delta_net_inputs["q"][:, :120], dn_jax_device, jnp.bfloat16)
+    k = _to_jax_tensor(delta_net_inputs["k"][:, :120], dn_jax_device, jnp.bfloat16)
+    v = _to_jax_tensor(delta_net_inputs["v"][:, :120], dn_jax_device, jnp.bfloat16)
+    beta = _to_jax_tensor(delta_net_inputs["beta"][:, :120], dn_jax_device, jnp.float32)
 
     with pytest.raises(ValueError):
         dn_cuda_recurrent(q, k, v, beta, output_final_state=False)
@@ -254,11 +254,11 @@ def test_delta_net_cuda_rejects_arbitrary_length(delta_net_inputs, dn_jax_device
 @pytest.mark.jax
 def test_delta_net_cuda_inference_arbitrary_length(delta_net_inputs, dn_jax_device):
     """JAX CUDA recurrent 推理算子支持不被 chunk_size 整除的序列长度。"""
-    q = _to_jax_tensor(delta_net_inputs["q"][:, :34], dn_jax_device)
-    k = _to_jax_tensor(delta_net_inputs["k"][:, :34], dn_jax_device)
-    v = _to_jax_tensor(delta_net_inputs["v"][:, :34], dn_jax_device)
-    beta = _to_jax_tensor(delta_net_inputs["beta"][:, :34], dn_jax_device)
-    h0 = _to_jax_tensor(delta_net_inputs["h0"], dn_jax_device)
+    q = _to_jax_tensor(delta_net_inputs["q"][:, :34], dn_jax_device, jnp.bfloat16)
+    k = _to_jax_tensor(delta_net_inputs["k"][:, :34], dn_jax_device, jnp.bfloat16)
+    v = _to_jax_tensor(delta_net_inputs["v"][:, :34], dn_jax_device, jnp.bfloat16)
+    beta = _to_jax_tensor(delta_net_inputs["beta"][:, :34], dn_jax_device, jnp.float32)
+    h0 = _to_jax_tensor(delta_net_inputs["h0"], dn_jax_device, jnp.float32)
 
     out_cuda, state_cuda = dn_cuda_inference(
         q, k, v, beta, initial_state=h0, output_final_state=True
@@ -268,14 +268,14 @@ def test_delta_net_cuda_inference_arbitrary_length(delta_net_inputs, dn_jax_devi
     )
 
     assert_allclose_with_stats(
-        out_ref, out_cuda, "cuda inference T=34 vs native output", atol=1e-4, rtol=1e-3
+        out_ref, out_cuda, "cuda inference T=34 vs native output", atol=1e-2, rtol=1e-2
     )
     assert_allclose_with_stats(
         state_ref,
         state_cuda,
         "cuda inference T=34 vs native state",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
 
 
@@ -363,7 +363,7 @@ def test_delta_net_cuda_recurrent_backward_chunk_size(delta_net_inputs, dn_jax_d
             gr,
             gc,
             f"grad_{name} cuda chunk_size=8 vs native",
-            atol=7e-3,
+            atol=1e-2,
             rtol=1e-2,
         )
 
@@ -461,11 +461,11 @@ def test_delta_net_cuda_single_step_chunk_size(delta_net_inputs, dn_jax_device):
 @pytest.mark.jax
 def test_delta_net_cuda_recurrent_sharding_structure(delta_net_inputs, dn_jax_device):
     """1-device mesh 结构验证：jit + NamedSharding 编译通过且数值一致。"""
-    q = _to_jax_tensor(delta_net_inputs["q"], dn_jax_device)
-    k = _to_jax_tensor(delta_net_inputs["k"], dn_jax_device)
-    v = _to_jax_tensor(delta_net_inputs["v"], dn_jax_device)
-    beta = _to_jax_tensor(delta_net_inputs["beta"], dn_jax_device)
-    h0 = _to_jax_tensor(delta_net_inputs["h0"], dn_jax_device)
+    q = _to_jax_tensor(delta_net_inputs["q"], dn_jax_device, jnp.bfloat16)
+    k = _to_jax_tensor(delta_net_inputs["k"], dn_jax_device, jnp.bfloat16)
+    v = _to_jax_tensor(delta_net_inputs["v"], dn_jax_device, jnp.bfloat16)
+    beta = _to_jax_tensor(delta_net_inputs["beta"], dn_jax_device, jnp.float32)
+    h0 = _to_jax_tensor(delta_net_inputs["h0"], dn_jax_device, jnp.float32)
 
     mesh = jax.make_mesh((1,), ("data",))
     sharding_b = NamedSharding(mesh, PartitionSpec("data", None, None, None))
@@ -488,8 +488,8 @@ def test_delta_net_cuda_recurrent_sharding_structure(delta_net_inputs, dn_jax_de
     )
 
     assert_allclose_with_stats(
-        out_ref, out_jit, "cuda sharded vs unsharded output", atol=1e-5, rtol=1e-4
+        out_ref, out_jit, "cuda sharded vs unsharded output", atol=1e-2, rtol=1e-2
     )
     assert_allclose_with_stats(
-        state_ref, state_jit, "cuda sharded vs unsharded state", atol=1e-5, rtol=1e-4
+        state_ref, state_jit, "cuda sharded vs unsharded state", atol=1e-2, rtol=1e-2
     )

@@ -285,6 +285,27 @@ def _check_dtype(dtype) -> None:
         )
 
 
+def _check_qkv_dtype(q, k, v) -> None:
+    """q/k/v 必须同 dtype，否则无法共用同一套 kernel 实例化。"""
+    if not (q.dtype == k.dtype == v.dtype):
+        raise ValueError(
+            f"q/k/v must share the same dtype, got {q.dtype}, {k.dtype}, {v.dtype}"
+        )
+
+
+def _kernel_dtype(dtype):
+    """CUDA kernel 固定以 bfloat16 计算，非 bfloat16 输入警告后统一 cast。"""
+    _check_dtype(dtype)
+    if dtype != jnp.bfloat16:
+        warnings.warn(
+            "gated_delta_net_recurrent_sane CUDA kernel computes in bfloat16; "
+            f"casting {dtype} inputs to bfloat16.",
+            UserWarning,
+            stacklevel=2,
+        )
+    return jnp.bfloat16
+
+
 def _warn_mask_none() -> None:
     warnings.warn(
         "[gdn_recurrent_sane] mask is None: 使用无条件 State Anomaly Neutralization 算子。"
@@ -450,7 +471,16 @@ def _gdn_train_bwd(chunk_size: int, res, grads):
         mask,
         chunk_size,
     )
-    return dq, dk, dv, dg, dbeta, dtau, None, dh0
+    return (
+        jnp.asarray(dq, q.dtype),
+        jnp.asarray(dk, k.dtype),
+        jnp.asarray(dv, v.dtype),
+        jnp.asarray(dg, jnp.float32),
+        jnp.asarray(dbeta, jnp.float32),
+        jnp.asarray(dtau, jnp.float32),
+        None,
+        jnp.asarray(dh0, jnp.float32),
+    )
 
 
 _gdn_recurrent_sane_train.defvjp(_gdn_train_fwd, _gdn_train_bwd)
@@ -526,7 +556,15 @@ def _gdn_train_bwd_no_mask(chunk_size: int, res, grads):
         tau,
         chunk_size,
     )
-    return dq, dk, dv, dg, dbeta, dtau, dh0
+    return (
+        jnp.asarray(dq, q.dtype),
+        jnp.asarray(dk, k.dtype),
+        jnp.asarray(dv, v.dtype),
+        jnp.asarray(dg, jnp.float32),
+        jnp.asarray(dbeta, jnp.float32),
+        jnp.asarray(dtau, jnp.float32),
+        jnp.asarray(dh0, jnp.float32),
+    )
 
 
 _gdn_recurrent_sane_train_no_mask.defvjp(_gdn_train_fwd_no_mask, _gdn_train_bwd_no_mask)
@@ -655,8 +693,8 @@ def gated_delta_net_recurrent_sane(
     `state = tau * tanh(state / tau)`；输出始终基于 SANE 之前的 state。
 
     Args:
-        q, k: [B, T, H, K]，bfloat16 或 float32，查询与键。T 必须被 chunk_size 整除。
-        v: [B, T, H, V]，与 q/k 同 dtype，值。
+        q, k: [B, T, H, K]，bfloat16，查询与键；非 bfloat16 输入会发出 UserWarning 并 cast 到 bfloat16。T 必须被 chunk_size 整除。
+        v: [B, T, H, V]，与 q/k 同 dtype，值；非 bfloat16 输入会 cast 到 bfloat16 后计算。
         g: [B, T, H]，float32，log-space decay。
         beta: [B, T, H]，float32，写入强度，必须已在外部过 sigmoid。
         tau: [B, T//chunk_size, H]，float32。SANE 阈值，必须 > 0。
@@ -669,19 +707,21 @@ def gated_delta_net_recurrent_sane(
             (K, V, chunk_size) 组合首次使用时各自编译一次。
 
     Returns:
-        out: [B, T, H, V]，与 v 同 dtype。
+        out: [B, T, H, V]，按输入 q/k/v 的原始 dtype 返回（内核内部以 bfloat16 计算）。
         final_state: [B, H, K, V]，float32。
             output_final_state=False 时为 None；
             output_final_state=True 且 mask=None 时也为 None 并发出 UserWarning。
 
     Raises:
-        ValueError: T 不被 chunk_size 整除，tau/mask 形状不匹配，
+        ValueError: T 不被 chunk_size 整除，q/k/v dtype 不一致，tau/mask 形状不匹配，
             或输入 dtype 不是 bfloat16/float32。
     """
     dtype = v.dtype
-    _check_dtype(dtype)
-    q = jnp.asarray(q, dtype)
-    k = jnp.asarray(k, dtype)
+    _check_qkv_dtype(q, k, v)
+    kernel_dtype = _kernel_dtype(dtype)
+    q = jnp.asarray(q, kernel_dtype)
+    k = jnp.asarray(k, kernel_dtype)
+    v = jnp.asarray(v, kernel_dtype)
     g = jnp.asarray(g, jnp.float32)
     beta = jnp.asarray(beta, jnp.float32)
     q = _transpose_head(q, head_first)
@@ -757,8 +797,8 @@ def gated_delta_net_recurrent_sane_inference(
     只在满 chunk 的边界执行 SANE，末尾不足 chunk 的余数步不执行。
 
     Args:
-        q, k: [B, T, H, K]，bfloat16 或 float32，查询与键。T 支持任意长度。
-        v: [B, T, H, V]，与 q/k 同 dtype，值。
+        q, k: [B, T, H, K]，bfloat16，查询与键；非 bfloat16 输入会发出 UserWarning 并 cast 到 bfloat16。T 支持任意长度。
+        v: [B, T, H, V]，与 q/k 同 dtype，值；非 bfloat16 输入会 cast 到 bfloat16 后计算。
         g: [B, T, H]，float32，log-space decay。
         beta: [B, T, H]，float32，写入强度，必须已在外部过 sigmoid。
         tau: [B, T//chunk_size, H]，float32。SANE 阈值。
@@ -769,18 +809,20 @@ def gated_delta_net_recurrent_sane_inference(
         chunk_size: int，chunk 长度，默认 16。
 
     Returns:
-        out: [B, T, H, V]，与 v 同 dtype。
+        out: [B, T, H, V]，按输入 q/k/v 的原始 dtype 返回（内核内部以 bfloat16 计算）。
         final_state: [B, H, K, V]，float32；
             output_final_state=False 时为 None；
             output_final_state=True 且 mask=None 时也为 None 并发出 UserWarning。
 
     Raises:
-        ValueError: tau/mask 形状不匹配，或输入 dtype 不是 bfloat16/float32。
+        ValueError: q/k/v dtype 不一致，tau/mask 形状不匹配，或输入 dtype 不是 bfloat16/float32。
     """
     dtype = v.dtype
-    _check_dtype(dtype)
-    q = jnp.asarray(q, dtype)
-    k = jnp.asarray(k, dtype)
+    _check_qkv_dtype(q, k, v)
+    kernel_dtype = _kernel_dtype(dtype)
+    q = jnp.asarray(q, kernel_dtype)
+    k = jnp.asarray(k, kernel_dtype)
+    v = jnp.asarray(v, kernel_dtype)
     g = jnp.asarray(g, jnp.float32)
     beta = jnp.asarray(beta, jnp.float32)
     q = _transpose_head(q, head_first)
@@ -862,8 +904,8 @@ def gated_delta_net_recurrent_sane_single_step(
     chunk_size 参数仅用于保持 API 一致性，单步实现不依赖 chunk 长度。
 
     Args:
-        q, k: [B, H, K]，bfloat16 或 float32，查询与键。
-        v: [B, H, V]，与 q/k 同 dtype，值。
+        q, k: [B, H, K]，bfloat16，查询与键；非 bfloat16 输入会发出 UserWarning 并 cast 到 bfloat16。
+        v: [B, H, V]，与 q/k 同 dtype，值；非 bfloat16 输入会 cast 到 bfloat16 后计算。
         g: [B, H]，float32，log-space decay。
         beta: [B, H]，float32，写入强度，必须已在外部过 sigmoid。
         tau: [B, H]，float32。SANE 阈值。
@@ -874,12 +916,12 @@ def gated_delta_net_recurrent_sane_single_step(
         chunk_size: int，忽略，仅参与编译缓存键。
 
     Returns:
-        out: [B, H, V]，与 v 同 dtype。
+        out: [B, H, V]，按输入 q/k/v 的原始 dtype 返回（内核内部以 bfloat16 计算）。
         next_state: [B, H, K, V]，float32；output_final_state=False 时为 None。
 
     Raises:
         NotImplementedError: head_first=False。
-        ValueError: tau/do_sane 形状不匹配，或输入 dtype 不是 bfloat16/float32。
+        ValueError: q/k/v dtype 不一致，tau/do_sane 形状不匹配，或输入 dtype 不是 bfloat16/float32。
     """
     if not head_first:
         raise NotImplementedError(
@@ -887,9 +929,11 @@ def gated_delta_net_recurrent_sane_single_step(
         )
 
     dtype = v.dtype
-    _check_dtype(dtype)
-    q = jnp.asarray(q, dtype)
-    k = jnp.asarray(k, dtype)
+    _check_qkv_dtype(q, k, v)
+    kernel_dtype = _kernel_dtype(dtype)
+    q = jnp.asarray(q, kernel_dtype)
+    k = jnp.asarray(k, kernel_dtype)
+    v = jnp.asarray(v, kernel_dtype)
     g = jnp.asarray(g, jnp.float32)
     beta = jnp.asarray(beta, jnp.float32)
     tau = jnp.asarray(tau, jnp.float32)

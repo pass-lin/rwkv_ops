@@ -380,6 +380,29 @@ chunkwise 版本专门放分块并行实现（训练 / 推理），recurrent 版
 - RWKV-6 的 fp16 输入会输出 fp32；fp32/bf16 保持同类型。
 - mHC Triton 内核的 `H_post` / `H_res` 输出固定为 `float32`。
 
+**GDN / DeltaNet 家族（含 SANE 变体）的 dtype 契约（强制）**
+
+| 张量 | 契约 | 说明 |
+|---|---|---|
+| `q` / `k` / `v` | **三者 dtype 必须一致** | 不一致直接 `ValueError`/`TypeError`，禁止静默 cast |
+| `g` / `beta` / `tau` | `float32` | 入口统一 `cast` 到 fp32 后参与计算 |
+| `mask` | 按各 kernel 约定（本族为 fp32） | 无梯度 |
+| `h0` / `initial_state` | `float32` | 入口统一 `cast` |
+| `out` / `next_state` 之外的输出 | `out` 按**调用方原始输入 dtype**返回 | 内部精度由后端决定 |
+| `final_state` / `next_state` | `float32` | 恒为 fp32 |
+| 反向 `dq` / `dk` / `dv` | **与对应 primal 同 dtype** | 由入口在出口处 `cast` 还原 |
+| 反向 `dg` / `dbeta` / `dtau` / `dh0` | `float32` | 与对应 primal 一致 |
+
+- **后端分发策略**：CUDA（JAX FFI / torch C++ 扩展）**统一以 bfloat16 计算**，
+  非 bfloat16 输入发出一次 `UserWarning` 并 `cast` 到 bfloat16，输出再还原为
+  调用方原始 dtype（与 `rwkv7` / `rwkv6` CUDA 路径一致）；
+  Pallas / Triton / native 保持输入 dtype（保留 fp32 高精度路径）。
+- **反向出口必须显式 cast**：`custom_vjp` 的 `_bwd` / torch `autograd.Function`
+  的 `backward` 出口按上表逐项 `cast`，不得依赖调用方或上游做隐式转换；
+  否则 bf16 图会上游出现 `lax.mul requires arguments to have the same dtypes`。
+- CUDA 内核的 FFI `Ret` / C++ 模板实例化声明不变（`dq`/`dk` 为 `DT`，
+  `dv`/`dg`/`dbeta`/`dh0`/`dtau` 为 fp32），dtype 归一统一在 Python 包装层完成。
+
 ### 3.4 共享与复用
 
 - **共享 Triton kernel**：改 `triton_kernel.py` 必须同步检查 jax/torch 两个桥接。
@@ -748,6 +771,15 @@ pytest tests/test_package_imports.py -v -m "not slow"
 - 新增/修改加速内核必须覆盖：前向输出与 final_state vs native；反向梯度
   vs native 自动微分；mask 全 1 / 全 0 / 随机 mask 等价性；
   `head_first=True/False` 两种 layout。
+- **反向 dtype 契约断言（GDN / DeltaNet 家族强制）**：所有反向用例除数值对比外
+  必须调用 `tests.conftest.assert_grad_dtypes`，断言
+  `dq/dk/dv` 与对应输入同 dtype、`dg/dbeta/dtau/dh0` 为 `float32`、
+  `out` 跟随输入 dtype、`final_state` 为 `float32`；
+  并覆盖上游 bf16 链路（`v_leaf → silu(v) → op → loss → grad`）不报
+  `lax.mul` dtype 错误。CUDA 后端额外覆盖「fp32 输入 → `UserWarning` +
+  cast 到 bfloat16 + `out` 还原为 fp32」。参考实现：
+  `tests/jax/test_jax_grad_dtype_contract.py`、
+  `tests/torch/test_torch_grad_dtype_contract.py`。
 - **双精度覆盖（全项目默认强制）**：每个加速内核（Triton/CUDA/Pallas）的
   测试必须同时包含 **bf16和fp32用例**
   情况覆盖；两组共用同一组 numpy 输入，分别 cast 后按各自红线判定。

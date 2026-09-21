@@ -119,6 +119,14 @@ def _transpose_head(x: jnp.ndarray, head_first: bool) -> jnp.ndarray:
     raise ValueError(f"_transpose_head only supports 3D or 4D inputs, got {x.ndim}D")
 
 
+def _check_qkv_dtype(q, k, v) -> None:
+    """q/k/v 必须同 dtype，否则无法共用同一套 kernel 实例化。"""
+    if not (q.dtype == k.dtype == v.dtype):
+        raise ValueError(
+            f"q/k/v must share the same dtype, got {q.dtype}, {k.dtype}, {v.dtype}"
+        )
+
+
 def _prepare_h0(initial_state, B, N, K, V):
     """准备 float32 初始 state，支持 [1, N, K, V] 广播。"""
     if initial_state is None:
@@ -574,7 +582,14 @@ def _gdn_train_bwd(chunk_size: int, res, grads):
         h0,
         chunk_size,
     )
-    return dq, dk, dv, dg, dbeta, dh0
+    return (
+        jnp.asarray(dq, q.dtype),
+        jnp.asarray(dk, k.dtype),
+        jnp.asarray(dv, v.dtype),
+        jnp.asarray(dg, jnp.float32),
+        jnp.asarray(dbeta, jnp.float32),
+        jnp.asarray(dh0, jnp.float32),
+    )
 
 
 _gdn_recurrent_train.defvjp(_gdn_train_fwd, _gdn_train_bwd)
@@ -706,6 +721,12 @@ def gated_delta_net_recurrent(
         ValueError: T 不被 chunk_size 整除。
     """
     dtype = v.dtype
+    _check_qkv_dtype(q, k, v)
+    q = jnp.asarray(q, dtype)
+    k = jnp.asarray(k, dtype)
+    v = jnp.asarray(v, dtype)
+    g = jnp.asarray(g, jnp.float32)
+    beta = jnp.asarray(beta, jnp.float32)
     q = _transpose_head(q, head_first)
     k = _transpose_head(k, head_first)
     v = _transpose_head(v, head_first)
@@ -743,6 +764,12 @@ def gated_delta_net_recurrent_inference(
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
     """Gated DeltaNet recurrent 推理算子（JAX Pallas 实现，无梯度）。"""
     dtype = v.dtype
+    _check_qkv_dtype(q, k, v)
+    q = jnp.asarray(q, dtype)
+    k = jnp.asarray(k, dtype)
+    v = jnp.asarray(v, dtype)
+    g = jnp.asarray(g, jnp.float32)
+    beta = jnp.asarray(beta, jnp.float32)
     q = _transpose_head(q, head_first)
     k = _transpose_head(k, head_first)
     v = _transpose_head(v, head_first)
@@ -785,6 +812,7 @@ def gated_delta_net_recurrent_single_step(
         )
 
     dtype = v.dtype
+    _check_qkv_dtype(q, k, v)
     B, N, K = q.shape
     V = v.shape[-1]
     h0 = _prepare_h0(initial_state, B, N, K, V)

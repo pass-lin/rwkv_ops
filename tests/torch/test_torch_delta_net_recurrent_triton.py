@@ -288,7 +288,7 @@ def test_delta_net_triton_bfloat16(delta_net_inputs, dn_cuda_device):
     k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device, dtype=torch.bfloat16)
     v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device, dtype=torch.bfloat16)
     beta = _to_cuda_tensor(
-        delta_net_inputs["beta"], dn_cuda_device, dtype=torch.bfloat16
+        delta_net_inputs["beta"], dn_cuda_device, dtype=torch.float32
     )
     h0 = _to_cuda_tensor(delta_net_inputs["h0"], dn_cuda_device, dtype=torch.float32)
 
@@ -465,7 +465,7 @@ def test_delta_net_triton_bfloat16_chunk_size_8(delta_net_inputs, dn_cuda_device
     k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device, dtype=torch.bfloat16)
     v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device, dtype=torch.bfloat16)
     beta = _to_cuda_tensor(
-        delta_net_inputs["beta"], dn_cuda_device, dtype=torch.bfloat16
+        delta_net_inputs["beta"], dn_cuda_device, dtype=torch.float32
     )
     h0 = _to_cuda_tensor(delta_net_inputs["h0"], dn_cuda_device, dtype=torch.float32)
 

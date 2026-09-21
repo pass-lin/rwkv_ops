@@ -69,14 +69,28 @@ def _make_chunk_size_8_tau_mask(B, H, T, rng):
 @pytest.mark.slow
 def test_gdn_sane_cuda_recurrent_matches_native(gdn_sane_inputs, gdn_sane_cuda_device):
     """CUDA recurrent SANE 训练算子前向与 native 参考对齐。"""
-    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device)
-    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device)
-    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device)
-    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
-    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
-    tau = _to_cuda_tensor(gdn_sane_inputs["tau"], gdn_sane_cuda_device)
-    mask = _to_cuda_tensor(gdn_sane_inputs["mask"], gdn_sane_cuda_device)
+    q = _to_cuda_tensor(
+        gdn_sane_inputs["q"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    k = _to_cuda_tensor(
+        gdn_sane_inputs["k"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    v = _to_cuda_tensor(
+        gdn_sane_inputs["v"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device, dtype=torch.float32)
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(
+        gdn_sane_inputs["h0"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    tau = _to_cuda_tensor(
+        gdn_sane_inputs["tau"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    mask = _to_cuda_tensor(
+        gdn_sane_inputs["mask"], gdn_sane_cuda_device, dtype=torch.float32
+    )
 
     out_cuda, state_cuda = gdn_cuda_recurrent(
         q, k, v, g, beta, tau, mask=mask, initial_state=h0, output_final_state=True
@@ -86,10 +100,10 @@ def test_gdn_sane_cuda_recurrent_matches_native(gdn_sane_inputs, gdn_sane_cuda_d
     )
 
     assert_allclose_with_stats(
-        out_ref, out_cuda, "cuda recurrent vs native output", atol=1e-4, rtol=1e-3
+        out_ref, out_cuda, "cuda recurrent vs native output", atol=1e-2, rtol=1e-2
     )
     assert_allclose_with_stats(
-        state_ref, state_cuda, "cuda recurrent vs native state", atol=1e-4, rtol=1e-3
+        state_ref, state_cuda, "cuda recurrent vs native state", atol=1e-2, rtol=1e-2
     )
 
 
@@ -97,14 +111,28 @@ def test_gdn_sane_cuda_recurrent_matches_native(gdn_sane_inputs, gdn_sane_cuda_d
 @pytest.mark.slow
 def test_gdn_sane_cuda_bwd_matches_native(gdn_sane_inputs, gdn_sane_cuda_device):
     """CUDA recurrent SANE 反向梯度与 native Keras autograd 对齐。"""
-    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device)
-    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device)
-    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device)
-    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
-    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
-    tau = _to_cuda_tensor(gdn_sane_inputs["tau"], gdn_sane_cuda_device)
-    mask = _to_cuda_tensor(gdn_sane_inputs["mask"], gdn_sane_cuda_device)
+    q = _to_cuda_tensor(
+        gdn_sane_inputs["q"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    k = _to_cuda_tensor(
+        gdn_sane_inputs["k"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    v = _to_cuda_tensor(
+        gdn_sane_inputs["v"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device, dtype=torch.float32)
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(
+        gdn_sane_inputs["h0"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    tau = _to_cuda_tensor(
+        gdn_sane_inputs["tau"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    mask = _to_cuda_tensor(
+        gdn_sane_inputs["mask"], gdn_sane_cuda_device, dtype=torch.float32
+    )
 
     grads_cuda = _gdn_sane_grads(gdn_cuda_recurrent, q, k, v, g, beta, tau, mask, h0)
     grads_ref = _gdn_sane_grads(gdn_native_recurrent, q, k, v, g, beta, tau, mask, h0)
@@ -117,22 +145,36 @@ def test_gdn_sane_cuda_bwd_matches_native(gdn_sane_inputs, gdn_sane_cuda_device)
             ref,
             tgt,
             f"bwd {name}",
-            atol=7e-3,
-            rtol=1e-3,
+            atol=1e-2,
+            rtol=1e-2,
         )
 
 
 @pytest.mark.torch
 def test_gdn_sane_cuda_inference_matches_native(gdn_sane_inputs, gdn_sane_cuda_device):
     """CUDA recurrent SANE 推理算子前向与 native 参考对齐。"""
-    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device)
-    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device)
-    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device)
-    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
-    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
-    tau = _to_cuda_tensor(gdn_sane_inputs["tau"], gdn_sane_cuda_device)
-    mask = _to_cuda_tensor(gdn_sane_inputs["mask"], gdn_sane_cuda_device)
+    q = _to_cuda_tensor(
+        gdn_sane_inputs["q"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    k = _to_cuda_tensor(
+        gdn_sane_inputs["k"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    v = _to_cuda_tensor(
+        gdn_sane_inputs["v"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device, dtype=torch.float32)
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(
+        gdn_sane_inputs["h0"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    tau = _to_cuda_tensor(
+        gdn_sane_inputs["tau"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    mask = _to_cuda_tensor(
+        gdn_sane_inputs["mask"], gdn_sane_cuda_device, dtype=torch.float32
+    )
 
     out_cuda, state_cuda = gdn_cuda_inference(
         q, k, v, g, beta, tau, mask=mask, initial_state=h0, output_final_state=True
@@ -142,10 +184,10 @@ def test_gdn_sane_cuda_inference_matches_native(gdn_sane_inputs, gdn_sane_cuda_d
     )
 
     assert_allclose_with_stats(
-        out_ref, out_cuda, "cuda inference vs native output", atol=1e-4, rtol=1e-3
+        out_ref, out_cuda, "cuda inference vs native output", atol=1e-2, rtol=1e-2
     )
     assert_allclose_with_stats(
-        state_ref, state_cuda, "cuda inference vs native state", atol=1e-4, rtol=1e-3
+        state_ref, state_cuda, "cuda inference vs native state", atol=1e-2, rtol=1e-2
     )
 
 
@@ -156,13 +198,29 @@ def test_gdn_sane_cuda_inference_arbitrary_length_matches_native(
     """CUDA recurrent SANE 推理算子支持 T 不被 chunk_size 整除的任意长度。"""
     T = 100
     num_chunks = T // 16
-    q = _to_cuda_tensor(gdn_sane_inputs["q"][:, :T], gdn_sane_cuda_device)
-    k = _to_cuda_tensor(gdn_sane_inputs["k"][:, :T], gdn_sane_cuda_device)
-    v = _to_cuda_tensor(gdn_sane_inputs["v"][:, :T], gdn_sane_cuda_device)
-    g = _to_cuda_tensor(gdn_sane_inputs["g"][:, :T], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"][:, :T], gdn_sane_cuda_device)
-    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
-    tau = _to_cuda_tensor(gdn_sane_inputs["tau"][:, :num_chunks], gdn_sane_cuda_device)
+    q = _to_cuda_tensor(
+        gdn_sane_inputs["q"][:, :T], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    k = _to_cuda_tensor(
+        gdn_sane_inputs["k"][:, :T], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    v = _to_cuda_tensor(
+        gdn_sane_inputs["v"][:, :T], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    g = _to_cuda_tensor(
+        gdn_sane_inputs["g"][:, :T], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"][:, :T], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(
+        gdn_sane_inputs["h0"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    tau = _to_cuda_tensor(
+        gdn_sane_inputs["tau"][:, :num_chunks],
+        gdn_sane_cuda_device,
+        dtype=torch.float32,
+    )
     mask = _to_cuda_tensor(
         gdn_sane_inputs["mask"][:, :num_chunks], gdn_sane_cuda_device
     )
@@ -178,15 +236,15 @@ def test_gdn_sane_cuda_inference_arbitrary_length_matches_native(
         out_ref,
         out_cuda,
         "arbitrary-length cuda inference vs native output",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
     assert_allclose_with_stats(
         state_ref,
         state_cuda,
         "arbitrary-length cuda inference vs native state",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
 
 
@@ -195,13 +253,27 @@ def test_gdn_sane_cuda_single_step_do_sane_matches_native(
     gdn_sane_inputs, gdn_sane_cuda_device
 ):
     """CUDA recurrent SANE 单步 RNN（do_sane=1）与 native SANE 单步对齐。"""
-    q = _to_cuda_tensor(gdn_sane_inputs["q"][:, 0], gdn_sane_cuda_device)
-    k = _to_cuda_tensor(gdn_sane_inputs["k"][:, 0], gdn_sane_cuda_device)
-    v = _to_cuda_tensor(gdn_sane_inputs["v"][:, 0], gdn_sane_cuda_device)
-    g = _to_cuda_tensor(gdn_sane_inputs["g"][:, 0], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"][:, 0], gdn_sane_cuda_device)
-    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
-    tau = _to_cuda_tensor(gdn_sane_inputs["tau"][:, 0], gdn_sane_cuda_device)
+    q = _to_cuda_tensor(
+        gdn_sane_inputs["q"][:, 0], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    k = _to_cuda_tensor(
+        gdn_sane_inputs["k"][:, 0], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    v = _to_cuda_tensor(
+        gdn_sane_inputs["v"][:, 0], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    g = _to_cuda_tensor(
+        gdn_sane_inputs["g"][:, 0], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"][:, 0], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(
+        gdn_sane_inputs["h0"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    tau = _to_cuda_tensor(
+        gdn_sane_inputs["tau"][:, 0], gdn_sane_cuda_device, dtype=torch.float32
+    )
     do_sane = torch.ones(q.shape[0], dtype=torch.float32, device=gdn_sane_cuda_device)
 
     out_cuda, state_cuda = gdn_cuda_single_step(
@@ -215,15 +287,15 @@ def test_gdn_sane_cuda_single_step_do_sane_matches_native(
         out_ref,
         out_cuda,
         "single step do_sane=1 vs native output",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
     assert_allclose_with_stats(
         state_ref,
         state_cuda,
         "single step do_sane=1 vs native state",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
 
 
@@ -232,13 +304,27 @@ def test_gdn_sane_cuda_single_step_do_skip_matches_original_gdn(
     gdn_sane_inputs, gdn_sane_cuda_device
 ):
     """CUDA recurrent SANE 单步 RNN（do_sane=0）应跳过 SANE，与原 GDN 单步一致。"""
-    q = _to_cuda_tensor(gdn_sane_inputs["q"][:, 0], gdn_sane_cuda_device)
-    k = _to_cuda_tensor(gdn_sane_inputs["k"][:, 0], gdn_sane_cuda_device)
-    v = _to_cuda_tensor(gdn_sane_inputs["v"][:, 0], gdn_sane_cuda_device)
-    g = _to_cuda_tensor(gdn_sane_inputs["g"][:, 0], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"][:, 0], gdn_sane_cuda_device)
-    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
-    tau = _to_cuda_tensor(gdn_sane_inputs["tau"][:, 0], gdn_sane_cuda_device)
+    q = _to_cuda_tensor(
+        gdn_sane_inputs["q"][:, 0], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    k = _to_cuda_tensor(
+        gdn_sane_inputs["k"][:, 0], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    v = _to_cuda_tensor(
+        gdn_sane_inputs["v"][:, 0], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    g = _to_cuda_tensor(
+        gdn_sane_inputs["g"][:, 0], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"][:, 0], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(
+        gdn_sane_inputs["h0"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    tau = _to_cuda_tensor(
+        gdn_sane_inputs["tau"][:, 0], gdn_sane_cuda_device, dtype=torch.float32
+    )
     do_sane = torch.zeros(q.shape[0], dtype=torch.float32, device=gdn_sane_cuda_device)
 
     out_cuda, state_cuda = gdn_cuda_single_step(
@@ -252,28 +338,40 @@ def test_gdn_sane_cuda_single_step_do_skip_matches_original_gdn(
         out_ref,
         out_cuda,
         "single step do_sane=0 vs original GDN output",
-        atol=1e-5,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
     assert_allclose_with_stats(
         state_ref,
         state_cuda,
         "single step do_sane=0 vs original GDN state",
-        atol=1e-5,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
 
 
 @pytest.mark.torch
 def test_gdn_sane_cuda_no_final_state(gdn_sane_inputs, gdn_sane_cuda_device):
     """output_final_state=False 时不返回最终 state。"""
-    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device)
-    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device)
-    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device)
-    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
-    tau = _to_cuda_tensor(gdn_sane_inputs["tau"], gdn_sane_cuda_device)
-    mask = _to_cuda_tensor(gdn_sane_inputs["mask"], gdn_sane_cuda_device)
+    q = _to_cuda_tensor(
+        gdn_sane_inputs["q"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    k = _to_cuda_tensor(
+        gdn_sane_inputs["k"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    v = _to_cuda_tensor(
+        gdn_sane_inputs["v"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device, dtype=torch.float32)
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    tau = _to_cuda_tensor(
+        gdn_sane_inputs["tau"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    mask = _to_cuda_tensor(
+        gdn_sane_inputs["mask"], gdn_sane_cuda_device, dtype=torch.float32
+    )
 
     out_cuda, state_cuda = gdn_cuda_recurrent(
         q, k, v, g, beta, tau, mask=mask, output_final_state=False
@@ -285,7 +383,7 @@ def test_gdn_sane_cuda_no_final_state(gdn_sane_inputs, gdn_sane_cuda_device):
     assert state_cuda is None
     assert state_ref is None
     assert_allclose_with_stats(
-        out_ref, out_cuda, "no-state cuda vs native output", atol=1e-4, rtol=1e-3
+        out_ref, out_cuda, "no-state cuda vs native output", atol=1e-2, rtol=1e-2
     )
 
 
@@ -294,15 +392,29 @@ def test_gdn_sane_cuda_mask_all_ones_matches_no_mask(
     gdn_sane_inputs, gdn_sane_cuda_device
 ):
     """mask=None 与 mask 全 1 输出一致，但 mask=None 时 final_state 为 None 并报警告。"""
-    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device)
-    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device)
-    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device)
-    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
-    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
-    tau = _to_cuda_tensor(gdn_sane_inputs["tau"], gdn_sane_cuda_device)
+    q = _to_cuda_tensor(
+        gdn_sane_inputs["q"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    k = _to_cuda_tensor(
+        gdn_sane_inputs["k"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    v = _to_cuda_tensor(
+        gdn_sane_inputs["v"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device, dtype=torch.float32)
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(
+        gdn_sane_inputs["h0"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    tau = _to_cuda_tensor(
+        gdn_sane_inputs["tau"], gdn_sane_cuda_device, dtype=torch.float32
+    )
     mask_ones = torch.ones_like(
-        _to_cuda_tensor(gdn_sane_inputs["mask"], gdn_sane_cuda_device)
+        _to_cuda_tensor(
+            gdn_sane_inputs["mask"], gdn_sane_cuda_device, dtype=torch.float32
+        )
     )
 
     out_masked, state_masked = gdn_cuda_recurrent(
@@ -323,7 +435,7 @@ def test_gdn_sane_cuda_mask_all_ones_matches_no_mask(
 
     assert state_uncond is None
     assert_allclose_with_stats(
-        out_uncond, out_masked, "masked(ones) vs uncond output", atol=1e-4, rtol=1e-3
+        out_uncond, out_masked, "masked(ones) vs uncond output", atol=1e-2, rtol=1e-2
     )
     # final_state 被污染风险：显式 mask 全 1 时返回有效 state，mask=None 时返回 None。
     assert state_masked is not None
@@ -334,13 +446,25 @@ def test_gdn_sane_native_mask_none_warns_and_returns_none_state(
     gdn_sane_inputs, gdn_sane_cuda_device
 ):
     """native 实现：mask=None 且 output_final_state=True 时报警告并返回 None state。"""
-    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device)
-    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device)
-    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device)
-    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
-    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
-    tau = _to_cuda_tensor(gdn_sane_inputs["tau"], gdn_sane_cuda_device)
+    q = _to_cuda_tensor(
+        gdn_sane_inputs["q"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    k = _to_cuda_tensor(
+        gdn_sane_inputs["k"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    v = _to_cuda_tensor(
+        gdn_sane_inputs["v"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device, dtype=torch.float32)
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(
+        gdn_sane_inputs["h0"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    tau = _to_cuda_tensor(
+        gdn_sane_inputs["tau"], gdn_sane_cuda_device, dtype=torch.float32
+    )
 
     with pytest.warns(UserWarning, match="mask is None"):
         out, state = gdn_native_recurrent(
@@ -355,15 +479,29 @@ def test_gdn_sane_cuda_mask_all_zeros_matches_original_gdn(
     gdn_sane_inputs, gdn_sane_cuda_device
 ):
     """mask 全 0 时应跳过 SANE，输出与原 GDN recurrent 一致。"""
-    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device)
-    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device)
-    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device)
-    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
-    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
-    tau = _to_cuda_tensor(gdn_sane_inputs["tau"], gdn_sane_cuda_device)
+    q = _to_cuda_tensor(
+        gdn_sane_inputs["q"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    k = _to_cuda_tensor(
+        gdn_sane_inputs["k"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    v = _to_cuda_tensor(
+        gdn_sane_inputs["v"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device, dtype=torch.float32)
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(
+        gdn_sane_inputs["h0"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    tau = _to_cuda_tensor(
+        gdn_sane_inputs["tau"], gdn_sane_cuda_device, dtype=torch.float32
+    )
     mask_zeros = torch.zeros_like(
-        _to_cuda_tensor(gdn_sane_inputs["mask"], gdn_sane_cuda_device)
+        _to_cuda_tensor(
+            gdn_sane_inputs["mask"], gdn_sane_cuda_device, dtype=torch.float32
+        )
     )
 
     out_sane, state_sane = gdn_cuda_recurrent(
@@ -385,29 +523,45 @@ def test_gdn_sane_cuda_mask_all_zeros_matches_original_gdn(
         out_ref,
         out_sane,
         "mask=0 vs original GDN output",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
     assert_allclose_with_stats(
         state_ref,
         state_sane,
         "mask=0 vs original GDN state",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
 
 
 @pytest.mark.torch
 def test_gdn_sane_cuda_rejects_arbitrary_length(gdn_sane_inputs, gdn_sane_cuda_device):
     """recurrent SANE CUDA 训练核只支持 T 被 chunk_size 整除。"""
-    q = _to_cuda_tensor(gdn_sane_inputs["q"][:, :37], gdn_sane_cuda_device)
-    k = _to_cuda_tensor(gdn_sane_inputs["k"][:, :37], gdn_sane_cuda_device)
-    v = _to_cuda_tensor(gdn_sane_inputs["v"][:, :37], gdn_sane_cuda_device)
-    g = _to_cuda_tensor(gdn_sane_inputs["g"][:, :37], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"][:, :37], gdn_sane_cuda_device)
-    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
-    tau = _to_cuda_tensor(gdn_sane_inputs["tau"][:, :2], gdn_sane_cuda_device)
-    mask = _to_cuda_tensor(gdn_sane_inputs["mask"][:, :2], gdn_sane_cuda_device)
+    q = _to_cuda_tensor(
+        gdn_sane_inputs["q"][:, :37], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    k = _to_cuda_tensor(
+        gdn_sane_inputs["k"][:, :37], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    v = _to_cuda_tensor(
+        gdn_sane_inputs["v"][:, :37], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    g = _to_cuda_tensor(
+        gdn_sane_inputs["g"][:, :37], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"][:, :37], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(
+        gdn_sane_inputs["h0"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    tau = _to_cuda_tensor(
+        gdn_sane_inputs["tau"][:, :2], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    mask = _to_cuda_tensor(
+        gdn_sane_inputs["mask"][:, :2], gdn_sane_cuda_device, dtype=torch.float32
+    )
 
     with pytest.raises(ValueError, match="必须被 chunk_size"):
         gdn_cuda_recurrent(
@@ -427,11 +581,19 @@ def test_gdn_sane_cuda_bfloat16(gdn_sane_inputs, gdn_sane_cuda_device):
     v = _to_cuda_tensor(
         gdn_sane_inputs["v"], gdn_sane_cuda_device, dtype=torch.bfloat16
     )
-    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
-    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
-    tau = _to_cuda_tensor(gdn_sane_inputs["tau"], gdn_sane_cuda_device)
-    mask = _to_cuda_tensor(gdn_sane_inputs["mask"], gdn_sane_cuda_device)
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device, dtype=torch.float32)
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(
+        gdn_sane_inputs["h0"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    tau = _to_cuda_tensor(
+        gdn_sane_inputs["tau"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    mask = _to_cuda_tensor(
+        gdn_sane_inputs["mask"], gdn_sane_cuda_device, dtype=torch.float32
+    )
 
     out_cuda, state_cuda = gdn_cuda_recurrent(
         q, k, v, g, beta, tau, mask=mask, initial_state=h0, output_final_state=True
@@ -452,14 +614,28 @@ def test_gdn_sane_cuda_bfloat16(gdn_sane_inputs, gdn_sane_cuda_device):
 @pytest.mark.slow
 def test_gdn_sane_cuda_recurrent_head_first(gdn_sane_inputs, gdn_sane_cuda_device):
     """head_first=True layout 下前向与反向均与 native 对齐。"""
-    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device)
-    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device)
-    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device)
-    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
-    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
-    tau = _to_cuda_tensor(gdn_sane_inputs["tau"], gdn_sane_cuda_device)
-    mask = _to_cuda_tensor(gdn_sane_inputs["mask"], gdn_sane_cuda_device)
+    q = _to_cuda_tensor(
+        gdn_sane_inputs["q"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    k = _to_cuda_tensor(
+        gdn_sane_inputs["k"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    v = _to_cuda_tensor(
+        gdn_sane_inputs["v"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device, dtype=torch.float32)
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(
+        gdn_sane_inputs["h0"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    tau = _to_cuda_tensor(
+        gdn_sane_inputs["tau"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    mask = _to_cuda_tensor(
+        gdn_sane_inputs["mask"], gdn_sane_cuda_device, dtype=torch.float32
+    )
 
     q_hf = q.transpose(1, 2).contiguous()
     k_hf = k.transpose(1, 2).contiguous()
@@ -485,10 +661,10 @@ def test_gdn_sane_cuda_recurrent_head_first(gdn_sane_inputs, gdn_sane_cuda_devic
     out_ref = out_ref.transpose(1, 2)
 
     assert_allclose_with_stats(
-        out_ref, out_cuda, "head_first cuda vs native output", atol=1e-4, rtol=1e-3
+        out_ref, out_cuda, "head_first cuda vs native output", atol=1e-2, rtol=1e-2
     )
     assert_allclose_with_stats(
-        state_ref, state_cuda, "head_first cuda vs native state", atol=1e-4, rtol=1e-3
+        state_ref, state_cuda, "head_first cuda vs native state", atol=1e-2, rtol=1e-2
     )
 
     grads_ref = _gdn_sane_grads(gdn_native_recurrent, q, k, v, g, beta, tau, mask, h0)
@@ -512,8 +688,8 @@ def test_gdn_sane_cuda_recurrent_head_first(gdn_sane_inputs, gdn_sane_cuda_devic
             ref,
             tgt,
             f"head_first bwd {name}",
-            atol=7e-3,
-            rtol=1e-3,
+            atol=1e-2,
+            rtol=1e-2,
         )
 
 
@@ -523,17 +699,27 @@ def test_gdn_sane_cuda_recurrent_chunk_size_8_matches_native(
     gdn_sane_inputs, gdn_sane_cuda_device
 ):
     """chunk_size=8 时 CUDA recurrent SANE 训练算子前向与 native 参考对齐。"""
-    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device)
-    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device)
-    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device)
-    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
-    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
+    q = _to_cuda_tensor(
+        gdn_sane_inputs["q"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    k = _to_cuda_tensor(
+        gdn_sane_inputs["k"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    v = _to_cuda_tensor(
+        gdn_sane_inputs["v"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device, dtype=torch.float32)
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(
+        gdn_sane_inputs["h0"], gdn_sane_cuda_device, dtype=torch.float32
+    )
 
     B, T, H, _ = q.shape
     tau8, mask8 = _make_chunk_size_8_tau_mask(B, H, T, np.random.default_rng(42))
-    tau8 = _to_cuda_tensor(tau8, gdn_sane_cuda_device)
-    mask8 = _to_cuda_tensor(mask8, gdn_sane_cuda_device)
+    tau8 = _to_cuda_tensor(tau8, gdn_sane_cuda_device, dtype=torch.float32)
+    mask8 = _to_cuda_tensor(mask8, gdn_sane_cuda_device, dtype=torch.float32)
 
     op_cuda = get_gated_delta_net_recurrent_sane(KERNEL_TYPE="cuda", chunk_size=8)
 
@@ -554,14 +740,14 @@ def test_gdn_sane_cuda_recurrent_chunk_size_8_matches_native(
     )
 
     assert_allclose_with_stats(
-        out_ref, out_cuda, "chunk_size=8 cuda vs native output", atol=1e-4, rtol=1e-3
+        out_ref, out_cuda, "chunk_size=8 cuda vs native output", atol=1e-2, rtol=1e-2
     )
     assert_allclose_with_stats(
         state_ref,
         state_cuda,
         "chunk_size=8 cuda vs native state",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
 
 
@@ -571,17 +757,27 @@ def test_gdn_sane_cuda_bwd_chunk_size_8_matches_native(
     gdn_sane_inputs, gdn_sane_cuda_device
 ):
     """chunk_size=8 时 CUDA recurrent SANE 反向梯度与 native Keras autograd 对齐。"""
-    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device)
-    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device)
-    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device)
-    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
-    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
+    q = _to_cuda_tensor(
+        gdn_sane_inputs["q"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    k = _to_cuda_tensor(
+        gdn_sane_inputs["k"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    v = _to_cuda_tensor(
+        gdn_sane_inputs["v"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device, dtype=torch.float32)
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(
+        gdn_sane_inputs["h0"], gdn_sane_cuda_device, dtype=torch.float32
+    )
 
     B, T, H, _ = q.shape
     tau8, mask8 = _make_chunk_size_8_tau_mask(B, H, T, np.random.default_rng(42))
-    tau8 = _to_cuda_tensor(tau8, gdn_sane_cuda_device)
-    mask8 = _to_cuda_tensor(mask8, gdn_sane_cuda_device)
+    tau8 = _to_cuda_tensor(tau8, gdn_sane_cuda_device, dtype=torch.float32)
+    mask8 = _to_cuda_tensor(mask8, gdn_sane_cuda_device, dtype=torch.float32)
 
     op_cuda = get_gated_delta_net_recurrent_sane(KERNEL_TYPE="cuda", chunk_size=8)
 
@@ -599,8 +795,8 @@ def test_gdn_sane_cuda_bwd_chunk_size_8_matches_native(
             ref,
             tgt,
             f"chunk_size=8 bwd {name}",
-            atol=7e-3,
-            rtol=1e-3,
+            atol=1e-2,
+            rtol=1e-2,
         )
 
 
@@ -610,17 +806,27 @@ def test_gdn_sane_cuda_inference_chunk_size_8_matches_native(
     gdn_sane_inputs, gdn_sane_cuda_device
 ):
     """chunk_size=8 时 CUDA recurrent SANE 推理算子前向与 native 参考对齐。"""
-    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device)
-    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device)
-    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device)
-    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
-    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
+    q = _to_cuda_tensor(
+        gdn_sane_inputs["q"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    k = _to_cuda_tensor(
+        gdn_sane_inputs["k"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    v = _to_cuda_tensor(
+        gdn_sane_inputs["v"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device, dtype=torch.float32)
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(
+        gdn_sane_inputs["h0"], gdn_sane_cuda_device, dtype=torch.float32
+    )
 
     B, T, H, _ = q.shape
     tau8, mask8 = _make_chunk_size_8_tau_mask(B, H, T, np.random.default_rng(42))
-    tau8 = _to_cuda_tensor(tau8, gdn_sane_cuda_device)
-    mask8 = _to_cuda_tensor(mask8, gdn_sane_cuda_device)
+    tau8 = _to_cuda_tensor(tau8, gdn_sane_cuda_device, dtype=torch.float32)
+    mask8 = _to_cuda_tensor(mask8, gdn_sane_cuda_device, dtype=torch.float32)
 
     op_cuda = get_gated_delta_net_recurrent_sane_inference(
         KERNEL_TYPE="cuda", chunk_size=8
@@ -646,15 +852,15 @@ def test_gdn_sane_cuda_inference_chunk_size_8_matches_native(
         out_ref,
         out_cuda,
         "chunk_size=8 cuda inference vs native output",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
     assert_allclose_with_stats(
         state_ref,
         state_cuda,
         "chunk_size=8 cuda inference vs native state",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
 
 
@@ -664,16 +870,24 @@ def test_gdn_sane_cuda_no_final_state_chunk_size_8(
     gdn_sane_inputs, gdn_sane_cuda_device
 ):
     """chunk_size=8 时 output_final_state=False 不返回最终 state。"""
-    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device)
-    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device)
-    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device)
-    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
+    q = _to_cuda_tensor(
+        gdn_sane_inputs["q"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    k = _to_cuda_tensor(
+        gdn_sane_inputs["k"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    v = _to_cuda_tensor(
+        gdn_sane_inputs["v"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device, dtype=torch.float32)
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"], gdn_sane_cuda_device, dtype=torch.float32
+    )
 
     B, T, H, _ = q.shape
     tau8, mask8 = _make_chunk_size_8_tau_mask(B, H, T, np.random.default_rng(42))
-    tau8 = _to_cuda_tensor(tau8, gdn_sane_cuda_device)
-    mask8 = _to_cuda_tensor(mask8, gdn_sane_cuda_device)
+    tau8 = _to_cuda_tensor(tau8, gdn_sane_cuda_device, dtype=torch.float32)
+    mask8 = _to_cuda_tensor(mask8, gdn_sane_cuda_device, dtype=torch.float32)
 
     op_cuda = get_gated_delta_net_recurrent_sane(KERNEL_TYPE="cuda", chunk_size=8)
 
@@ -690,8 +904,8 @@ def test_gdn_sane_cuda_no_final_state_chunk_size_8(
         out_ref,
         out_cuda,
         "chunk_size=8 no-state cuda vs native output",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
 
 
@@ -701,16 +915,26 @@ def test_gdn_sane_cuda_mask_all_ones_matches_no_mask_chunk_size_8(
     gdn_sane_inputs, gdn_sane_cuda_device
 ):
     """chunk_size=8 时 mask=None 与 mask 全 1 输出一致，但 final_state 为 None 并报警告。"""
-    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device)
-    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device)
-    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device)
-    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
-    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
+    q = _to_cuda_tensor(
+        gdn_sane_inputs["q"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    k = _to_cuda_tensor(
+        gdn_sane_inputs["k"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    v = _to_cuda_tensor(
+        gdn_sane_inputs["v"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device, dtype=torch.float32)
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(
+        gdn_sane_inputs["h0"], gdn_sane_cuda_device, dtype=torch.float32
+    )
 
     B, T, H, _ = q.shape
     tau8, _ = _make_chunk_size_8_tau_mask(B, H, T, np.random.default_rng(42))
-    tau8 = _to_cuda_tensor(tau8, gdn_sane_cuda_device)
+    tau8 = _to_cuda_tensor(tau8, gdn_sane_cuda_device, dtype=torch.float32)
     mask8_ones = torch.ones(B, T // 8, dtype=torch.float32, device=gdn_sane_cuda_device)
 
     op_cuda = get_gated_delta_net_recurrent_sane(KERNEL_TYPE="cuda", chunk_size=8)
@@ -736,8 +960,8 @@ def test_gdn_sane_cuda_mask_all_ones_matches_no_mask_chunk_size_8(
         out_uncond,
         out_masked,
         "chunk_size=8 masked(ones) vs uncond output",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
     assert state_masked is not None
 
@@ -748,16 +972,26 @@ def test_gdn_sane_cuda_mask_all_zeros_matches_original_gdn_chunk_size_8(
     gdn_sane_inputs, gdn_sane_cuda_device
 ):
     """chunk_size=8 时 mask 全 0 应跳过 SANE，输出与原 GDN recurrent 一致。"""
-    q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device)
-    k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device)
-    v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device)
-    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
-    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
+    q = _to_cuda_tensor(
+        gdn_sane_inputs["q"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    k = _to_cuda_tensor(
+        gdn_sane_inputs["k"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    v = _to_cuda_tensor(
+        gdn_sane_inputs["v"], gdn_sane_cuda_device, dtype=torch.bfloat16
+    )
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device, dtype=torch.float32)
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(
+        gdn_sane_inputs["h0"], gdn_sane_cuda_device, dtype=torch.float32
+    )
 
     B, T, H, _ = q.shape
     tau8, _ = _make_chunk_size_8_tau_mask(B, H, T, np.random.default_rng(42))
-    tau8 = _to_cuda_tensor(tau8, gdn_sane_cuda_device)
+    tau8 = _to_cuda_tensor(tau8, gdn_sane_cuda_device, dtype=torch.float32)
     mask8_zeros = torch.zeros(
         B, T // 8, dtype=torch.float32, device=gdn_sane_cuda_device
     )
@@ -783,15 +1017,15 @@ def test_gdn_sane_cuda_mask_all_zeros_matches_original_gdn_chunk_size_8(
         out_ref,
         out_sane,
         "chunk_size=8 mask=0 vs original GDN output",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
     assert_allclose_with_stats(
         state_ref,
         state_sane,
         "chunk_size=8 mask=0 vs original GDN state",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
 
 
@@ -808,14 +1042,18 @@ def test_gdn_sane_cuda_bfloat16_chunk_size_8(gdn_sane_inputs, gdn_sane_cuda_devi
     v = _to_cuda_tensor(
         gdn_sane_inputs["v"], gdn_sane_cuda_device, dtype=torch.bfloat16
     )
-    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
-    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device, dtype=torch.float32)
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(
+        gdn_sane_inputs["h0"], gdn_sane_cuda_device, dtype=torch.float32
+    )
 
     B, T, H, _ = q.shape
     tau8, mask8 = _make_chunk_size_8_tau_mask(B, H, T, np.random.default_rng(42))
-    tau8 = _to_cuda_tensor(tau8, gdn_sane_cuda_device)
-    mask8 = _to_cuda_tensor(mask8, gdn_sane_cuda_device)
+    tau8 = _to_cuda_tensor(tau8, gdn_sane_cuda_device, dtype=torch.float32)
+    mask8 = _to_cuda_tensor(mask8, gdn_sane_cuda_device, dtype=torch.float32)
 
     op_cuda = get_gated_delta_net_recurrent_sane(KERNEL_TYPE="cuda", chunk_size=8)
 
@@ -859,10 +1097,16 @@ def test_gdn_sane_cuda_no_mask_fwd_matches_native(
     q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device, torch.bfloat16)
     k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device, torch.bfloat16)
     v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device, torch.bfloat16)
-    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
-    tau = _to_cuda_tensor(gdn_sane_inputs["tau"], gdn_sane_cuda_device)
-    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device, dtype=torch.float32)
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    tau = _to_cuda_tensor(
+        gdn_sane_inputs["tau"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(
+        gdn_sane_inputs["h0"], gdn_sane_cuda_device, dtype=torch.float32
+    )
 
     out_cuda, state_cuda = gdn_cuda_recurrent(
         q, k, v, g, beta, tau, mask=None, initial_state=h0, output_final_state=True
@@ -902,13 +1146,27 @@ def test_gdn_sane_cuda_no_mask_bwd_matches_native(
     tau_np, h0_np = gdn_sane_inputs["tau"], gdn_sane_inputs["h0"]
 
     def _run_and_grad(fn):
-        q = _to_cuda_tensor(q_np, gdn_sane_cuda_device).requires_grad_(True)
-        k = _to_cuda_tensor(k_np, gdn_sane_cuda_device).requires_grad_(True)
-        v = _to_cuda_tensor(v_np, gdn_sane_cuda_device).requires_grad_(True)
-        g = _to_cuda_tensor(g_np, gdn_sane_cuda_device).requires_grad_(True)
-        beta = _to_cuda_tensor(beta_np, gdn_sane_cuda_device).requires_grad_(True)
-        tau = _to_cuda_tensor(tau_np, gdn_sane_cuda_device).requires_grad_(True)
-        h0 = _to_cuda_tensor(h0_np, gdn_sane_cuda_device).requires_grad_(True)
+        q = _to_cuda_tensor(
+            q_np, gdn_sane_cuda_device, dtype=torch.float32
+        ).requires_grad_(True)
+        k = _to_cuda_tensor(
+            k_np, gdn_sane_cuda_device, dtype=torch.float32
+        ).requires_grad_(True)
+        v = _to_cuda_tensor(
+            v_np, gdn_sane_cuda_device, dtype=torch.float32
+        ).requires_grad_(True)
+        g = _to_cuda_tensor(
+            g_np, gdn_sane_cuda_device, dtype=torch.float32
+        ).requires_grad_(True)
+        beta = _to_cuda_tensor(
+            beta_np, gdn_sane_cuda_device, dtype=torch.float32
+        ).requires_grad_(True)
+        tau = _to_cuda_tensor(
+            tau_np, gdn_sane_cuda_device, dtype=torch.float32
+        ).requires_grad_(True)
+        h0 = _to_cuda_tensor(
+            h0_np, gdn_sane_cuda_device, dtype=torch.float32
+        ).requires_grad_(True)
         out, state = fn(
             q, k, v, g, beta, tau, mask=None, initial_state=h0, output_final_state=True
         )
@@ -938,11 +1196,19 @@ def test_gdn_sane_cuda_output_final_state_false_ignores_mask(
     q = _to_cuda_tensor(gdn_sane_inputs["q"], gdn_sane_cuda_device, torch.bfloat16)
     k = _to_cuda_tensor(gdn_sane_inputs["k"], gdn_sane_cuda_device, torch.bfloat16)
     v = _to_cuda_tensor(gdn_sane_inputs["v"], gdn_sane_cuda_device, torch.bfloat16)
-    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device)
-    beta = _to_cuda_tensor(gdn_sane_inputs["beta"], gdn_sane_cuda_device)
-    tau = _to_cuda_tensor(gdn_sane_inputs["tau"], gdn_sane_cuda_device)
-    mask = _to_cuda_tensor(gdn_sane_inputs["mask"], gdn_sane_cuda_device)
-    h0 = _to_cuda_tensor(gdn_sane_inputs["h0"], gdn_sane_cuda_device)
+    g = _to_cuda_tensor(gdn_sane_inputs["g"], gdn_sane_cuda_device, dtype=torch.float32)
+    beta = _to_cuda_tensor(
+        gdn_sane_inputs["beta"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    tau = _to_cuda_tensor(
+        gdn_sane_inputs["tau"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    mask = _to_cuda_tensor(
+        gdn_sane_inputs["mask"], gdn_sane_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(
+        gdn_sane_inputs["h0"], gdn_sane_cuda_device, dtype=torch.float32
+    )
 
     out_with_mask, _ = gdn_cuda_recurrent(
         q, k, v, g, beta, tau, mask=mask, initial_state=h0, output_final_state=False
@@ -967,8 +1233,8 @@ def test_gdn_sane_cuda_output_final_state_false_ignores_mask(
         out_no_mask,
         out_with_mask,
         "output_final_state=False ignores mask",
-        atol=1e-3,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
     assert_allclose_with_stats(
         out_ref,

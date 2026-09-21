@@ -41,7 +41,7 @@ def gdn_sane_jax_cuda_device():
     return jax.devices()[0]
 
 
-def _prepare_sane_inputs(gdn_sane_inputs, device, dtype="float32"):
+def _prepare_sane_inputs(gdn_sane_inputs, device, dtype="bfloat16"):
     """把 gdn_sane_inputs fixture 转成 JAX 测试张量。"""
     q = _to_jax_tensor(gdn_sane_inputs["q"], device, dtype)
     k = _to_jax_tensor(gdn_sane_inputs["k"], device, dtype)
@@ -85,8 +85,8 @@ def _make_tau_mask_for_chunk_size(gdn_sane_inputs, chunk_size, device):
     tau = np.log1p(np.exp(x)) + 1.0
     mask = rng.integers(0, 2, (B, max(C, 1))).astype(np.float32)
     return (
-        _to_jax_tensor(tau.astype(np.float32), device),
-        _to_jax_tensor(mask, device),
+        _to_jax_tensor(tau.astype(np.float32), device, jnp.float32),
+        _to_jax_tensor(mask, device, jnp.float32),
     )
 
 
@@ -108,10 +108,10 @@ def test_gdn_cuda_sane_forward_matches_native(
     )
 
     assert_allclose_with_stats(
-        out_ref, out_cuda, "cuda sane vs native output", atol=1e-4, rtol=1e-3
+        out_ref, out_cuda, "cuda sane vs native output", atol=1e-2, rtol=1e-2
     )
     assert_allclose_with_stats(
-        state_ref, state_cuda, "cuda sane vs native state", atol=1e-4, rtol=1e-3
+        state_ref, state_cuda, "cuda sane vs native state", atol=1e-2, rtol=1e-2
     )
 
 
@@ -142,7 +142,7 @@ def test_gdn_cuda_sane_backward_matches_native(
     names = ["q", "k", "v", "g", "beta", "tau", "h0"]
     for name, gr, gc in zip(names, ref_grads, cuda_grads):
         assert_allclose_with_stats(
-            gr, gc, f"grad_{name} cuda sane vs native", atol=7e-3, rtol=1e-2
+            gr, gc, f"grad_{name} cuda sane vs native", atol=1e-2, rtol=1e-2
         )
 
 
@@ -426,14 +426,14 @@ def test_gdn_cuda_sane_head_first(gdn_sane_inputs, gdn_sane_jax_cuda_device):
     )
 
     assert_allclose_with_stats(
-        out_ref, out_hf, "cuda sane head_first vs default output", atol=1e-5, rtol=1e-4
+        out_ref, out_hf, "cuda sane head_first vs default output", atol=1e-2, rtol=1e-2
     )
     assert_allclose_with_stats(
         state_ref,
         state_hf,
         "cuda sane head_first vs default state",
-        atol=1e-5,
-        rtol=1e-4,
+        atol=1e-2,
+        rtol=1e-2,
     )
 
 
@@ -443,12 +443,12 @@ def test_gdn_cuda_sane_rejects_arbitrary_length(
 ):
     """JAX CUDA SANE 训练算子拒绝不被 chunk_size 整除的序列长度。"""
     device = gdn_sane_jax_cuda_device
-    q = _to_jax_tensor(gdn_sane_inputs["q"][:, :120], device)
-    k = _to_jax_tensor(gdn_sane_inputs["k"][:, :120], device)
-    v = _to_jax_tensor(gdn_sane_inputs["v"][:, :120], device)
-    g = _to_jax_tensor(gdn_sane_inputs["g"][:, :120], device)
-    beta = _to_jax_tensor(gdn_sane_inputs["beta"][:, :120], device)
-    tau = _to_jax_tensor(gdn_sane_inputs["tau"], device)
+    q = _to_jax_tensor(gdn_sane_inputs["q"][:, :120], device, jnp.bfloat16)
+    k = _to_jax_tensor(gdn_sane_inputs["k"][:, :120], device, jnp.bfloat16)
+    v = _to_jax_tensor(gdn_sane_inputs["v"][:, :120], device, jnp.bfloat16)
+    g = _to_jax_tensor(gdn_sane_inputs["g"][:, :120], device, jnp.float32)
+    beta = _to_jax_tensor(gdn_sane_inputs["beta"][:, :120], device, jnp.float32)
+    tau = _to_jax_tensor(gdn_sane_inputs["tau"], device, jnp.float32)
 
     with pytest.raises(ValueError):
         gdn_cuda_sane(q, k, v, g, beta, tau, output_final_state=False)
@@ -697,14 +697,14 @@ def test_gdn_cuda_sane_sharding_structure(gdn_sane_inputs, gdn_sane_jax_cuda_dev
     )
 
     assert_allclose_with_stats(
-        out_ref, out_jit, "cuda sane sharded vs unsharded output", atol=1e-5, rtol=1e-4
+        out_ref, out_jit, "cuda sane sharded vs unsharded output", atol=1e-2, rtol=1e-2
     )
     assert_allclose_with_stats(
         state_ref,
         state_jit,
         "cuda sane sharded vs unsharded state",
-        atol=1e-5,
-        rtol=1e-4,
+        atol=1e-2,
+        rtol=1e-2,
     )
 
 
@@ -827,8 +827,8 @@ def test_gdn_cuda_sane_output_final_state_false_ignores_mask(
         out_no_mask,
         out_with_mask,
         "output_final_state=False ignores mask",
-        atol=1e-3,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
     assert_allclose_with_stats(
         out_ref,

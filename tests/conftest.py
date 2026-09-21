@@ -366,6 +366,73 @@ def to_numpy(x):
     return np.array(x)
 
 
+def dtype_name(dtype):
+    """把各后端的 dtype 归一为 'bfloat16' / 'float32' 之类的比较用名字。
+
+    Args:
+        dtype: torch / jax / numpy 的 dtype 对象。
+
+    Returns:
+        str: 末端 dtype 名，例如 'bfloat16'、'float32'。
+    """
+    return str(dtype).split(".")[-1]
+
+
+# 反向梯度 dtype 契约：这些状态量固定 float32，其余跟随对应 primal 的 dtype。
+FP32_PRIMAL_NAMES = ("g", "beta", "tau", "mask", "h0", "do_sane")
+
+
+def assert_grad_dtypes(grads, names, primals, label=""):
+    """断言反向梯度 dtype 与对应 primal 的 dtype 契约一致。
+
+    q/k/v 的梯度必须与对应输入同 dtype（CUDA 路径由算子还原原始输入 dtype），
+    g/beta/tau/mask/h0 等状态量的梯度必须为 float32。
+
+    Args:
+        grads: 梯度序列，元素可以是 None（该输入无梯度）。
+        names: 与 grads 一一对应的输入名序列。
+        primals: dict 或与 names 对齐的序列，给出每个输入的前向张量。
+        label: str，断言信息前缀。
+
+    Returns:
+        None。不一致时抛出 AssertionError。
+    """
+    if not isinstance(primals, dict):
+        primals = dict(zip(names, primals))
+
+    for name, grad in zip(names, grads):
+        if grad is None:
+            continue
+        if name in FP32_PRIMAL_NAMES:
+            expected = "float32"
+        else:
+            expected = dtype_name(primals[name].dtype)
+        got = dtype_name(grad.dtype)
+        assert got == expected, (
+            f"{label}grad_{name}: expected dtype {expected}, got {got}"
+        )
+
+
+def assert_tensor_dtypes(tensors, expected, label=""):
+    """断言一组张量的 dtype 全部等于期望的 dtype 名字。
+
+    Args:
+        tensors: dict，名称 -> 张量。
+        expected: dict，名称 -> 期望的 dtype 名字（如 'float32'、'bfloat16'）。
+        label: str，断言信息前缀。
+
+    Returns:
+        None。不一致时抛出 AssertionError。
+    """
+    for name, tensor in tensors.items():
+        if tensor is None or name not in expected:
+            continue
+        got = dtype_name(tensor.dtype)
+        assert got == expected[name], (
+            f"{label}{name}: expected dtype {expected[name]}, got {got}"
+        )
+
+
 def assert_allclose_with_stats(
     ref,
     tgt,

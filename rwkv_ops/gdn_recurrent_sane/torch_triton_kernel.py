@@ -17,14 +17,24 @@ from .triton_kernel import (
 
 
 def _normalize_inputs(q, k, v, g, beta, head_first):
-    """把输入统一转成 [B, H, T, *] 并保证连续。"""
+    """把输入统一转成 [B, H, T, *] 并保证连续，同时对齐 dtype 契约。
+
+    q/k/v 保持调用方 dtype（三者必须一致），g/beta 统一为 float32。
+    """
+    if not (q.dtype == k.dtype == v.dtype):
+        raise ValueError(
+            f"q/k/v must share the same dtype, got {q.dtype}, {k.dtype}, {v.dtype}"
+        )
     if not head_first:
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
         g = g.transpose(1, 2)
         beta = beta.transpose(1, 2)
-    return [x.contiguous() for x in [q, k, v, g, beta]]
+    q, k, v = [x.contiguous() for x in [q, k, v]]
+    g = g.contiguous().to(torch.float32)
+    beta = beta.contiguous().to(torch.float32)
+    return q, k, v, g, beta
 
 
 def _normalize_tau_mask(tau, mask, B, H, T, chunk_size, device, use_mask):
@@ -350,12 +360,11 @@ def _make_gated_delta_net_recurrent_sane_triton_function(chunk_size):
             if num_chunks > 0:
                 dtau = dtau.transpose(1, 2)
 
-            input_dtype = q.dtype
-            dq = dq.to(input_dtype)
-            dk = dk.to(input_dtype)
-            dv = dv.to(input_dtype)
-            dg = dg.to(input_dtype)
-            dbeta = dbeta.to(input_dtype)
+            dq = dq.to(q.dtype)
+            dk = dk.to(k.dtype)
+            dv = dv.to(v.dtype)
+            dg = dg.to(torch.float32)
+            dbeta = dbeta.to(torch.float32)
             dh0 = dh0.to(torch.float32)
 
             return (
@@ -519,7 +528,7 @@ class GatedDeltaNetRecurrentSaneSingleStepTritonFunction(torch.autograd.Function
                 "head_first=True."
             )
 
-        q, k, v, g, beta = [x.contiguous() for x in [q, k, v, g, beta]]
+        q, k, v, g, beta = _normalize_inputs(q, k, v, g, beta, True)
         tau = tau.contiguous().to(torch.float32)
         do_sane = do_sane.contiguous().to(torch.float32)
 

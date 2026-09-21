@@ -46,6 +46,26 @@ def _load_ops(K, V, chunk_size):
     return ops
 
 
+# CUDA kernel 只提供 bfloat16 实例化，其他合法输入统一 cast 到该精度。
+_KERNEL_DTYPE = torch.bfloat16
+
+
+def _kernel_dtype(dtype):
+    """校验输入 dtype 合法；非 bfloat16 输入警告后统一 cast 到 bfloat16。"""
+    if dtype not in (torch.bfloat16, torch.float32):
+        raise TypeError(
+            f"DeltaNet recurrent SANE CUDA kernel only supports bfloat16 or float32 inputs, got {dtype}"
+        )
+    if dtype != _KERNEL_DTYPE:
+        warnings.warn(
+            f"DeltaNet recurrent SANE CUDA kernel computes in bfloat16; "
+            f"casting {dtype} inputs to bfloat16.",
+            UserWarning,
+            stacklevel=3,
+        )
+    return _KERNEL_DTYPE
+
+
 def _normalize_inputs(q, k, v, beta, head_first):
     """把输入统一转成 [B, H, T, *] 并保证连续，k/v 对齐 q 的 dtype。"""
     if not head_first:
@@ -53,12 +73,12 @@ def _normalize_inputs(q, k, v, beta, head_first):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
         beta = beta.transpose(1, 2)
-    if q.dtype not in (torch.bfloat16, torch.float32):
-        raise TypeError(
-            f"DeltaNet recurrent SANE CUDA kernel only supports bfloat16 "
-            f"or float32 inputs, got {q.dtype}"
+    if not (q.dtype == k.dtype == v.dtype):
+        raise ValueError(
+            f"q/k/v must share the same dtype, got {q.dtype}, {k.dtype}, {v.dtype}"
         )
-    q, k, v = [x.to(q.dtype).contiguous() for x in [q, k, v]]
+    kernel_dtype = _kernel_dtype(q.dtype)
+    q, k, v = [x.to(kernel_dtype).contiguous() for x in [q, k, v]]
     beta = beta.to(torch.float32).contiguous()
     return q, k, v, beta
 
@@ -294,7 +314,7 @@ class _DeltaNetRecurrentSaneCudaFunction(torch.autograd.Function):
         dq = dq.to(input_dtype)
         dk = dk.to(input_dtype)
         dv = dv.to(input_dtype)
-        dbeta = dbeta.to(input_dtype)
+        dbeta = dbeta.to(torch.float32)
 
         return dq, dk, dv, dbeta, dtau, None, dh0, None, None, None
 
@@ -385,13 +405,7 @@ class _DeltaNetRecurrentSaneSingleStepCudaFunction(torch.autograd.Function):
             )
 
         input_dtype = q.dtype
-        if q.dtype not in (torch.bfloat16, torch.float32):
-            raise TypeError(
-                f"DeltaNet recurrent SANE CUDA kernel only supports bfloat16 "
-                f"or float32 inputs, got {q.dtype}"
-            )
-        q, k, v = [x.to(q.dtype).contiguous() for x in [q, k, v]]
-        beta = beta.to(torch.float32).contiguous()
+        q, k, v, beta = _normalize_inputs(q, k, v, beta, True)
         tau = tau.contiguous().to(torch.float32)
         do_sane = do_sane.contiguous().to(torch.float32)
 

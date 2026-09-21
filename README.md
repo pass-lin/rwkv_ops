@@ -463,6 +463,17 @@ for step in range(seq_len):
 
 `gdn_recurrent` 提供 **Gated DeltaNet** 的逐步 recurrent 实现，支持训练、推理与单步 RNN 三种入口。默认输入 layout 为 `[B, T, H, K/V]`，设置 `head_first=True` 可切换为 `[B, H, T, K/V]`。
 
+> **dtype 契约（GDN / DeltaNet 八个家族通用）**
+>
+> - `q` / `k` / `v` 必须三者同 dtype（`bfloat16` 或 `float32`）；不一致会直接报错，不做静默 cast。
+> - `g` / `beta` / `tau` / `initial_state` 固定 `float32`（入口统一 cast）。
+> - `out` 按**调用方原始输入 dtype**返回；`final_state` / `next_state` 恒为 `float32`。
+> - 反向：`dq` / `dk` / `dv` 与对应输入同 dtype，`dg` / `dbeta` / `dtau` / `dh0` 为 `float32`。
+>   因此算子可直接嵌入 bf16 训练图，不会出现上游 `lax.mul` dtype 报错。
+> - **CUDA 后端**（JAX FFI / PyTorch 扩展）统一以 `bfloat16` 计算：非 `bfloat16`
+>   输入会发出一次 `UserWarning` 并 cast 到 bfloat16（`out` 仍按原始 dtype 返回，
+>   与 `rwkv7` / `rwkv6` CUDA 路径一致）；Pallas / Triton / native 保持输入 dtype。
+
 ```python
 from rwkv_ops import (
     gated_delta_net_recurrent,

@@ -210,8 +210,8 @@ def test_gdn_triton_bfloat16(gdn_inputs, gdn_cuda_device):
     q = _to_cuda_tensor(gdn_inputs["q"], gdn_cuda_device, dtype=torch.bfloat16)
     k = _to_cuda_tensor(gdn_inputs["k"], gdn_cuda_device, dtype=torch.bfloat16)
     v = _to_cuda_tensor(gdn_inputs["v"], gdn_cuda_device, dtype=torch.bfloat16)
-    g = _to_cuda_tensor(gdn_inputs["g"], gdn_cuda_device, dtype=torch.bfloat16)
-    beta = _to_cuda_tensor(gdn_inputs["beta"], gdn_cuda_device, dtype=torch.bfloat16)
+    g = _to_cuda_tensor(gdn_inputs["g"], gdn_cuda_device, dtype=torch.float32)
+    beta = _to_cuda_tensor(gdn_inputs["beta"], gdn_cuda_device, dtype=torch.float32)
     h0 = _to_cuda_tensor(gdn_inputs["h0"], gdn_cuda_device, dtype=torch.float32)
 
     out_tri, state_tri = gdn_triton_recurrent(
@@ -388,8 +388,8 @@ def test_gdn_triton_bfloat16_chunk_size_8(gdn_inputs, gdn_cuda_device):
     q = _to_cuda_tensor(gdn_inputs["q"], gdn_cuda_device, dtype=torch.bfloat16)
     k = _to_cuda_tensor(gdn_inputs["k"], gdn_cuda_device, dtype=torch.bfloat16)
     v = _to_cuda_tensor(gdn_inputs["v"], gdn_cuda_device, dtype=torch.bfloat16)
-    g = _to_cuda_tensor(gdn_inputs["g"], gdn_cuda_device, dtype=torch.bfloat16)
-    beta = _to_cuda_tensor(gdn_inputs["beta"], gdn_cuda_device, dtype=torch.bfloat16)
+    g = _to_cuda_tensor(gdn_inputs["g"], gdn_cuda_device, dtype=torch.float32)
+    beta = _to_cuda_tensor(gdn_inputs["beta"], gdn_cuda_device, dtype=torch.float32)
     h0 = _to_cuda_tensor(gdn_inputs["h0"], gdn_cuda_device, dtype=torch.float32)
 
     out_tri, state_tri = gdn_triton_recurrent(

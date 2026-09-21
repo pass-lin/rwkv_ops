@@ -76,6 +76,14 @@ def _transpose_back(x):
 # ===== SPMD helpers =====
 
 
+def _check_qkv_dtype(q, k, v) -> None:
+    """q/k/v 必须同 dtype，否则无法共用同一套 kernel 实例化。"""
+    if not (q.dtype == k.dtype == v.dtype):
+        raise ValueError(
+            f"q/k/v must share the same dtype, got {q.dtype}, {k.dtype}, {v.dtype}"
+        )
+
+
 def _q_spec(qs):
     spec = getattr(qs, "spec", None)
     if spec is None or len(spec) != 4:
@@ -711,7 +719,14 @@ def _get_gdn_chunk_triton_op(chunk_size):
         dq = _l2norm_bwd_spmd(q_orig, inv_norm_q, dq)
         dk = _l2norm_bwd_spmd(k_orig, inv_norm_k, dk)
 
-        return dq, dk, dv, dg, db, dh0
+        return (
+            jnp.asarray(dq, q_orig.dtype),
+            jnp.asarray(dk, k_orig.dtype),
+            jnp.asarray(dv, v.dtype),
+            jnp.asarray(dg, jnp.float32),
+            jnp.asarray(db, jnp.float32),
+            jnp.asarray(dh0, jnp.float32),
+        )
 
     _op.defvjp(_fwd, _bwd)
     _GDN_CHUNK_TRITON_OP_CACHE[chunk_size] = _op
@@ -752,6 +767,7 @@ def gated_delta_net_chunk(
     _clear_gdn_chunk_autotune_cache()
 
     dtype = q.dtype
+    _check_qkv_dtype(q, k, v)
     q = _transpose_head(jnp.asarray(q, dtype))
     k = _transpose_head(jnp.asarray(k, dtype))
     v = _transpose_head(jnp.asarray(v, dtype))

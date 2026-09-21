@@ -58,12 +58,17 @@ def _clear_gdn_chunk_autotune_cache():
 
 
 def _normalize_inputs(q, k, v, g, beta):
-    """把输入从 [B, T, H, *] 转成 [B, H, T, *] 并保证连续。"""
-    q = q.transpose(1, 2).contiguous()
-    k = k.transpose(1, 2).contiguous()
-    v = v.transpose(1, 2).contiguous()
-    g = g.transpose(1, 2).contiguous()
-    beta = beta.transpose(1, 2).contiguous()
+    """把输入从 [B, T, H, *] 转成 [B, H, T, *] 并保证连续，同时对齐 dtype 契约。
+
+    q/k/v 保持调用方 dtype（三者必须一致），g/beta 统一为 float32。
+    """
+    if not (q.dtype == k.dtype == v.dtype):
+        raise ValueError(
+            f"q/k/v must share the same dtype, got {q.dtype}, {k.dtype}, {v.dtype}"
+        )
+    q, k, v = [x.transpose(1, 2).contiguous() for x in [q, k, v]]
+    g = g.transpose(1, 2).contiguous().to(torch.float32)
+    beta = beta.transpose(1, 2).contiguous().to(torch.float32)
     return q, k, v, g, beta
 
 
@@ -165,7 +170,7 @@ class GatedDeltaNetChunkTritonFunction(torch.autograd.Function):
         scale = K**-0.5
 
         # do 从外部 layout [B, T, H, V] 转成内部 [B, H, T, V]
-        do = do.transpose(1, 2).contiguous()
+        do = do.transpose(1, 2).contiguous().to(q.dtype)
 
         # 1. 局部 dv（只含 chunk 内 causal 项）
         dv_local = gdn_chunk_bwd_dv_local(q, k, g, do, scale, chunk_size=chunk_size)
@@ -227,14 +232,14 @@ class GatedDeltaNetChunkTritonFunction(torch.autograd.Function):
         dg = dg.transpose(1, 2)
         db = db.transpose(1, 2)
 
-        # 8. 匹配 forward 输入的梯度位置
+        # 8. 匹配 forward 输入的梯度位置；梯度 dtype 与对应 primal 对齐
         return (
-            dq,
-            dk,
-            dv,
-            dg,
-            db,
-            dh0,  # initial_state
+            dq.to(q.dtype),
+            dk.to(k.dtype),
+            dv.to(v.dtype),
+            dg.to(torch.float32),
+            db.to(torch.float32),
+            dh0.to(torch.float32),  # initial_state
             None,  # output_final_state
             None,  # chunk_size
         )

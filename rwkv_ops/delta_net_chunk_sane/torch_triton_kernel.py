@@ -55,11 +55,16 @@ def _clear_delta_net_chunk_sane_autotune_cache():
 
 
 def _normalize_inputs(q, k, v, beta):
-    """把输入从 [B, T, H, *] 转成 [B, H, T, *] 并保证连续。"""
-    q = q.transpose(1, 2).contiguous()
-    k = k.transpose(1, 2).contiguous()
-    v = v.transpose(1, 2).contiguous()
-    beta = beta.transpose(1, 2).contiguous()
+    """把输入从 [B, T, H, *] 转成 [B, H, T, *] 并保证连续，同时对齐 dtype 契约。
+
+    q/k/v 保持调用方 dtype（三者必须一致），beta 统一为 float32。
+    """
+    if not (q.dtype == k.dtype == v.dtype):
+        raise ValueError(
+            f"q/k/v must share the same dtype, got {q.dtype}, {k.dtype}, {v.dtype}"
+        )
+    q, k, v = [x.transpose(1, 2).contiguous() for x in [q, k, v]]
+    beta = beta.transpose(1, 2).contiguous().to(torch.float32)
     return q, k, v, beta
 
 
@@ -207,7 +212,7 @@ class DeltaNetChunkSaneTritonFunction(torch.autograd.Function):
         scale = K**-0.5
 
         # do 从外部 layout [B, T, H, V] 转成内部 [B, H, T, V]
-        do = do.transpose(1, 2).contiguous()
+        do = do.transpose(1, 2).contiguous().to(q.dtype)
 
         # 1. 局部 dv（只含 chunk 内 causal 项）
         dv_local = delta_net_chunk_bwd_dv_local(q, k, do, scale, chunk_size=chunk_size)
@@ -282,15 +287,15 @@ class DeltaNetChunkSaneTritonFunction(torch.autograd.Function):
         db = db.transpose(1, 2)
         dtau = dtau.transpose(1, 2)
 
-        # 7. 匹配 forward 输入的梯度位置
+        # 7. 匹配 forward 输入的梯度位置；梯度 dtype 与对应 primal 对齐
         return (
-            dq,
-            dk,
-            dv,
-            db,
-            dtau,  # tau
+            dq.to(q.dtype),
+            dk.to(k.dtype),
+            dv.to(v.dtype),
+            db.to(torch.float32),
+            dtau.to(torch.float32),  # tau
             None,  # mask
-            dh0,  # initial_state
+            dh0.to(torch.float32),  # initial_state
             None,  # output_final_state
             None,  # chunk_size
             None,  # use_mask
@@ -328,7 +333,8 @@ def delta_net_chunk_sane(
             output_final_state=True 且 mask=None 时为 None 并发出 UserWarning。
 
     Raises:
-        ValueError: T 不被 chunk_size 整除，chunk_size < 16，或 tau/mask 形状不匹配。
+        ValueError: T 不被 chunk_size 整除，chunk_size < 16，q/k/v dtype 不一致，
+            或 tau/mask 形状不匹配。
     """
     B, T, H, K = q.shape
     C = T // chunk_size
@@ -349,8 +355,6 @@ def delta_net_chunk_sane(
         mask_tensor = None
 
     dtype = v.dtype
-    q = q.to(dtype)
-    k = k.to(dtype)
 
     out, final_state = DeltaNetChunkSaneTritonFunction.apply(
         q,

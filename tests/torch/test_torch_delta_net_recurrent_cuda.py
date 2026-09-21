@@ -62,11 +62,13 @@ def _stable_inputs(B, T, H, K, V, device, seed=42):
 @pytest.mark.slow
 def test_delta_net_cuda_recurrent_matches_native(delta_net_inputs, dn_cuda_device):
     """CUDA recurrent 训练算子前向结果应与 native Keras 参考对齐。"""
-    q = _to_cuda_tensor(delta_net_inputs["q"], dn_cuda_device)
-    k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device)
-    v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device)
-    beta = _to_cuda_tensor(delta_net_inputs["beta"], dn_cuda_device)
-    h0 = _to_cuda_tensor(delta_net_inputs["h0"], dn_cuda_device)
+    q = _to_cuda_tensor(delta_net_inputs["q"], dn_cuda_device, dtype=torch.bfloat16)
+    k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device, dtype=torch.bfloat16)
+    v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device, dtype=torch.bfloat16)
+    beta = _to_cuda_tensor(
+        delta_net_inputs["beta"], dn_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(delta_net_inputs["h0"], dn_cuda_device, dtype=torch.float32)
 
     out_cuda, state_cuda = dn_cuda_recurrent(
         q, k, v, beta, initial_state=h0, output_final_state=True
@@ -76,21 +78,23 @@ def test_delta_net_cuda_recurrent_matches_native(delta_net_inputs, dn_cuda_devic
     )
 
     assert_allclose_with_stats(
-        out_ref, out_cuda, "cuda recurrent vs native output", atol=1e-4, rtol=1e-3
+        out_ref, out_cuda, "cuda recurrent vs native output", atol=1e-2, rtol=1e-2
     )
     assert_allclose_with_stats(
-        state_ref, state_cuda, "cuda recurrent vs native state", atol=1e-4, rtol=1e-3
+        state_ref, state_cuda, "cuda recurrent vs native state", atol=1e-2, rtol=1e-2
     )
 
 
 @pytest.mark.torch
 def test_delta_net_cuda_inference_matches_native(delta_net_inputs, dn_cuda_device):
     """CUDA recurrent 推理算子前向结果应与 native Keras 参考对齐。"""
-    q = _to_cuda_tensor(delta_net_inputs["q"], dn_cuda_device)
-    k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device)
-    v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device)
-    beta = _to_cuda_tensor(delta_net_inputs["beta"], dn_cuda_device)
-    h0 = _to_cuda_tensor(delta_net_inputs["h0"], dn_cuda_device)
+    q = _to_cuda_tensor(delta_net_inputs["q"], dn_cuda_device, dtype=torch.bfloat16)
+    k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device, dtype=torch.bfloat16)
+    v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device, dtype=torch.bfloat16)
+    beta = _to_cuda_tensor(
+        delta_net_inputs["beta"], dn_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(delta_net_inputs["h0"], dn_cuda_device, dtype=torch.float32)
 
     out_cuda, state_cuda = dn_cuda_inference(
         q, k, v, beta, initial_state=h0, output_final_state=True
@@ -100,21 +104,29 @@ def test_delta_net_cuda_inference_matches_native(delta_net_inputs, dn_cuda_devic
     )
 
     assert_allclose_with_stats(
-        out_ref, out_cuda, "cuda inference vs native output", atol=1e-4, rtol=1e-3
+        out_ref, out_cuda, "cuda inference vs native output", atol=1e-2, rtol=1e-2
     )
     assert_allclose_with_stats(
-        state_ref, state_cuda, "cuda inference vs native state", atol=1e-4, rtol=1e-3
+        state_ref, state_cuda, "cuda inference vs native state", atol=1e-2, rtol=1e-2
     )
 
 
 @pytest.mark.torch
 def test_delta_net_cuda_single_step_matches_native(delta_net_inputs, dn_cuda_device):
     """CUDA recurrent 单步 RNN 算子前向结果应与 native Keras 参考对齐。"""
-    q = _to_cuda_tensor(delta_net_inputs["q"][:, 0], dn_cuda_device)
-    k = _to_cuda_tensor(delta_net_inputs["k"][:, 0], dn_cuda_device)
-    v = _to_cuda_tensor(delta_net_inputs["v"][:, 0], dn_cuda_device)
-    beta = _to_cuda_tensor(delta_net_inputs["beta"][:, 0], dn_cuda_device)
-    h0 = _to_cuda_tensor(delta_net_inputs["h0"], dn_cuda_device)
+    q = _to_cuda_tensor(
+        delta_net_inputs["q"][:, 0], dn_cuda_device, dtype=torch.bfloat16
+    )
+    k = _to_cuda_tensor(
+        delta_net_inputs["k"][:, 0], dn_cuda_device, dtype=torch.bfloat16
+    )
+    v = _to_cuda_tensor(
+        delta_net_inputs["v"][:, 0], dn_cuda_device, dtype=torch.bfloat16
+    )
+    beta = _to_cuda_tensor(
+        delta_net_inputs["beta"][:, 0], dn_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(delta_net_inputs["h0"], dn_cuda_device, dtype=torch.float32)
 
     out_cuda, state_cuda = dn_cuda_single_step(
         q, k, v, beta, initial_state=h0, output_final_state=True
@@ -124,20 +136,22 @@ def test_delta_net_cuda_single_step_matches_native(delta_net_inputs, dn_cuda_dev
     )
 
     assert_allclose_with_stats(
-        out_ref, out_cuda, "cuda single step vs native output", atol=1e-4, rtol=1e-3
+        out_ref, out_cuda, "cuda single step vs native output", atol=1e-2, rtol=1e-2
     )
     assert_allclose_with_stats(
-        state_ref, state_cuda, "cuda single step vs native state", atol=1e-4, rtol=1e-3
+        state_ref, state_cuda, "cuda single step vs native state", atol=1e-2, rtol=1e-2
     )
 
 
 @pytest.mark.torch
 def test_delta_net_cuda_no_final_state(delta_net_inputs, dn_cuda_device):
     """output_final_state=False 时不返回最终 state。"""
-    q = _to_cuda_tensor(delta_net_inputs["q"], dn_cuda_device)
-    k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device)
-    v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device)
-    beta = _to_cuda_tensor(delta_net_inputs["beta"], dn_cuda_device)
+    q = _to_cuda_tensor(delta_net_inputs["q"], dn_cuda_device, dtype=torch.bfloat16)
+    k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device, dtype=torch.bfloat16)
+    v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device, dtype=torch.bfloat16)
+    beta = _to_cuda_tensor(
+        delta_net_inputs["beta"], dn_cuda_device, dtype=torch.float32
+    )
 
     out_cuda, state_cuda = dn_cuda_recurrent(q, k, v, beta, output_final_state=False)
     out_ref, state_ref = dn_native_recurrent(q, k, v, beta, output_final_state=False)
@@ -145,17 +159,19 @@ def test_delta_net_cuda_no_final_state(delta_net_inputs, dn_cuda_device):
     assert state_cuda is None
     assert state_ref is None
     assert_allclose_with_stats(
-        out_ref, out_cuda, "no-state cuda vs native output", atol=1e-4, rtol=1e-3
+        out_ref, out_cuda, "no-state cuda vs native output", atol=1e-2, rtol=1e-2
     )
 
 
 @pytest.mark.torch
 def test_delta_net_cuda_no_initial_state(delta_net_inputs, dn_cuda_device):
     """initial_state=None 时 CUDA 结果与 native 参考对齐。"""
-    q = _to_cuda_tensor(delta_net_inputs["q"], dn_cuda_device)
-    k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device)
-    v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device)
-    beta = _to_cuda_tensor(delta_net_inputs["beta"], dn_cuda_device)
+    q = _to_cuda_tensor(delta_net_inputs["q"], dn_cuda_device, dtype=torch.bfloat16)
+    k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device, dtype=torch.bfloat16)
+    v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device, dtype=torch.bfloat16)
+    beta = _to_cuda_tensor(
+        delta_net_inputs["beta"], dn_cuda_device, dtype=torch.float32
+    )
 
     out_cuda, state_cuda = dn_cuda_recurrent(
         q, k, v, beta, initial_state=None, output_final_state=True
@@ -168,26 +184,30 @@ def test_delta_net_cuda_no_initial_state(delta_net_inputs, dn_cuda_device):
         out_ref,
         out_cuda,
         "no initial_state cuda vs native output",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
     assert_allclose_with_stats(
         state_ref,
         state_cuda,
         "no initial_state cuda vs native state",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
 
 
 @pytest.mark.torch
 def test_delta_net_cuda_initial_state_broadcast(delta_net_inputs, dn_cuda_device):
     """initial_state [1, H, K, V] 应能广播到 batch。"""
-    q = _to_cuda_tensor(delta_net_inputs["q"], dn_cuda_device)
-    k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device)
-    v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device)
-    beta = _to_cuda_tensor(delta_net_inputs["beta"], dn_cuda_device)
-    h0 = _to_cuda_tensor(delta_net_inputs["h0"][:1], dn_cuda_device)
+    q = _to_cuda_tensor(delta_net_inputs["q"], dn_cuda_device, dtype=torch.bfloat16)
+    k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device, dtype=torch.bfloat16)
+    v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device, dtype=torch.bfloat16)
+    beta = _to_cuda_tensor(
+        delta_net_inputs["beta"], dn_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(
+        delta_net_inputs["h0"][:1], dn_cuda_device, dtype=torch.float32
+    )
 
     out_cuda, state_cuda = dn_cuda_recurrent(
         q, k, v, beta, initial_state=h0, output_final_state=True
@@ -200,26 +220,34 @@ def test_delta_net_cuda_initial_state_broadcast(delta_net_inputs, dn_cuda_device
         out_ref,
         out_cuda,
         "broadcast state cuda vs native output",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
     assert_allclose_with_stats(
         state_ref,
         state_cuda,
         "broadcast state cuda vs native state",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
 
 
 @pytest.mark.torch
 def test_delta_net_cuda_rejects_arbitrary_length(delta_net_inputs, dn_cuda_device):
     """recurrent CUDA 训练核只支持 T 被 chunk_size 整除。"""
-    q = _to_cuda_tensor(delta_net_inputs["q"][:, :37], dn_cuda_device)
-    k = _to_cuda_tensor(delta_net_inputs["k"][:, :37], dn_cuda_device)
-    v = _to_cuda_tensor(delta_net_inputs["v"][:, :37], dn_cuda_device)
-    beta = _to_cuda_tensor(delta_net_inputs["beta"][:, :37], dn_cuda_device)
-    h0 = _to_cuda_tensor(delta_net_inputs["h0"], dn_cuda_device)
+    q = _to_cuda_tensor(
+        delta_net_inputs["q"][:, :37], dn_cuda_device, dtype=torch.bfloat16
+    )
+    k = _to_cuda_tensor(
+        delta_net_inputs["k"][:, :37], dn_cuda_device, dtype=torch.bfloat16
+    )
+    v = _to_cuda_tensor(
+        delta_net_inputs["v"][:, :37], dn_cuda_device, dtype=torch.bfloat16
+    )
+    beta = _to_cuda_tensor(
+        delta_net_inputs["beta"][:, :37], dn_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(delta_net_inputs["h0"], dn_cuda_device, dtype=torch.float32)
 
     with pytest.raises(ValueError, match="必须被 chunk_size"):
         dn_cuda_recurrent(q, k, v, beta, initial_state=h0, output_final_state=True)
@@ -232,7 +260,7 @@ def test_delta_net_cuda_bfloat16(delta_net_inputs, dn_cuda_device):
     k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device, dtype=torch.bfloat16)
     v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device, dtype=torch.bfloat16)
     beta = _to_cuda_tensor(
-        delta_net_inputs["beta"], dn_cuda_device, dtype=torch.bfloat16
+        delta_net_inputs["beta"], dn_cuda_device, dtype=torch.float32
     )
     h0 = _to_cuda_tensor(delta_net_inputs["h0"], dn_cuda_device, dtype=torch.float32)
 
@@ -263,11 +291,13 @@ def test_delta_net_cuda_bfloat16(delta_net_inputs, dn_cuda_device):
 @pytest.mark.slow
 def test_delta_net_cuda_recurrent_backward(delta_net_inputs, dn_cuda_device):
     """CUDA recurrent 训练算子反向梯度与 native Keras 参考对齐。"""
-    q = _to_cuda_tensor(delta_net_inputs["q"], dn_cuda_device)
-    k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device)
-    v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device)
-    beta = _to_cuda_tensor(delta_net_inputs["beta"], dn_cuda_device)
-    h0 = _to_cuda_tensor(delta_net_inputs["h0"], dn_cuda_device)
+    q = _to_cuda_tensor(delta_net_inputs["q"], dn_cuda_device, dtype=torch.bfloat16)
+    k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device, dtype=torch.bfloat16)
+    v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device, dtype=torch.bfloat16)
+    beta = _to_cuda_tensor(
+        delta_net_inputs["beta"], dn_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(delta_net_inputs["h0"], dn_cuda_device, dtype=torch.float32)
 
     g_ref = _dn_grads(dn_native_recurrent, q, k, v, beta, h0)
     g_cuda = _dn_grads(dn_cuda_recurrent, q, k, v, beta, h0)
@@ -277,7 +307,7 @@ def test_delta_net_cuda_recurrent_backward(delta_net_inputs, dn_cuda_device):
             gr,
             gc,
             f"grad_{name} cuda vs native",
-            atol=7e-3,
+            atol=1e-2,
             rtol=1e-2,
         )
 
@@ -286,11 +316,13 @@ def test_delta_net_cuda_recurrent_backward(delta_net_inputs, dn_cuda_device):
 @pytest.mark.slow
 def test_delta_net_cuda_recurrent_head_first(delta_net_inputs, dn_cuda_device):
     """head_first=True layout 下前向与反向均与 native 对齐。"""
-    q = _to_cuda_tensor(delta_net_inputs["q"], dn_cuda_device)
-    k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device)
-    v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device)
-    beta = _to_cuda_tensor(delta_net_inputs["beta"], dn_cuda_device)
-    h0 = _to_cuda_tensor(delta_net_inputs["h0"], dn_cuda_device)
+    q = _to_cuda_tensor(delta_net_inputs["q"], dn_cuda_device, dtype=torch.bfloat16)
+    k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device, dtype=torch.bfloat16)
+    v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device, dtype=torch.bfloat16)
+    beta = _to_cuda_tensor(
+        delta_net_inputs["beta"], dn_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(delta_net_inputs["h0"], dn_cuda_device, dtype=torch.float32)
 
     q_hf = q.transpose(1, 2).contiguous()
     k_hf = k.transpose(1, 2).contiguous()
@@ -312,10 +344,10 @@ def test_delta_net_cuda_recurrent_head_first(delta_net_inputs, dn_cuda_device):
     out_ref = out_ref.transpose(1, 2)
 
     assert_allclose_with_stats(
-        out_ref, out_cuda, "head_first cuda vs native output", atol=1e-4, rtol=1e-3
+        out_ref, out_cuda, "head_first cuda vs native output", atol=1e-2, rtol=1e-2
     )
     assert_allclose_with_stats(
-        state_ref, state_cuda, "head_first cuda vs native state", atol=1e-4, rtol=1e-3
+        state_ref, state_cuda, "head_first cuda vs native state", atol=1e-2, rtol=1e-2
     )
 
     g_ref = _dn_grads(dn_native_recurrent, q, k, v, beta, h0)
@@ -330,7 +362,7 @@ def test_delta_net_cuda_recurrent_head_first(delta_net_inputs, dn_cuda_device):
             gr,
             gc,
             f"head_first grad_{name} cuda vs native",
-            atol=7e-3,
+            atol=1e-2,
             rtol=1e-2,
         )
 
@@ -350,7 +382,7 @@ def test_delta_net_cuda_recurrent_backward_various_v(V, dn_cuda_device):
             gr,
             gc,
             f"V={V} grad_{name} cuda vs native",
-            atol=7e-3,
+            atol=1e-2,
             rtol=1e-2,
         )
 
@@ -359,11 +391,13 @@ def test_delta_net_cuda_recurrent_backward_various_v(V, dn_cuda_device):
 @pytest.mark.slow
 def test_delta_net_cuda_recurrent_chunk_size_8(delta_net_inputs, dn_cuda_device):
     """CUDA recurrent 训练算子在 chunk_size=8 时前向与 native 对齐。"""
-    q = _to_cuda_tensor(delta_net_inputs["q"], dn_cuda_device)
-    k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device)
-    v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device)
-    beta = _to_cuda_tensor(delta_net_inputs["beta"], dn_cuda_device)
-    h0 = _to_cuda_tensor(delta_net_inputs["h0"], dn_cuda_device)
+    q = _to_cuda_tensor(delta_net_inputs["q"], dn_cuda_device, dtype=torch.bfloat16)
+    k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device, dtype=torch.bfloat16)
+    v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device, dtype=torch.bfloat16)
+    beta = _to_cuda_tensor(
+        delta_net_inputs["beta"], dn_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(delta_net_inputs["h0"], dn_cuda_device, dtype=torch.float32)
 
     out_cuda, state_cuda = dn_cuda_recurrent(
         q, k, v, beta, initial_state=h0, output_final_state=True, chunk_size=8
@@ -376,26 +410,28 @@ def test_delta_net_cuda_recurrent_chunk_size_8(delta_net_inputs, dn_cuda_device)
         out_ref,
         out_cuda,
         "chunk_size=8 cuda recurrent vs native output",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
     assert_allclose_with_stats(
         state_ref,
         state_cuda,
         "chunk_size=8 cuda recurrent vs native state",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
 
 
 @pytest.mark.torch
 def test_delta_net_cuda_inference_chunk_size_8(delta_net_inputs, dn_cuda_device):
     """CUDA recurrent 推理算子在 chunk_size=8 时前向与 native 对齐。"""
-    q = _to_cuda_tensor(delta_net_inputs["q"], dn_cuda_device)
-    k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device)
-    v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device)
-    beta = _to_cuda_tensor(delta_net_inputs["beta"], dn_cuda_device)
-    h0 = _to_cuda_tensor(delta_net_inputs["h0"], dn_cuda_device)
+    q = _to_cuda_tensor(delta_net_inputs["q"], dn_cuda_device, dtype=torch.bfloat16)
+    k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device, dtype=torch.bfloat16)
+    v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device, dtype=torch.bfloat16)
+    beta = _to_cuda_tensor(
+        delta_net_inputs["beta"], dn_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(delta_net_inputs["h0"], dn_cuda_device, dtype=torch.float32)
 
     out_cuda, state_cuda = dn_cuda_inference(
         q, k, v, beta, initial_state=h0, output_final_state=True, chunk_size=8
@@ -408,15 +444,15 @@ def test_delta_net_cuda_inference_chunk_size_8(delta_net_inputs, dn_cuda_device)
         out_ref,
         out_cuda,
         "chunk_size=8 cuda inference vs native output",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
     assert_allclose_with_stats(
         state_ref,
         state_cuda,
         "chunk_size=8 cuda inference vs native state",
-        atol=1e-4,
-        rtol=1e-3,
+        atol=1e-2,
+        rtol=1e-2,
     )
 
 
@@ -426,11 +462,13 @@ def test_delta_net_cuda_recurrent_backward_chunk_size_8(
     delta_net_inputs, dn_cuda_device
 ):
     """CUDA recurrent 训练算子在 chunk_size=8 时反向梯度与 native 对齐。"""
-    q = _to_cuda_tensor(delta_net_inputs["q"], dn_cuda_device)
-    k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device)
-    v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device)
-    beta = _to_cuda_tensor(delta_net_inputs["beta"], dn_cuda_device)
-    h0 = _to_cuda_tensor(delta_net_inputs["h0"], dn_cuda_device)
+    q = _to_cuda_tensor(delta_net_inputs["q"], dn_cuda_device, dtype=torch.bfloat16)
+    k = _to_cuda_tensor(delta_net_inputs["k"], dn_cuda_device, dtype=torch.bfloat16)
+    v = _to_cuda_tensor(delta_net_inputs["v"], dn_cuda_device, dtype=torch.bfloat16)
+    beta = _to_cuda_tensor(
+        delta_net_inputs["beta"], dn_cuda_device, dtype=torch.float32
+    )
+    h0 = _to_cuda_tensor(delta_net_inputs["h0"], dn_cuda_device, dtype=torch.float32)
 
     g_ref = _dn_grads(dn_native_recurrent, q, k, v, beta, h0, chunk_size=8)
     g_cuda = _dn_grads(dn_cuda_recurrent, q, k, v, beta, h0, chunk_size=8)
@@ -440,6 +478,6 @@ def test_delta_net_cuda_recurrent_backward_chunk_size_8(
             gr,
             gc,
             f"chunk_size=8 grad_{name} cuda vs native",
-            atol=7e-3,
+            atol=1e-2,
             rtol=1e-2,
         )

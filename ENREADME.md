@@ -482,6 +482,14 @@ for step in range(seq_len):
 
 `gdn_recurrent` provides a step-by-step recurrent implementation of **Gated DeltaNet**, with training, inference, and single-step RNN entry points. The default input layout is `[B, T, H, K/V]`; set `head_first=True` to use `[B, H, T, K/V]`.
 
+> **dtype contract (shared by all eight GDN / DeltaNet families)**
+>
+> - `q` / `k` / `v` must share the same dtype (`bfloat16` or `float32`); mismatches raise instead of being silently cast.
+> - `g` / `beta` / `tau` / `initial_state` are `float32` (cast at the entry).
+> - `out` is returned in the **caller's original input dtype**; `final_state` / `next_state` are always `float32`.
+> - Backward: `dq` / `dk` / `dv` match the dtype of their inputs, while `dg` / `dbeta` / `dtau` / `dh0` are `float32`, so the ops can be embedded directly in bf16 training graphs without upstream `lax.mul` dtype errors.
+> - **CUDA backends** (JAX FFI / PyTorch extension) always compute in `bfloat16`: non-`bfloat16` inputs raise one `UserWarning` and are cast to bfloat16 (`out` is still restored to the original dtype, matching the `rwkv7` / `rwkv6` CUDA paths); Pallas / Triton / native keep the input dtype.
+
 ```python
 from rwkv_ops import (
     gated_delta_net_recurrent,
