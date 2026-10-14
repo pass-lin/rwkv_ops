@@ -30,12 +30,18 @@ FWD_RULE = "b t c, b t n c, b t n, b t n m -> b t n c"
 BWD_RULE = "b t c, b t n c, b t n, b t n m, b t n c -> b t c, b t n c, b t n, b t n m"
 
 
-def _fwd_infer_sharding(arg_shapes, arg_shardings):
+def _fwd_infer_sharding(*args):
+   
+    mesh, arg_shapes, result_shape = args[-3], args[-2], args[-1]
+    arg_shardings = tuple(getattr(a, 'sharding', a) for a in arg_shapes)
     qs = arg_shardings[1]
     return (qs,)
 
 
-def _bwd_infer_sharding(arg_shapes, arg_shardings):
+def _bwd_infer_sharding(*args):
+   
+    mesh, arg_shapes, result_shape = args[-3], args[-2], args[-1]
+    arg_shardings = tuple(getattr(a, 'sharding', a) for a in arg_shapes)
     return (
         arg_shardings[0],
         arg_shardings[1],
@@ -45,9 +51,12 @@ def _bwd_infer_sharding(arg_shapes, arg_shardings):
 
 
 def _create_partition(impl_fn):
-    def partition(mesh, arg_shapes, result_shape):
+    def partition(*args):
+       
+        static_args = args[:-3]
+        mesh, arg_shapes, result_shape = args[-3], args[-2], args[-1]
         def lower_fn(*args):
-            return impl_fn(*args)
+            return impl_fn(*args, *static_args)
 
         result_shardings = jtu.tree_map(lambda x: x.sharding, result_shape)
         arg_shardings = jtu.tree_map(lambda x: x.sharding, arg_shapes)

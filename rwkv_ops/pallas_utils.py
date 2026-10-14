@@ -256,9 +256,11 @@ def create_partition(impl_fn):
         callable, partition 回调函数。
     """
 
-    def partition(mesh, arg_shapes, result_shape):
+    def partition(*args):
+        static_args = args[:-3]
+        mesh, arg_shapes, result_shape = args[-3], args[-2], args[-1]
         def lower_fn(*args):
-            return impl_fn(*args)
+            return impl_fn(*args, *static_args)
 
         result_shardings = jtu.tree_map(lambda x: x.sharding, result_shape)
         arg_shardings = jtu.tree_map(lambda x: x.sharding, arg_shapes)

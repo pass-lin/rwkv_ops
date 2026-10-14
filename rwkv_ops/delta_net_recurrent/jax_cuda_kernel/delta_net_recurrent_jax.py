@@ -98,7 +98,10 @@ def _sharding_for_beta(qs):
     return NamedSharding(qs.mesh, PartitionSpec(spec[0], spec[1], spec[2]))
 
 
-def _fwd_infer_sharding(arg_shapes, arg_shardings):
+def _fwd_infer_sharding(*args):
+   
+    mesh, arg_shapes, result_shape = args[-3], args[-2], args[-1]
+    arg_shardings = tuple(getattr(a, 'sharding', a) for a in arg_shapes)
     qs = arg_shardings[0]
     return (
         _sharding_like_v(qs),
@@ -109,7 +112,10 @@ def _fwd_infer_sharding(arg_shapes, arg_shardings):
     )
 
 
-def _bwd_infer_sharding(arg_shapes, arg_shardings):
+def _bwd_infer_sharding(*args):
+    
+    mesh, arg_shapes, result_shape = args[-3], args[-2], args[-1]
+    arg_shardings = tuple(getattr(a, 'sharding', a) for a in arg_shapes)
     qs = arg_shardings[0]
     return (
         _sharding_like_q(qs),
@@ -120,7 +126,10 @@ def _bwd_infer_sharding(arg_shapes, arg_shardings):
     )
 
 
-def _inf_infer_sharding(arg_shapes, arg_shardings):
+def _inf_infer_sharding(*args):
+    
+    mesh, arg_shapes, result_shape = args[-3], args[-2], args[-1]
+    arg_shardings = tuple(getattr(a, 'sharding', a) for a in arg_shapes)
     qs = arg_shardings[0]
     return (_sharding_like_v(qs), _sharding_for_final_state(qs))
 
