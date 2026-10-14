@@ -136,9 +136,8 @@ def _sharding_for_tau(qs):
 
 
 def _fwd_infer_sharding(*args):
-   
     mesh, arg_shapes, result_shape = args[-3], args[-2], args[-1]
-    arg_shardings = tuple(getattr(a, 'sharding', a) for a in arg_shapes)
+    arg_shardings = tuple(getattr(a, "sharding", a) for a in arg_shapes)
     qs = arg_shardings[0]
     return (
         _sharding_like_v(qs),
@@ -151,9 +150,8 @@ def _fwd_infer_sharding(*args):
 
 
 def _bwd_infer_sharding(*args):
-   
     mesh, arg_shapes, result_shape = args[-3], args[-2], args[-1]
-    arg_shardings = tuple(getattr(a, 'sharding', a) for a in arg_shapes)
+    arg_shardings = tuple(getattr(a, "sharding", a) for a in arg_shapes)
     qs = arg_shardings[0]
     return (
         _sharding_like_q(qs),
@@ -167,9 +165,8 @@ def _bwd_infer_sharding(*args):
 
 
 def _inf_infer_sharding(*args):
-   
     mesh, arg_shapes, result_shape = args[-3], args[-2], args[-1]
-    arg_shardings = tuple(getattr(a, 'sharding', a) for a in arg_shapes)
+    arg_shardings = tuple(getattr(a, "sharding", a) for a in arg_shapes)
     qs = arg_shardings[0]
     return (_sharding_like_v(qs), _sharding_for_final_state(qs))
 

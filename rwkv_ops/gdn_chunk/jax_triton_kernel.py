@@ -132,9 +132,9 @@ def _for_final(qs):
 
 def _create_partition(impl_fn):
     def partition(*args):
-        
         static_args = args[:-3]
         mesh, arg_shapes, result_shape = args[-3], args[-2], args[-1]
+
         def lower_fn(*args):
             return impl_fn(*args, *static_args)
 
