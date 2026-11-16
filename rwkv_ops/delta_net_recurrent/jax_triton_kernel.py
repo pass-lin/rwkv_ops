@@ -8,12 +8,12 @@ from typing import Optional, Tuple, Union
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
-import jax_triton as jt
 import triton
 
 from jax.experimental.custom_partitioning import custom_partitioning
 from jax.sharding import NamedSharding, PartitionSpec
 
+from ..triton_launch import MAX_BV, triton_call
 from .triton_kernel import (
     delta_net_recurrent_bwd_kernel,
     delta_net_recurrent_fwd_kernel,
@@ -165,7 +165,7 @@ def _prepare_h0(initial_state, B, N, K, V):
 
 def _compute_bv(V):
     """计算反向 kernel 的 V block 大小。"""
-    return min(128, triton.next_power_of_2(int(V)))
+    return min(MAX_BV, triton.next_power_of_2(int(V)))
 
 
 def _compute_grid(B, H, V):
@@ -197,7 +197,7 @@ def _dn_recurrent_fwd_triton_call(q, k, v, beta, h0, chunk_size: int):
     grid = _compute_grid(B, N, V)
     scale = K**-0.5
 
-    out, kv_mem, state_chkp, inv_norm_q, inv_norm_k, ht = jt.triton_call(
+    out, kv_mem, state_chkp, inv_norm_q, inv_norm_k, ht = triton_call(
         q,
         k,
         v,
@@ -232,7 +232,6 @@ _dn_recurrent_fwd_spmd.def_partition(
     partition=_create_partition(_dn_recurrent_fwd_triton_call),
 )
 
-
 # 训练反向
 
 
@@ -266,7 +265,7 @@ def _dn_recurrent_bwd_triton_call(
     grid = _compute_grid(B, N, V)
     scale = K**-0.5
 
-    return jt.triton_call(
+    return triton_call(
         q,
         k,
         v,
@@ -394,7 +393,6 @@ def _dn_train_bwd(chunk_size: int, res, grads):
 
 _dn_recurrent_train.defvjp(_dn_train_fwd, _dn_train_bwd)
 
-
 # 推理前向
 
 
@@ -412,7 +410,7 @@ def _dn_recurrent_inf_triton_call(q, k, v, beta, h0):
     grid = _compute_grid(B, N, V)
     scale = K**-0.5
 
-    return jt.triton_call(
+    return triton_call(
         q,
         k,
         v,
@@ -445,7 +443,6 @@ _dn_recurrent_inf_spmd.def_partition(
     partition=_create_partition(_dn_recurrent_inf_triton_call),
 )
 
-
 # 单步 RNN 前向
 
 
@@ -463,7 +460,7 @@ def _dn_recurrent_single_step_triton_call(q, k, v, beta, h0):
     grid = _compute_grid(B, N, V)
     scale = K**-0.5
 
-    return jt.triton_call(
+    return triton_call(
         q,
         k,
         v,

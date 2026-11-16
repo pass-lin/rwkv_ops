@@ -9,12 +9,12 @@ from typing import Optional, Tuple, Union
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
-import jax_triton as jt
 import triton
 
 from jax.experimental.custom_partitioning import custom_partitioning
 from jax.sharding import NamedSharding, PartitionSpec
 
+from ..triton_launch import MAX_BV, triton_call
 from .triton_kernel import (
     delta_net_recurrent_sane_bwd_kernel,
     delta_net_recurrent_sane_bwd_kernel_no_mask,
@@ -29,11 +29,11 @@ from .triton_kernel import (
 # b=Batch, n=Head, t=Time, k=HeadK, v=HeadV, c=Chunk
 FWD_RULE = (
     "b n t k, b n t k, b n t v, b n t, b n c, b c, b n k v -> "
-    "b n t v, b n t v, b n c k v, b n t, b n t, b n k v"
+    "b n t v, b n t v, b n c k v, b n t, b n t"
 )
 BWD_RULE = (
     "b n t k, b n t k, b n t v, b n t, b n t v, b n k v, "
-    "b n t v, b n t, b n k v, b n c k v, b n c, b c -> "
+    "b n t v, b n t, b n t, b n k v, b n c k v, b n c, b c -> "
     "b n t k, b n t k, b n t v, b n t, b n c, b n k v"
 )
 INF_RULE = "b n t k, b n t k, b n t v, b n t, b n c, b c, b n k v -> b n t v, b n k v"
@@ -42,11 +42,11 @@ SINGLE_RULE = "b n k, b n k, b n v, b n, b n, b, b n k v -> b n v, b n k v"
 # 无 mask 版本规则：去掉 mask 的 `b c` 项，chunk 边界无条件 SANE。
 FWD_RULE_NO_MASK = (
     "b n t k, b n t k, b n t v, b n t, b n c, b n k v -> "
-    "b n t v, b n t v, b n c k v, b n t, b n t, b n k v"
+    "b n t v, b n t v, b n c k v, b n t, b n t"
 )
 BWD_RULE_NO_MASK = (
     "b n t k, b n t k, b n t v, b n t, b n t v, b n k v, "
-    "b n t v, b n t, b n k v, b n c k v, b n c -> "
+    "b n t v, b n t, b n t, b n k v, b n c k v, b n c -> "
     "b n t k, b n t k, b n t v, b n t, b n c, b n k v"
 )
 INF_RULE_NO_MASK = (
@@ -127,7 +127,6 @@ def _fwd_infer_sharding(*args):
         _sharding_for_state(qs),
         _sharding_for_gb(qs),
         _sharding_for_gb(qs),
-        _sharding_for_final_state(qs),
     )
 
 
@@ -244,7 +243,7 @@ def _apply_sane_to_final_state(
 
 def _compute_bv(V):
     """计算反向 kernel 的 V block 大小。"""
-    return min(128, triton.next_power_of_2(int(V)))
+    return min(MAX_BV, triton.next_power_of_2(int(V)))
 
 
 def _compute_grid(B, H, V):
@@ -278,7 +277,7 @@ def _delta_net_recurrent_sane_fwd_triton_call(
 
     grid = _compute_grid(B, N, V)
 
-    out, kv_mem, state_chkp, inv_norm_q, inv_norm_k, _ = jt.triton_call(
+    out, kv_mem, state_chkp, inv_norm_q, inv_norm_k, _ = triton_call(
         q,
         k,
         v,
@@ -345,7 +344,7 @@ def _delta_net_recurrent_sane_fwd_triton_call_no_mask(
 
     grid = _compute_grid(B, N, V)
 
-    out, kv_mem, state_chkp, inv_norm_q, inv_norm_k, _ = jt.triton_call(
+    out, kv_mem, state_chkp, inv_norm_q, inv_norm_k, _ = triton_call(
         q,
         k,
         v,
@@ -385,7 +384,6 @@ _delta_net_recurrent_sane_fwd_spmd_no_mask.def_partition(
     partition=_create_partition(_delta_net_recurrent_sane_fwd_spmd_impl_no_mask),
 )
 
-
 # 训练反向
 
 
@@ -424,7 +422,7 @@ def _delta_net_recurrent_sane_bwd_triton_call(
 
     grid = _compute_grid(B, N, V)
 
-    return jt.triton_call(
+    return triton_call(
         q,
         k,
         v,
@@ -627,7 +625,7 @@ def _delta_net_recurrent_sane_bwd_triton_call_no_mask(
 
     grid = _compute_grid(B, N, V)
 
-    return jt.triton_call(
+    return triton_call(
         q,
         k,
         v,
@@ -778,7 +776,6 @@ _delta_net_recurrent_sane_train_no_mask.defvjp(
     _dn_train_fwd_no_mask, _dn_train_bwd_no_mask
 )
 
-
 # 推理前向
 
 
@@ -798,7 +795,7 @@ def _delta_net_recurrent_sane_inf_triton_call(
 
     grid = _compute_grid(B, N, V)
 
-    return jt.triton_call(
+    return triton_call(
         q,
         k,
         v,
@@ -859,7 +856,7 @@ def _delta_net_recurrent_sane_inf_triton_call_no_mask(
 
     grid = _compute_grid(B, N, V)
 
-    return jt.triton_call(
+    return triton_call(
         q,
         k,
         v,
@@ -898,7 +895,6 @@ _delta_net_recurrent_sane_inf_spmd_no_mask.def_partition(
     partition=_create_partition(_delta_net_recurrent_sane_inf_spmd_impl_no_mask),
 )
 
-
 # 单步 RNN 前向
 
 
@@ -916,7 +912,7 @@ def _delta_net_recurrent_sane_single_step_triton_call(q, k, v, beta, tau, do_san
 
     grid = _compute_grid(B, N, V)
 
-    return jt.triton_call(
+    return triton_call(
         q,
         k,
         v,
@@ -953,7 +949,6 @@ _delta_net_recurrent_sane_single_step_spmd.def_partition(
     sharding_rule=SINGLE_RULE,
     partition=_create_partition(_delta_net_recurrent_sane_single_step_spmd_impl),
 )
-
 
 # 对外 API
 

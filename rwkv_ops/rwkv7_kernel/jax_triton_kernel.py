@@ -4,10 +4,10 @@ from __future__ import annotations
 import functools
 import jax
 import jax.numpy as jnp
-import jax_triton as jt
 import jax.tree_util as jtu
 from typing import Optional, Tuple, Union
 
+from ..triton_launch import triton_call
 from .triton_kernel import (
     rwkv7_fwd_kernel,
     rwkv7_bwd_kernel,
@@ -117,7 +117,7 @@ def _wkv7_fwd_triton_call(r, w, k, v, a, b, h0, chunk_size: int):
     def grid(meta):
         return ((B + meta["MINI_BSZ"] - 1) // meta["MINI_BSZ"], N)
 
-    out, sa_out, state_chkp = jt.triton_call(
+    out, sa_out, state_chkp = triton_call(
         r,
         w,
         k,
@@ -154,7 +154,7 @@ def _wkv7_bwd_triton_call(r, w, k, v, a, b, dy, sa, state_chkp, dht, chunk_size:
     def grid(meta):
         return ((B + meta["MINI_BSZ"] - 1) // meta["MINI_BSZ"], N)
 
-    dr, dw, dk, dv, da, db, dh0 = jt.triton_call(
+    dr, dw, dk, dv, da, db, dh0 = triton_call(
         r,
         w,
         k,
@@ -248,7 +248,7 @@ def _wkv7_fwd_with_mask_triton_call(r, w, k, v, a, b, h0, mask, chunk_size: int)
     def grid(meta):
         return ((B + meta["MINI_BSZ"] - 1) // meta["MINI_BSZ"], N)
 
-    out, sa_out, state_chkp = jt.triton_call(
+    out, sa_out, state_chkp = triton_call(
         r,
         w,
         k,
@@ -300,7 +300,7 @@ def _wkv7_bwd_with_mask_triton_call(
     def grid(meta):
         return ((B + meta["MINI_BSZ"] - 1) // meta["MINI_BSZ"], N)
 
-    dr, dw, dk, dv, da, db, dh0 = jt.triton_call(
+    dr, dw, dk, dv, da, db, dh0 = triton_call(
         r,
         w,
         k,

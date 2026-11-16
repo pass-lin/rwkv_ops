@@ -256,3 +256,32 @@ def test_gdn_pallas_recurrent_backward_chunk_size(gdn_inputs, gdn_jax_device):
             atol=7e-3,
             rtol=1e-2,
         )
+
+
+@pytest.mark.jax
+def test_gdn_factory_single_step_default_backend(gdn_inputs, gdn_jax_device):
+    """工厂默认 KERNEL_TYPE 下的单步算子在 GPU 上可执行且与 native 对齐。"""
+    from rwkv_ops.gdn_recurrent import get_gated_delta_net_recurrent_single_step
+
+    op = get_gated_delta_net_recurrent_single_step()
+
+    q = _to_jax_tensor(gdn_inputs["q"][:, 0], gdn_jax_device)
+    k = _to_jax_tensor(gdn_inputs["k"][:, 0], gdn_jax_device)
+    v = _to_jax_tensor(gdn_inputs["v"][:, 0], gdn_jax_device)
+    g = _to_jax_tensor(gdn_inputs["g"][:, 0], gdn_jax_device)
+    beta = _to_jax_tensor(gdn_inputs["beta"][:, 0], gdn_jax_device)
+    h0 = _to_jax_tensor(gdn_inputs["h0"], gdn_jax_device)
+
+    out_factory, state_factory = op(
+        q, k, v, g, beta, initial_state=h0, output_final_state=True
+    )
+    out_ref, state_ref = gdn_native_single_step(
+        q, k, v, g, beta, initial_state=h0, output_final_state=True
+    )
+
+    assert_allclose_with_stats(
+        out_ref, out_factory, "factory single step output", atol=1e-4, rtol=1e-3
+    )
+    assert_allclose_with_stats(
+        state_ref, state_factory, "factory single step state", atol=1e-4, rtol=1e-3
+    )

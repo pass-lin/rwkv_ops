@@ -74,6 +74,7 @@ MANIFEST.in                  # 源码分发清单
 | `RWKV_OPS_PALLAS_AUTOTUNE` | Pallas autotune 开关 | `1` / `0` | `0` | — |
 | `RWKV_OPS_KERAS_NATIVE` | 强制 native 为纯 keras ops | `1` / `0` | `0` | — |
 | `RWKV_OPS_PALLAS_BACKEND` | Pallas 后端强制覆盖 | `default` / `mgpu` / `triton` | — | — |
+| `RWKV_OPS_TRITON_MAX_BV` | recurrent Triton kernel 的 value 方向 block 上限 | 正整数 | `32` | — |
 
 选择逻辑（见 `rwkv_ops/__init__.py`）：
 
@@ -1072,6 +1073,30 @@ __global__ void wkv7_forward(...)
 13. **显式传 `BK`/`BV` 等 `tl.constexpr` 时，值必须在 autotune config 中存在**：
     否则 autotune prune 会报 "No valid autotuner configs"。`fwd_h` /
     `bwd_dhu` 的 autotune config 只含 `BV=64`，不要传 `BV=128`。
+14. **`jax_triton` 遇到 `@triton.autotune` 会在真实张量上把每个 config 各编译、
+    计时一遍**：recurrent kernel 沿 `T` 串行展开，十余组 config 等于把一次调用
+    放大成十余次完整编译，首调可长到分钟级。JAX 侧统一走
+    `rwkv_ops/triton_launch.py` 的 `triton_call`（取 `Autotuner.fn`、固定
+    `num_warps`/`num_stages`），torch 侧保留 autotune。同一路径还会因
+    `config.pre_hook` 直接抛 `NotImplementedError`，带 `atomic_add` 的反向
+    kernel 不要挂 autotune pre_hook。拆 Autotuner 时还必须把 config 里的
+    constexpr 补回调用参数：RWKV-7 的 `MINI_BSZ` 只写在 config 里，漏掉会让
+    磁盘上的 grid lambda 取不到 `meta["MINI_BSZ"]` 而报 `KeyError`。
+15. **`sharding_rule` 的操作数必须与 `custom_partitioning` 的动态参数逐项对齐**：
+    个数一致只是下限，顺序错位会静默算错。SANE recurrent 反向的参数是
+    `q, k, v, g, beta, dy, dht, kv_mem, inv_norm_q, inv_norm_k, h0,
+    state_chkp, tau, mask`，其中 `inv_norm_q`/`inv_norm_k` 各占一个 `b n t`，
+    漏写会让尾部整段错位；DeltaNet 没有 `g`，个数相应减一。规则右侧的结果个数
+    也必须等于 launcher 真正的返回值个数：SANE recurrent 前向只返回
+    `out, kv_mem, state_chkp, inv_norm_q, inv_norm_k` 五个（`STORE_FINAL_STATE=False`，
+    不返回 `ht`），规则里多写一个结果会报 "Sharding rule has N results, but the
+    operation has M results"。
+16. **分片用例的 `PartitionSpec` 按公开接口布局写，不按内部 hf 布局写**：
+    GDN/DeltaNet 的公开入口 `q/k/v` 是 `[B, T, H, *]`（内部才 `_transpose_head`
+    成 `[B, N, T, K]`），head 轴下标是 2；`tau` 是 `[B, T//chunk_size, H]`，
+    `mask` 是 `[B, T//chunk_size]`。1-device mesh 上写错下标不会报错（分片是
+    恒等映射），只有在 ≥2 卡上才会暴露成 "Mismatch in result shapes"。回归用例
+    必须用真 2 卡跑一次，否则等于没测。
 
 ---
 

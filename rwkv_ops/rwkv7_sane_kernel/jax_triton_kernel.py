@@ -10,11 +10,10 @@ import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
 
-import jax_triton as jt
-
 from jax.experimental.custom_partitioning import custom_partitioning
 from jax.sharding import NamedSharding, PartitionSpec
 
+from ..triton_launch import triton_call
 from .triton_kernel import (
     rwkv7_sane_bwd_kernel,
     rwkv7_sane_bwd_kernel_with_mask,
@@ -185,7 +184,7 @@ def _wkv7_sane_fwd_triton_call(r, w, k, v, a, b, tau, h0, chunk_size: int):
     def grid(meta):
         return ((B + meta["MINI_BSZ"] - 1) // meta["MINI_BSZ"], N)
 
-    out, sa_out, state_chkp = jt.triton_call(
+    out, sa_out, state_chkp = triton_call(
         r,
         w,
         k,
@@ -238,7 +237,7 @@ def _wkv7_sane_bwd_triton_call(
     def grid(meta):
         return ((B + meta["MINI_BSZ"] - 1) // meta["MINI_BSZ"], N)
 
-    dr, dw, dk, dv, da, db, dtau, dh0 = jt.triton_call(
+    dr, dw, dk, dv, da, db, dtau, dh0 = triton_call(
         r,
         w,
         k,
@@ -328,7 +327,7 @@ def _wkv7_sane_fwd_with_mask_triton_call(
     def grid(meta):
         return ((B + meta["MINI_BSZ"] - 1) // meta["MINI_BSZ"], N)
 
-    out, sa_out, state_chkp = jt.triton_call(
+    out, sa_out, state_chkp = triton_call(
         r,
         w,
         k,
@@ -384,7 +383,7 @@ def _wkv7_sane_bwd_with_mask_triton_call(
     def grid(meta):
         return ((B + meta["MINI_BSZ"] - 1) // meta["MINI_BSZ"], N)
 
-    dr, dw, dk, dv, da, db, dtau, dh0 = jt.triton_call(
+    dr, dw, dk, dv, da, db, dtau, dh0 = triton_call(
         r,
         w,
         k,

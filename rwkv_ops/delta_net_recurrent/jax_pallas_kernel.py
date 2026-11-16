@@ -163,7 +163,7 @@ def _make_delta_net_recurrent_fwd_kernel(chunk_size: int):
         b = pl.program_id(0)
         h = pl.program_id(1)
         num_chunks = q_ref.shape[2] // chunk_size
-        scale = jnp.float32(q_ref.shape[3]) ** -0.5
+        scale = q_ref.shape[3] ** -0.5
         eps = jnp.float32(1e-6)
 
         state = h0_ref[b, h].astype(jnp.float32)
@@ -232,7 +232,7 @@ def _make_delta_net_recurrent_bwd_kernel(chunk_size: int):
         b = pl.program_id(0)
         h = pl.program_id(1)
         num_chunks = q_ref.shape[2] // chunk_size
-        scale = jnp.float32(q_ref.shape[3]) ** -0.5
+        scale = q_ref.shape[3] ** -0.5
 
         dS = dht_ref[b, h].astype(jnp.float32)
 
@@ -323,7 +323,7 @@ def _delta_net_recurrent_inf_kernel(
     b = pl.program_id(0)
     h = pl.program_id(1)
     T = q_ref.shape[2]
-    scale = jnp.float32(q_ref.shape[3]) ** -0.5
+    scale = q_ref.shape[3] ** -0.5
     eps = jnp.float32(1e-6)
 
     state = h0_ref[b, h].astype(jnp.float32)
@@ -366,7 +366,7 @@ def _delta_net_recurrent_single_step_kernel(
     """
     b = pl.program_id(0)
     h = pl.program_id(1)
-    scale = jnp.float32(q_ref.shape[2]) ** -0.5
+    scale = q_ref.shape[2] ** -0.5
     eps = jnp.float32(1e-6)
 
     state = h0_ref[b, h].astype(jnp.float32)

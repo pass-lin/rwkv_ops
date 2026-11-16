@@ -247,7 +247,7 @@ def _make_gdn_recurrent_sane_fwd_kernel(chunk_size: int):
         b = pl.program_id(0)
         h = pl.program_id(1)
         num_chunks = q_ref.shape[2] // chunk_size
-        scale = jax.lax.rsqrt(jnp.float32(q_ref.shape[3]))
+        scale = q_ref.shape[3] ** -0.5
         eps = jnp.float32(1e-6)
 
         state = h0_ref[b, h].astype(jnp.float32)
@@ -323,7 +323,7 @@ def _make_gdn_recurrent_sane_fwd_kernel_no_mask(chunk_size: int):
         b = pl.program_id(0)
         h = pl.program_id(1)
         num_chunks = q_ref.shape[2] // chunk_size
-        scale = jax.lax.rsqrt(jnp.float32(q_ref.shape[3]))
+        scale = q_ref.shape[3] ** -0.5
         eps = jnp.float32(1e-6)
 
         state = h0_ref[b, h].astype(jnp.float32)
@@ -403,7 +403,7 @@ def _make_gdn_recurrent_sane_bwd_kernel(chunk_size: int):
         b = pl.program_id(0)
         h = pl.program_id(1)
         num_chunks = q_ref.shape[2] // chunk_size
-        scale = jax.lax.rsqrt(jnp.float32(q_ref.shape[3]))
+        scale = q_ref.shape[3] ** -0.5
 
         dS = dht_ref[b, h].astype(jnp.float32)
 
@@ -531,7 +531,7 @@ def _make_gdn_recurrent_sane_bwd_kernel_no_mask(chunk_size: int):
         b = pl.program_id(0)
         h = pl.program_id(1)
         num_chunks = q_ref.shape[2] // chunk_size
-        scale = jax.lax.rsqrt(jnp.float32(q_ref.shape[3]))
+        scale = q_ref.shape[3] ** -0.5
 
         dS = dht_ref[b, h].astype(jnp.float32)
 
@@ -645,7 +645,7 @@ def _make_gdn_recurrent_sane_inf_kernel(chunk_size: int):
         b = pl.program_id(0)
         h = pl.program_id(1)
         T = q_ref.shape[2]
-        scale = jax.lax.rsqrt(jnp.float32(q_ref.shape[3]))
+        scale = q_ref.shape[3] ** -0.5
         eps = jnp.float32(1e-6)
         num_chunks = T // chunk_size
         rem = T - num_chunks * chunk_size
@@ -715,7 +715,7 @@ def _make_gdn_recurrent_sane_inf_kernel_no_mask(chunk_size: int):
         b = pl.program_id(0)
         h = pl.program_id(1)
         T = q_ref.shape[2]
-        scale = jax.lax.rsqrt(jnp.float32(q_ref.shape[3]))
+        scale = q_ref.shape[3] ** -0.5
         eps = jnp.float32(1e-6)
         num_chunks = T // chunk_size
         rem = T - num_chunks * chunk_size
@@ -780,7 +780,7 @@ def _gdn_recurrent_sane_single_step_kernel(
     """
     b = pl.program_id(0)
     h = pl.program_id(1)
-    scale = jax.lax.rsqrt(jnp.float32(q_ref.shape[2]))
+    scale = q_ref.shape[2] ** -0.5
     eps = jnp.float32(1e-6)
 
     state = h0_ref[b, h].astype(jnp.float32)

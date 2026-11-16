@@ -405,11 +405,11 @@ def test_gdn_triton_sane_head_sharding(gdn_sane_inputs, gdn_sane_jax_triton_devi
     devices = jax.devices()
     mesh = Mesh(devices, ("h",))
 
-    # Triton 内部为 head-first [B, N, T, K]/[B, N, T, V]。
-    q_spec = PartitionSpec(None, "h", None, None)
-    v_spec = PartitionSpec(None, "h", None, None)
-    gb_spec = PartitionSpec(None, "h", None)
-    tau_spec = PartitionSpec(None, "h", None)
+    # 公开接口布局为 [B, T, H, *]，head 维下标 2；Triton 内部才转 head-first。
+    q_spec = PartitionSpec(None, None, "h", None)
+    v_spec = PartitionSpec(None, None, "h", None)
+    gb_spec = PartitionSpec(None, None, "h")
+    tau_spec = PartitionSpec(None, None, "h")
     mask_spec = PartitionSpec(None, None)
     h0_spec = PartitionSpec(None, "h", None, None)
 
@@ -454,7 +454,11 @@ def test_gdn_triton_sane_head_sharding(gdn_sane_inputs, gdn_sane_jax_triton_devi
 
     run_sharded = jax.jit(run, in_shardings=in_shardings)
     out_ref, state_ref = run(q, k, v, g, beta, tau, mask, h0)
-    out_s, state_s = run_sharded(q, k, v, g, beta, tau, mask, h0)
+    sharded_args = tuple(
+        jax.device_put(arg, sharding)
+        for arg, sharding in zip((q, k, v, g, beta, tau, mask, h0), in_shardings)
+    )
+    out_s, state_s = run_sharded(*sharded_args)
 
     assert_allclose_with_stats(
         out_ref, out_s, "triton sane head tp output", atol=1e-4, rtol=1e-3
@@ -751,3 +755,45 @@ def test_gdn_triton_sane_output_final_state_false_ignores_mask(
         atol=1e-2,
         rtol=1e-2,
     )
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+def test_gdn_triton_sane_head_sharding_backward(
+    gdn_sane_inputs, gdn_sane_jax_triton_device
+):
+    """head 轴 TP 下 SANE 反向规则与动态参数逐项对齐，梯度与非分片一致。"""
+    mesh = Mesh(jax.devices(), ("h",))
+    q_spec = PartitionSpec(None, None, "h", None)
+    gb_spec = PartitionSpec(None, None, "h")
+    tau_spec = PartitionSpec(None, None, "h")
+    h0_spec = PartitionSpec(None, "h", None, None)
+
+    q, k, v, g, beta, tau, mask, h0 = _prepare_sane_inputs(
+        gdn_sane_inputs, gdn_sane_jax_triton_device, dtype="bfloat16"
+    )
+
+    def loss_fn(q, k, v, g, beta, tau, h0):
+        return _sane_loss_fn(gdn_triton_recurrent, q, k, v, g, beta, tau, mask, h0)
+
+    grad_fn = jax.value_and_grad(loss_fn, argnums=(0, 1, 2, 3, 4, 5, 6))
+    ref_loss, ref_grads = grad_fn(q, k, v, g, beta, tau, h0)
+
+    in_shardings = tuple(
+        NamedSharding(mesh, spec)
+        for spec in (q_spec, q_spec, q_spec, gb_spec, gb_spec, tau_spec, h0_spec)
+    )
+    tp_loss, tp_grads = jax.jit(grad_fn, in_shardings=in_shardings)(
+        *tuple(
+            jax.device_put(arg, sharding)
+            for arg, sharding in zip((q, k, v, g, beta, tau, h0), in_shardings)
+        )
+    )
+
+    assert_allclose_with_stats(ref_loss, tp_loss, "loss head tp", atol=1e-3, rtol=1e-3)
+    for name, ref_grad, tp_grad in zip(
+        ("q", "k", "v", "g", "beta", "tau", "h0"), ref_grads, tp_grads
+    ):
+        assert_allclose_with_stats(
+            ref_grad, tp_grad, f"grad_{name} head tp", atol=7e-3, rtol=1e-3
+        )

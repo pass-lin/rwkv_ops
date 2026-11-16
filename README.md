@@ -107,6 +107,7 @@ pip install rwkv_ops
 | `KERNEL_TYPE` | 实现类型 | `triton` / `cuda` / `native` | `cuda` | — |
 | `RWKV_OPS_PALLAS_AUTOTUNE` | Pallas autotune 开关 | `1` / `0` | `0` | — |
 | `RWKV_OPS_KERAS_NATIVE` | 强制 native 为纯 keras ops | `1` / `0` | `0` | — |
+| `RWKV_OPS_TRITON_MAX_BV` | recurrent Triton kernel 的 value 方向 block 上限 | 正整数 | `32` | — |
 
 > `KERNEL_TYPE=native` 时按后端与平台分发实现：jax + GPU/TPU 用 Pallas kernel（rwkv7/rwkv7_sane）；torch + 非 CPU 用 Triton kernel（rwkv7/rwkv7_sane/mhc，pip 版 torch 自带 triton）；其余（CPU、mhc 的 jax 侧等）为纯 Keras ops。设 `RWKV_OPS_KERAS_NATIVE=1` 可强制全部为纯 Keras ops（调试用）。
 

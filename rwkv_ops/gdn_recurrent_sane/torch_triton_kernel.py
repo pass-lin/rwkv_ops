@@ -5,6 +5,7 @@ import warnings
 import torch
 import triton
 
+from ..triton_launch import MAX_BV
 from .triton_kernel import (
     gated_delta_net_recurrent_sane_bwd_kernel,
     gated_delta_net_recurrent_sane_bwd_kernel_no_mask,
@@ -127,7 +128,7 @@ def _make_gated_delta_net_recurrent_sane_triton_function(chunk_size):
             h0 = _prepare_initial_state(initial_state, B, H, K, V, q.device)
 
             BK = triton.next_power_of_2(K)
-            BV = min(128, triton.next_power_of_2(V))
+            BV = min(MAX_BV, triton.next_power_of_2(V))
             grid = _make_recurrent_grid(B, H, V, BV)
 
             if use_mask:
@@ -277,7 +278,7 @@ def _make_gated_delta_net_recurrent_sane_triton_function(chunk_size):
                 dht = torch.empty(B, H, K, V, dtype=torch.float32, device=q.device)
 
             BK = triton.next_power_of_2(K)
-            BV = min(128, triton.next_power_of_2(V))
+            BV = min(MAX_BV, triton.next_power_of_2(V))
             grid = _make_recurrent_grid(B, H, V, BV)
 
             if use_mask:
@@ -423,7 +424,7 @@ def _make_gated_delta_net_recurrent_sane_inference_triton_function(chunk_size):
             h0 = _prepare_initial_state(initial_state, B, H, K, V, q.device)
 
             BK = triton.next_power_of_2(K)
-            BV = min(128, triton.next_power_of_2(V))
+            BV = min(MAX_BV, triton.next_power_of_2(V))
             grid = _make_recurrent_grid(B, H, V, BV)
 
             if use_mask:
@@ -541,7 +542,7 @@ class GatedDeltaNetRecurrentSaneSingleStepTritonFunction(torch.autograd.Function
         h0 = _prepare_initial_state(initial_state, B, H, K, V, q.device)
 
         BK = triton.next_power_of_2(K)
-        BV = min(128, triton.next_power_of_2(V))
+        BV = min(MAX_BV, triton.next_power_of_2(V))
         grid = (triton.cdiv(V, BV) * B * H,)
 
         gated_delta_net_recurrent_sane_single_step_fwd_kernel[grid](
