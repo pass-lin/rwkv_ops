@@ -7,6 +7,7 @@ pytest.importorskip("jax_triton")
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from rwkv_ops.gdn_recurrent.native_keras_op import (
     gated_delta_net_recurrent as gdn_native_recurrent,
@@ -337,3 +338,51 @@ def test_gdn_triton_single_step_chunk_size(gdn_inputs, gdn_jax_device):
         atol=1e-4,
         rtol=1e-3,
     )
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+def test_gdn_triton_head_sharding_backward(gdn_inputs, gdn_jax_device):
+    """head 轴 TP 下 recurrent 反向规则与动态参数逐项对齐，梯度与非分片一致。"""
+    mesh = Mesh(jax.devices(), ("h",))
+    q_spec = PartitionSpec(None, None, "h", None)
+    gb_spec = PartitionSpec(None, None, "h")
+    h0_spec = PartitionSpec(None, "h", None, None)
+
+    q = _to_jax_tensor(gdn_inputs["q"], gdn_jax_device, jnp.bfloat16)
+    k = _to_jax_tensor(gdn_inputs["k"], gdn_jax_device, jnp.bfloat16)
+    v = _to_jax_tensor(gdn_inputs["v"], gdn_jax_device, jnp.bfloat16)
+    g = _to_jax_tensor(gdn_inputs["g"], gdn_jax_device, jnp.float32)
+    beta = _to_jax_tensor(gdn_inputs["beta"], gdn_jax_device, jnp.float32)
+    h0 = _to_jax_tensor(gdn_inputs["h0"], gdn_jax_device, jnp.float32)
+
+    ref_loss, ref_grads = _gdn_value_and_grad(
+        gdn_triton_recurrent, q, k, v, g, beta, h0
+    )
+
+    in_shardings = tuple(
+        NamedSharding(mesh, spec)
+        for spec in (q_spec, q_spec, q_spec, gb_spec, gb_spec, h0_spec)
+    )
+
+    def loss_fn(q, k, v, g, beta, h0):
+        out, state = gdn_triton_recurrent(
+            q, k, v, g, beta, initial_state=h0, output_final_state=True
+        )
+        return jnp.mean(out.astype(jnp.float32) ** 2) + jnp.mean(state**2)
+
+    grad_fn = jax.value_and_grad(loss_fn, argnums=(0, 1, 2, 3, 4, 5))
+    tp_loss, tp_grads = jax.jit(grad_fn, in_shardings=in_shardings)(
+        *tuple(
+            jax.device_put(arg, sharding)
+            for arg, sharding in zip((q, k, v, g, beta, h0), in_shardings)
+        )
+    )
+
+    assert_allclose_with_stats(ref_loss, tp_loss, "loss head tp", atol=1e-3, rtol=1e-3)
+    for name, ref_grad, tp_grad in zip(
+        ("q", "k", "v", "g", "beta", "h0"), ref_grads, tp_grads
+    ):
+        assert_allclose_with_stats(
+            ref_grad, tp_grad, f"grad_{name} head tp", atol=7e-3, rtol=1e-3
+        )

@@ -1,5 +1,6 @@
 """公共 pytest 配置与共享工具函数。"""
 
+import contextlib
 import sys
 from pathlib import Path
 
@@ -475,3 +476,26 @@ def assert_allclose_with_stats(
         rtol=rtol,
         err_msg=f"{name} 数值不一致",
     )
+
+
+@contextlib.contextmanager
+def pallas_triton_backend():
+    """把 Pallas 后端临时固定为 Triton，退出时恢复原配置并清空探针缓存。
+
+    分片用例必须固定后端：默认/Mosaic GPU 后端在 custom_partitioning 内部执行时
+    会请求数十 GiB 的 scratch 显存，多卡 head-TP 场景必定 OOM，掩盖分片规则本身的
+    正确性。这里只影响后端选择，不改变被断言的数值与 sharding 结果。
+
+    Yields:
+        None。with 块内 Pallas 后端为 Triton。
+    """
+    from rwkv_ops import pallas_utils
+
+    saved_backend = pallas_utils._PALLAS_BACKEND_ENV
+    pallas_utils._PALLAS_BACKEND_ENV = "triton"
+    pallas_utils._config_cache.clear()
+    try:
+        yield
+    finally:
+        pallas_utils._PALLAS_BACKEND_ENV = saved_backend
+        pallas_utils._config_cache.clear()

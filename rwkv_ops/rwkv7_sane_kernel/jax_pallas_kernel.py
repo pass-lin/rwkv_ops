@@ -16,25 +16,27 @@ from ..pallas_utils import create_partition, ensure_config, launch
 
 
 #  SPMD 切分规则（Einsum 风格）
-# b=Batch, n=Head, t=Time, h=HeadDim, c=Chunk
+# b=Batch, n=Head, t=Time, h=KeyDim, m=ValueDim, c=Chunk
+# h 与 m 必须是两个因子：同一个操作数里重复使用同一因子（[b n h h]）会被
+# StableHLO verifier 判成 "cannot reuse factors for the same tensor value"。
 FWD_RULE = (
-    "b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n c, b n h h -> "
-    "b n t h, b n t h, b n c h h"
+    "b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n c, b n h m -> "
+    "b n t h, b n t h, b n c h m"
 )
 BWD_RULE = (
-    "b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n c h h, "
-    "b n c, b n t h, b n h h -> b n t h, b n t h, b n t h, b n t h, b n t h, "
-    "b n t h, b n c, b n h h"
+    "b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n c h m, "
+    "b n c, b n t h, b n h m -> b n t h, b n t h, b n t h, b n t h, b n t h, "
+    "b n t h, b n c, b n h m"
 )
 
 FWD_MASK_RULE = (
-    "b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n c, b c, b n h h -> "
-    "b n t h, b n t h, b n c h h"
+    "b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n c, b c, b n h m -> "
+    "b n t h, b n t h, b n c h m"
 )
 BWD_MASK_RULE = (
-    "b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n c h h, "
-    "b n c, b c, b n t h, b n h h -> b n t h, b n t h, b n t h, b n t h, b n t h, "
-    "b n t h, b n c, b n h h"
+    "b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n t h, b n c h m, "
+    "b n c, b c, b n t h, b n h m -> b n t h, b n t h, b n t h, b n t h, b n t h, "
+    "b n t h, b n c, b n h m"
 )
 
 

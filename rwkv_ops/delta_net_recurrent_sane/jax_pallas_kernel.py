@@ -19,31 +19,29 @@ from ..pallas_utils import create_partition, ensure_config, launch
 # b=Batch, n=Head, t=Time, k=HeadK, v=HeadV, c=Chunk
 # 训练前向：tau 带 head 维可 TP，mask 无 head 维需 replicate。
 FWD_RULE = (
-    "b n t k, b n t k, b n t v, b n t, b n t, b n c, b c, b n k v -> "
+    "b n t k, b n t k, b n t v, b n t, b n c, b c, b n k v -> "
     "b n t v, b n t v, b n c k v, b n t, b n t"
 )
 BWD_RULE = (
-    "b n t k, b n t k, b n t v, b n t, b n t, b n t v, b n k v, "
-    "b n t v, b n t, b n c k v, b n k v, b n c, b c -> "
-    "b n t k, b n t k, b n t v, b n t, b n t, b n k v, b n c"
+    "b n t k, b n t k, b n t v, b n t, b n t v, b n k v, "
+    "b n t v, b n t, b n t, b n c k v, b n k v, b n c, b c -> "
+    "b n t k, b n t k, b n t v, b n t, b n k v, b n c"
 )
-INF_RULE = (
-    "b n t k, b n t k, b n t v, b n t, b n t, b n c, b c, b n k v -> b n t v, b n k v"
-)
-SINGLE_RULE = "b n k, b n k, b n v, b n, b n, b n, b, b n k v -> b n v, b n k v"
+INF_RULE = "b n t k, b n t k, b n t v, b n t, b n c, b c, b n k v -> b n t v, b n k v"
+SINGLE_RULE = "b n k, b n k, b n v, b n, b n, b, b n k v -> b n v, b n k v"
 
 # 无 mask 版本规则：去掉 mask 的 `b c` 项，chunk 边界无条件 SANE。
 FWD_RULE_NO_MASK = (
-    "b n t k, b n t k, b n t v, b n t, b n t, b n c, b n k v -> "
+    "b n t k, b n t k, b n t v, b n t, b n c, b n k v -> "
     "b n t v, b n t v, b n c k v, b n t, b n t"
 )
 BWD_RULE_NO_MASK = (
-    "b n t k, b n t k, b n t v, b n t, b n t, b n t v, b n k v, "
-    "b n t v, b n t, b n c k v, b n k v, b n c -> "
-    "b n t k, b n t k, b n t v, b n t, b n t, b n k v, b n c"
+    "b n t k, b n t k, b n t v, b n t, b n t v, b n k v, "
+    "b n t v, b n t, b n t, b n c k v, b n k v, b n c -> "
+    "b n t k, b n t k, b n t v, b n t, b n k v, b n c"
 )
 INF_RULE_NO_MASK = (
-    "b n t k, b n t k, b n t v, b n t, b n t, b n c, b n k v -> b n t v, b n k v"
+    "b n t k, b n t k, b n t v, b n t, b n c, b n k v -> b n t v, b n k v"
 )
 
 
@@ -131,7 +129,6 @@ def _bwd_infer_sharding(*args):
         _sharding_like_q(qs),
         _sharding_like_q(qs),
         _sharding_like_v(qs),
-        _sharding_for_gb(qs),
         _sharding_for_gb(qs),
         _sharding_for_final_state(qs),
         _sharding_for_tau(qs),

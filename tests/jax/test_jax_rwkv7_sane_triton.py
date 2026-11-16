@@ -319,9 +319,9 @@ def test_rwkv7_sane_triton_head_sharding(rwkv7_sane_jax_triton_op, rwkv7_sane_in
     devices = jax.devices()
     mesh = Mesh(devices, ("h",))
 
-    # triton 内部是 head-first [B, N, T, H]
-    q_spec = PartitionSpec(None, "h", None, None)
-    tau_spec = PartitionSpec(None, "h", None)
+    # 公开接口布局为 [B, T, H, *]，head 维下标 2；triton 内部才转 head-first。
+    q_spec = PartitionSpec(None, None, "h", None)
+    tau_spec = PartitionSpec(None, None, "h")
     h0_spec = PartitionSpec(None, "h", None, None)
     mask_spec = PartitionSpec(None, None)
 
@@ -358,12 +358,124 @@ def test_rwkv7_sane_triton_head_sharding(rwkv7_sane_jax_triton_op, rwkv7_sane_in
 
     run_sharded = jax.jit(run, in_shardings=in_shardings)
     y_ref, s_ref = run(r, w, k, v, a, b, tau, mask, h0)
-    y_s, s_s = run_sharded(r, w, k, v, a, b, tau, mask, h0)
+    sharded_args = tuple(
+        jax.device_put(arg, sharding)
+        for arg, sharding in zip((r, w, k, v, a, b, tau, mask, h0), in_shardings)
+    )
+    y_s, s_s = run_sharded(*sharded_args)
 
     _test_is_close("y_head_tp", y_ref, y_s, atol=1e-4, rtol=1e-2)
     _test_is_close("final_state_head_tp", s_ref, s_s, atol=1e-5, rtol=1e-3)
 
     assert y_s.sharding.mesh.axis_names == ("h",)
+
+
+def _sane_public_specs(mesh):
+    """按公开接口布局构造 head 分片用的 NamedSharding 集合。"""
+    return {
+        "q": NamedSharding(mesh, PartitionSpec(None, None, "h", None)),
+        "tau": NamedSharding(mesh, PartitionSpec(None, None, "h")),
+        "h0": NamedSharding(mesh, PartitionSpec(None, "h", None, None)),
+        "mask": NamedSharding(mesh, PartitionSpec(None, None)),
+    }
+
+
+def _sane_grad_fn(op, mask):
+    """构造 SANE 输出与 final_state 的标量 loss 梯度函数（mask 为 None 时走无 mask 路径）。"""
+
+    def loss(w, r, k, v, a, b_, tau, m, h0):
+        y, state = op(
+            r=r,
+            w=w,
+            k=k,
+            v=v,
+            a=a,
+            b=b_,
+            tau=tau,
+            mask=m,
+            initial_state=h0,
+            output_final_state=True,
+            head_first=False,
+        )
+        return jnp.mean(jnp.asarray(y, jnp.float32) ** 2) + jnp.mean(
+            jnp.asarray(state, jnp.float32) ** 2
+        )
+
+    if mask is None:
+
+        def loss_no_mask(w, r, k, v, a, b_, tau, h0):
+            # mask 为 None 时算子按规则不返回 final_state，loss 只取输出。
+            y, _ = op(
+                r=r,
+                w=w,
+                k=k,
+                v=v,
+                a=a,
+                b=b_,
+                tau=tau,
+                mask=None,
+                initial_state=h0,
+                output_final_state=True,
+                head_first=False,
+            )
+            return jnp.mean(jnp.asarray(y, jnp.float32) ** 2)
+
+        return jax.grad(loss_no_mask, argnums=range(8))
+
+    return jax.grad(loss, argnums=(0, 1, 2, 3, 4, 5, 6, 8))
+
+
+def _check_sharded_grads(grad_fn, args, shardings, tag):
+    """对比分片与单卡梯度，并断言梯度确实落在 head 轴上。"""
+    ref = grad_fn(*args)
+    sharded = jax.jit(grad_fn, in_shardings=shardings)(
+        *[jax.device_put(arg, sharding) for arg, sharding in zip(args, shardings)]
+    )
+    for name, g_ref, g_s in zip(
+        ("w", "r", "k", "v", "a", "b", "tau", "h0"), ref, sharded
+    ):
+        assert_allclose_with_stats(
+            g_ref, g_s, f"grad_{name}_{tag}", atol=2e-2, rtol=1e-2
+        )
+    for grad in sharded:
+        assert grad.sharding.mesh.axis_names == ("h",)
+
+
+@pytest.mark.jax
+def test_rwkv7_sane_triton_head_sharding_backward(
+    rwkv7_sane_jax_triton_op, rwkv7_sane_inputs
+):
+    """验证带 mask 的反向可以沿 head 轴分片（覆盖 BWD_MASK_RULE）。"""
+    mesh = Mesh(jax.devices(), ("h",))
+    spec = _sane_public_specs(mesh)
+    r, k, v, a, b, w, tau, mask, h0 = _prepare_inputs(
+        rwkv7_sane_inputs, head_first=False, dtype="bfloat16"
+    )
+    args = (w, r, k, v, a, b, tau, mask, h0)
+    shardings = (spec["q"],) * 6 + (spec["tau"], spec["mask"], spec["h0"])
+    _check_sharded_grads(
+        _sane_grad_fn(rwkv7_sane_jax_triton_op, mask), args, shardings, "head_tp"
+    )
+
+
+@pytest.mark.jax
+def test_rwkv7_sane_triton_head_sharding_backward_no_mask(
+    rwkv7_sane_jax_triton_op, rwkv7_sane_inputs
+):
+    """验证无 mask 的反向可以沿 head 轴分片（覆盖 BWD_RULE）。"""
+    mesh = Mesh(jax.devices(), ("h",))
+    spec = _sane_public_specs(mesh)
+    r, k, v, a, b, w, tau, _, h0 = _prepare_inputs(
+        rwkv7_sane_inputs, head_first=False, dtype="bfloat16"
+    )
+    args = (w, r, k, v, a, b, tau, h0)
+    shardings = (spec["q"],) * 6 + (spec["tau"], spec["h0"])
+    _check_sharded_grads(
+        _sane_grad_fn(rwkv7_sane_jax_triton_op, None),
+        args,
+        shardings,
+        "head_tp_no_mask",
+    )
 
 
 def _make_tau_mask(B, T, H, chunk_size, rng):

@@ -24,7 +24,7 @@ FWD_RULE = (
 )
 BWD_RULE = (
     "b n t k, b n t k, b n t v, b n t, b n t, b n t v, b n k v, "
-    "b n t v, b n t, b n c k v, b n k v, b n c, b c -> "
+    "b n t v, b n t, b n t, b n c k v, b n k v, b n c, b c -> "
     "b n t k, b n t k, b n t v, b n t, b n t, b n k v, b n c"
 )
 INF_RULE = (
@@ -39,7 +39,7 @@ FWD_RULE_NO_MASK = (
 )
 BWD_RULE_NO_MASK = (
     "b n t k, b n t k, b n t v, b n t, b n t, b n t v, b n k v, "
-    "b n t v, b n t, b n c k v, b n k v, b n c -> "
+    "b n t v, b n t, b n t, b n c k v, b n k v, b n c -> "
     "b n t k, b n t k, b n t v, b n t, b n t, b n k v, b n c"
 )
 INF_RULE_NO_MASK = (

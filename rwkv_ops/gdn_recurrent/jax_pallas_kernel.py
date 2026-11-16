@@ -22,7 +22,7 @@ FWD_RULE = (
 )
 BWD_RULE = (
     "b n t k, b n t k, b n t v, b n t, b n t, b n t v, b n k v, "
-    "b n t v, b n t, b n c k v, b n k v -> "
+    "b n t v, b n t, b n t, b n c k v, b n k v -> "
     "b n t k, b n t k, b n t v, b n t, b n t, b n k v"
 )
 INF_RULE = "b n t k, b n t k, b n t v, b n t, b n t, b n k v -> b n t v, b n k v"

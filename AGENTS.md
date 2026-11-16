@@ -1075,9 +1075,10 @@ __global__ void wkv7_forward(...)
     `bwd_dhu` 的 autotune config 只含 `BV=64`，不要传 `BV=128`。
 14. **`jax_triton` 遇到 `@triton.autotune` 会在真实张量上把每个 config 各编译、
     计时一遍**：recurrent kernel 沿 `T` 串行展开，十余组 config 等于把一次调用
-    放大成十余次完整编译，首调可长到分钟级。JAX 侧统一走
-    `rwkv_ops/triton_launch.py` 的 `triton_call`（取 `Autotuner.fn`、固定
-    `num_warps`/`num_stages`），torch 侧保留 autotune。同一路径还会因
+    放大成十余次完整编译，首调可长到分钟级。recurrent 与 RWKV-7 家族的 JAX
+    侧统一走 `rwkv_ops/triton_launch.py` 的 `triton_call`（取 `Autotuner.fn`、
+    固定 `num_warps`/`num_stages`），torch 侧保留 autotune；chunk 家族移植自 fla，
+    autotune 只有单个 config 且 `BK`/`BV` 由桥接显式传入，不受此影响。同一路径还会因
     `config.pre_hook` 直接抛 `NotImplementedError`，带 `atomic_add` 的反向
     kernel 不要挂 autotune pre_hook。拆 Autotuner 时还必须把 config 里的
     constexpr 补回调用参数：RWKV-7 的 `MINI_BSZ` 只写在 config 里，漏掉会让
@@ -1097,6 +1098,21 @@ __global__ void wkv7_forward(...)
     `mask` 是 `[B, T//chunk_size]`。1-device mesh 上写错下标不会报错（分片是
     恒等映射），只有在 ≥2 卡上才会暴露成 "Mismatch in result shapes"。回归用例
     必须用真 2 卡跑一次，否则等于没测。
+17. **Pallas 桥接的规则同样要与动态参数逐项对齐，且以 Pallas launcher 的返回值
+    为准**：Pallas 与 Triton 的参数顺序并不总是一致（Pallas 反向签名常把
+    `chkp` 放在 `h0` 之前），返回值个数也不同（Pallas 前向多返回 `inv_norm_q`/
+    `inv_norm_k` 两个 `b n t`，不返回 `ht`；DeltaNet-SANE 反向是
+    `dq, dk, dv, dbeta, dh0, dtau` 六个）。抄 Triton 规则时先数 launcher 的
+    `out_shape` 条目与参数表，再改 `infer_sharding_from_operands` 的返回个数——
+    `_bwd_infer_sharding` 少写一项会在 1 卡上照常通过，多卡时报
+    "Sharding rule has N results, but the operation has M results"。
+18. **Pallas + 张量并行目前必须显式指定 `RWKV_OPS_PALLAS_BACKEND=triton`**：
+    默认后端会走 Mosaic GPU lowering，`custom_partitioning` 内部执行时申请
+    59 GiB 级 scratch 显存（与问题形状无关），在 80 GB 卡上直接
+    `RESOURCE_EXHAUSTED`；`pallas_utils._probe_config` 的探测不带分片、且
+    `_resolve_config` 吞掉异常，所以探测阶段发现不了。分片回归用例统一用
+    `tests/conftest.py` 的 `pallas_triton_backend()` 包住，既避开 OOM 又只测
+    分片规则本身。
 
 ---
 

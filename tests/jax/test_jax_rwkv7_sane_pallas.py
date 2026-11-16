@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
-from tests.conftest import assert_allclose_with_stats
+from tests.conftest import assert_allclose_with_stats, pallas_triton_backend
 
 pytest.importorskip("jax.experimental.pallas")
 
@@ -358,9 +358,9 @@ def test_rwkv7_sane_pallas_head_sharding(rwkv7_sane_jax_pallas_op, rwkv7_sane_in
     devices = jax.devices()
     mesh = Mesh(devices, ("h",))
 
-    # pallas 内部是 head-first [B, N, T, H]
-    q_spec = PartitionSpec(None, "h", None, None)
-    tau_spec = PartitionSpec(None, "h", None)
+    # 公开接口布局为 [B, T, H, *]，head 维下标 2；pallas kernel 内部才转 head-first。
+    q_spec = PartitionSpec(None, None, "h", None)
+    tau_spec = PartitionSpec(None, None, "h")
     h0_spec = PartitionSpec(None, "h", None, None)
     mask_spec = PartitionSpec(None, None)
 
@@ -396,13 +396,86 @@ def test_rwkv7_sane_pallas_head_sharding(rwkv7_sane_jax_pallas_op, rwkv7_sane_in
         )
 
     run_sharded = jax.jit(run, in_shardings=in_shardings)
-    y_ref, s_ref = run(r, w, k, v, a, b, tau, mask, h0)
-    y_s, s_s = run_sharded(r, w, k, v, a, b, tau, mask, h0)
+    sharded_args = tuple(
+        jax.device_put(arg, sharding)
+        for arg, sharding in zip((r, w, k, v, a, b, tau, mask, h0), in_shardings)
+    )
+    with pallas_triton_backend():
+        y_ref, s_ref = run(r, w, k, v, a, b, tau, mask, h0)
+        y_s, s_s = run_sharded(*sharded_args)
 
     _test_is_close("y_head_tp", y_ref, y_s, atol=1e-4, rtol=1e-2)
     _test_is_close("final_state_head_tp", s_ref, s_s, atol=1e-5, rtol=1e-3)
 
     assert y_s.sharding.mesh.axis_names == ("h",)
+
+
+@pytest.mark.jax
+@pytest.mark.slow
+def test_rwkv7_sane_pallas_head_sharding_backward(
+    rwkv7_sane_jax_pallas_op, rwkv7_sane_inputs
+):
+    """head 轴 TP 下 Pallas SANE 反向规则与动态参数逐项对齐，梯度与非分片一致。"""
+    mesh = Mesh(jax.devices(), ("h",))
+    q_spec = PartitionSpec(None, None, "h", None)
+    tau_spec = PartitionSpec(None, None, "h")
+    h0_spec = PartitionSpec(None, "h", None, None)
+    mask_spec = PartitionSpec(None, None)
+
+    r, k, v, a, b, w, tau, mask, h0 = _prepare_inputs(
+        rwkv7_sane_inputs, head_first=False, dtype="bfloat16"
+    )
+
+    def loss(w, r, k, v, a, b, tau, mask, h0):
+        y, state = rwkv7_sane_jax_pallas_op(
+            r=r,
+            w=w,
+            k=k,
+            v=v,
+            a=a,
+            b=b,
+            tau=tau,
+            mask=mask,
+            initial_state=h0,
+            output_final_state=True,
+            head_first=False,
+        )
+        return jnp.mean(jnp.asarray(y, jnp.float32) ** 2) + jnp.mean(
+            jnp.asarray(state, jnp.float32) ** 2
+        )
+
+    args = (w, r, k, v, a, b, tau, mask, h0)
+    grad_fn = jax.value_and_grad(loss, argnums=range(9))
+    in_shardings = tuple(
+        NamedSharding(mesh, spec)
+        for spec in (
+            q_spec,
+            q_spec,
+            q_spec,
+            q_spec,
+            q_spec,
+            q_spec,
+            tau_spec,
+            mask_spec,
+            h0_spec,
+        )
+    )
+    with pallas_triton_backend():
+        ref_loss, ref_grads = grad_fn(*args)
+        tp_loss, tp_grads = jax.jit(grad_fn, in_shardings=in_shardings)(
+            *tuple(
+                jax.device_put(arg, sharding)
+                for arg, sharding in zip(args, in_shardings)
+            )
+        )
+
+    assert_allclose_with_stats(ref_loss, tp_loss, "loss head tp", atol=1e-3, rtol=1e-3)
+    for name, g_ref, g_c in zip(
+        ("w", "r", "k", "v", "a", "b", "tau", "mask", "h0"), ref_grads, tp_grads
+    ):
+        assert_allclose_with_stats(
+            g_ref, g_c, f"grad_{name}_head_tp", atol=7e-3, rtol=1e-3
+        )
 
 
 @pytest.mark.jax
